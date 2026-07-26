@@ -61,6 +61,11 @@ export type Settlement = {
   amount?: number
 }
 
+export type Reversal = {
+  txn_id: string
+  date: string
+}
+
 export type SubmitResult =
   | { ok: true; alreadyRecorded: boolean }
   | { ok: false; kind: 'network' | 'auth' | 'backend'; message: string }
@@ -239,6 +244,52 @@ export async function settleReceivable(
     response = await post(
       '/api/settle',
       { ...settlement, idempotencyKey },
+      fetchFn,
+    )
+  } catch (error) {
+    const timedOut = error instanceof DOMException && error.name === 'AbortError'
+    return {
+      ok: false,
+      kind: 'network',
+      message: timedOut ? '連線逾時，請再試一次' : '沒有網路連線，請再試一次',
+    }
+  }
+
+  if (response.status === 401) {
+    return { ok: false, kind: 'auth', message: '登入已過期' }
+  }
+
+  let body: { ok?: boolean; already?: boolean; error?: string }
+  try {
+    body = await response.json() as typeof body
+  } catch {
+    return {
+      ok: false,
+      kind: 'backend',
+      message: `伺服器錯誤 (${response.status})`,
+    }
+  }
+
+  if (body.ok === true || body.already === true) {
+    return { ok: true, alreadyRecorded: body.already === true }
+  }
+  return {
+    ok: false,
+    kind: 'backend',
+    message: body.error ?? `伺服器錯誤 (${response.status})`,
+  }
+}
+
+export async function reverseTransaction(
+  reversal: Reversal,
+  idempotencyKey: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<SubmitResult> {
+  let response: Response
+  try {
+    response = await post(
+      '/api/reverse_transaction',
+      { ...reversal, idempotencyKey },
       fetchFn,
     )
   } catch (error) {

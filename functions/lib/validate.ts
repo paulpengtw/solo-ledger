@@ -31,6 +31,15 @@ type SettlementValidationResult =
   | { ok: true; settlement: Settlement }
   | { ok: false; error: string }
 
+export type Reversal = {
+  txn_id: string
+  date: string
+}
+
+type ReversalValidationResult =
+  | { ok: true; reversal: Reversal }
+  | { ok: false; error: string }
+
 const TYPES = new Set(['支出', '收入', '轉帳'])
 const IOU_TYPES = new Set(['應收', '應付'])
 const OPTIONAL_STRING_FIELDS = [
@@ -143,6 +152,34 @@ export function validateSettlement(input: unknown): SettlementValidationResult {
     settlement.amount = candidate.amount
   }
   return { ok: true, settlement }
+}
+
+export function validateReversal(input: unknown): ReversalValidationResult {
+  if (typeof input !== 'object' || input === null) {
+    return { ok: false, error: 'invalid txn_id' }
+  }
+  const candidate = input as Record<string, unknown>
+
+  if (
+    typeof candidate.txn_id !== 'string'
+    || candidate.txn_id.trim() === ''
+  ) {
+    return { ok: false, error: 'invalid txn_id' }
+  }
+  if (!isRealDate(candidate.date)) {
+    return { ok: false, error: 'invalid date' }
+  }
+  if (candidate.currency !== undefined) {
+    return { ok: false, error: 'currency is not accepted' }
+  }
+
+  return {
+    ok: true,
+    reversal: {
+      txn_id: candidate.txn_id,
+      date: candidate.date,
+    },
+  }
 }
 
 function isRealTime(value: unknown): value is string {

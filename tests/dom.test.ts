@@ -13,6 +13,7 @@ const apiMocks = vi.hoisted(() => ({
   listReceivables: vi.fn(),
   listTransactions: vi.fn(),
   loadOptions: vi.fn(),
+  reverseTransaction: vi.fn(),
   submitTransaction: vi.fn(),
   settleReceivable: vi.fn(),
 }))
@@ -22,6 +23,7 @@ vi.mock('../src/api', () => ({
   listReceivables: apiMocks.listReceivables,
   listTransactions: apiMocks.listTransactions,
   loadOptions: apiMocks.loadOptions,
+  reverseTransaction: apiMocks.reverseTransaction,
   submitTransaction: apiMocks.submitTransaction,
   settleReceivable: apiMocks.settleReceivable,
 }))
@@ -76,6 +78,10 @@ beforeEach(() => {
   apiMocks.listReceivables.mockReset().mockResolvedValue(RECEIVABLE_GROUPS)
   apiMocks.listTransactions.mockReset().mockResolvedValue(RECENT_TRANSACTIONS)
   apiMocks.loadOptions.mockReset()
+  apiMocks.reverseTransaction.mockReset().mockResolvedValue({
+    ok: true,
+    alreadyRecorded: false,
+  })
   apiMocks.submitTransaction.mockReset().mockResolvedValue({
     ok: true,
     alreadyRecorded: false,
@@ -370,6 +376,52 @@ describe('recent entries view', () => {
     await vi.waitFor(() => expect(apiMocks.listTransactions).toHaveBeenCalledTimes(2))
     expect(document.querySelector('.transaction-row')?.textContent)
       .toContain('切換後晚餐')
+  })
+
+  it('offers reversal for an addressable ordinary row and requires confirmation', async () => {
+    mount()
+    click('[data-view="recent"]')
+    await vi.waitFor(() => {
+      expect(document.querySelector('[data-reverse-txn-id="txn-recent"]'))
+        .not.toBeNull()
+    })
+
+    click('[data-reverse-txn-id="txn-recent"]')
+
+    const confirmation = document.querySelector<HTMLElement>(
+      '#reverse-confirmation',
+    )
+    expect(confirmation?.hidden).toBe(false)
+    expect(confirmation?.textContent).toContain('確認沖銷')
+    expect(confirmation?.textContent).toContain('晚餐')
+    expect(apiMocks.reverseTransaction).not.toHaveBeenCalled()
+  })
+
+  it('reverses with a UUID after confirmation and refreshes recent entries', async () => {
+    apiMocks.listTransactions
+      .mockResolvedValueOnce(RECENT_TRANSACTIONS)
+      .mockResolvedValueOnce(RECENT_TRANSACTIONS.slice(1))
+    mount()
+    click('[data-view="recent"]')
+    await vi.waitFor(() => {
+      expect(document.querySelector('[data-reverse-txn-id="txn-recent"]'))
+        .not.toBeNull()
+    })
+    click('[data-reverse-txn-id="txn-recent"]')
+
+    click('#confirm-reverse')
+
+    await vi.waitFor(() => {
+      expect(apiMocks.reverseTransaction).toHaveBeenCalledWith({
+        txn_id: 'txn-recent',
+        date: '2026-07-27',
+      }, '3b241101-e2bb-4255-8caf-4136c566a962')
+    })
+    await vi.waitFor(() => {
+      expect(apiMocks.listTransactions).toHaveBeenCalledTimes(2)
+    })
+    expect(document.querySelector('[data-reverse-txn-id="txn-recent"]'))
+      .toBeNull()
   })
 })
 

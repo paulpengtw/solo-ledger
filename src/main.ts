@@ -4,6 +4,7 @@ import {
   listReceivables,
   listTransactions,
   loadOptions,
+  reverseTransaction,
   settleReceivable,
   submitTransaction,
   type AccountOption,
@@ -11,6 +12,7 @@ import {
   type LedgerTransaction,
   type ReceivableEntry,
   type ReceivableGroup,
+  type Reversal,
   type Settlement,
 } from './api'
 import { startSessionGuard } from './auth'
@@ -93,12 +95,22 @@ export function mountApp(
   let sessionSchemaVersion: string | null = null
   let resetTimer: ReturnType<typeof setTimeout> | null = null
   let recentRequest = 0
+  let recentTransactions: LedgerTransaction[] = []
   let receivablesRequest = 0
   let receivableGroups: ReceivableGroup[] = []
   let pendingSettlement: {
     entry: ReceivableEntry
     operation: {
       settlement: Settlement
+      idempotencyKey: string
+    } | null
+    submitting: boolean
+    controlsLocked: boolean
+  } | null = null
+  let pendingReversal: {
+    transaction: LedgerTransaction
+    operation: {
+      reversal: Reversal
       idempotencyKey: string
     } | null
     submitting: boolean
@@ -237,6 +249,29 @@ export function mountApp(
         </div>
       </div>
     </aside>
+    <aside
+      id="reverse-confirmation"
+      class="settle-confirmation"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="reverse-heading"
+      hidden
+    >
+      <div class="settle-card">
+        <h2 id="reverse-heading">確認沖銷</h2>
+        <p id="reverse-target"></p>
+        <p class="irreversible-warning">將新增一筆相反分錄，原始紀錄不會被編輯。</p>
+        <label class="text-field required">
+          <span>沖銷日期</span>
+          <input id="reverse-date" type="date" />
+        </label>
+        <p id="reverse-status" role="alert"></p>
+        <div class="settle-actions">
+          <button id="cancel-reverse" type="button">取消</button>
+          <button id="confirm-reverse" type="button">確認沖銷</button>
+        </div>
+      </div>
+    </aside>
   `
 
   const pageTitle = root.querySelector<HTMLElement>('#page-title')!
@@ -266,6 +301,14 @@ export function mountApp(
   const settleStatus = root.querySelector<HTMLElement>('#settle-status')!
   const cancelSettle = root.querySelector<HTMLButtonElement>('#cancel-settle')!
   const confirmSettle = root.querySelector<HTMLButtonElement>('#confirm-settle')!
+  const reverseConfirmation = root.querySelector<HTMLElement>(
+    '#reverse-confirmation',
+  )!
+  const reverseTarget = root.querySelector<HTMLElement>('#reverse-target')!
+  const reverseDate = root.querySelector<HTMLInputElement>('#reverse-date')!
+  const reverseStatus = root.querySelector<HTMLElement>('#reverse-status')!
+  const cancelReverse = root.querySelector<HTMLButtonElement>('#cancel-reverse')!
+  const confirmReverse = root.querySelector<HTMLButtonElement>('#confirm-reverse')!
   const schemaBanner = root.querySelector<HTMLElement>('#schema-banner')!
   const accountPicker = root.querySelector<HTMLElement>('#account-picker')!
   const toAccountPicker = root.querySelector<HTMLElement>('#to-account-picker')!
@@ -324,6 +367,18 @@ export function mountApp(
       article.appendChild(body)
       article.appendChild(accounts)
       article.appendChild(details)
+      if (
+        row.txn_id
+        && (row.類型 === '支出' || row.類型 === '收入' || row.類型 === '轉帳')
+        && row.結清狀態 !== '已沖銷'
+      ) {
+        const reverseButton = document.createElement('button')
+        reverseButton.type = 'button'
+        reverseButton.className = 'reverse-button'
+        reverseButton.dataset['reverseTxnId'] = row.txn_id
+        reverseButton.textContent = '沖銷'
+        article.appendChild(reverseButton)
+      }
       transactionList.appendChild(article)
     }
   }
@@ -420,7 +475,92 @@ export function mountApp(
     }
 
     recentStatus.textContent = rows.length === 0 ? '目前沒有紀錄' : ''
+    recentTransactions = rows
     renderTransactions(rows)
+  }
+
+  function updateReversalInteraction(): void {
+    const controlsLocked = pendingReversal?.controlsLocked === true
+    reverseDate.disabled = controlsLocked
+    cancelReverse.disabled = controlsLocked
+    confirmReverse.disabled =
+      pendingReversal === null
+      || pendingReversal.submitting
+      || reverseDate.value === ''
+  }
+
+  function openReversal(transaction: LedgerTransaction): void {
+    if (pendingReversal?.submitting) return
+    pendingReversal = {
+      transaction,
+      operation: null,
+      submitting: false,
+      controlsLocked: false,
+    }
+    reverseTarget.textContent =
+      `${transaction.類型} · ${transaction.說明 || '未填說明'} · ${transaction.金額} ${transaction.幣別}`.trim()
+    reverseDate.value = today()
+    reverseStatus.textContent = ''
+    reverseConfirmation.hidden = false
+    updateReversalInteraction()
+  }
+
+  function closeReversal(): void {
+    if (pendingReversal?.submitting) return
+    pendingReversal = null
+    reverseConfirmation.hidden = true
+    reverseStatus.textContent = ''
+    updateReversalInteraction()
+  }
+
+  async function onConfirmReversal(): Promise<void> {
+    if (!pendingReversal || pendingReversal.submitting) return
+
+    const request = pendingReversal
+    if (request.operation === null) {
+      if (!reverseDate.value) {
+        reverseStatus.textContent = '請選擇沖銷日期'
+        return
+      }
+      request.operation = {
+        reversal: {
+          txn_id: request.transaction.txn_id,
+          date: reverseDate.value,
+        },
+        idempotencyKey: randomUUID(),
+      }
+    }
+
+    const operation = request.operation
+    request.submitting = true
+    request.controlsLocked = true
+    updateReversalInteraction()
+    reverseStatus.textContent = '沖銷中…'
+    const result = await reverseTransaction(
+      operation.reversal,
+      operation.idempotencyKey,
+    )
+    if (stopped) return
+
+    if (result.ok) {
+      if (pendingReversal === request) {
+        request.submitting = false
+        closeReversal()
+      }
+      showFlash('沖銷完成 ✓')
+      await loadRecentTransactions()
+      return
+    }
+    if (pendingReversal === request) {
+      request.submitting = false
+      if (result.kind !== 'network') {
+        request.operation = null
+        request.controlsLocked = false
+      }
+      updateReversalInteraction()
+      reverseStatus.textContent = result.message
+      if (result.kind === 'auth') showReauthPrompt()
+    }
   }
 
   function showView(view: 'entry' | 'recent' | 'outstanding'): void {
@@ -710,6 +850,15 @@ export function mountApp(
   refreshTransactions.addEventListener('click', () => {
     void loadRecentTransactions()
   })
+  transactionList.addEventListener('click', event => {
+    const target = (event.target as HTMLElement)
+      .closest<HTMLButtonElement>('[data-reverse-txn-id]')
+    if (!target) return
+    const txnId = target.dataset['reverseTxnId']
+    const transaction = recentTransactions
+      .find(candidate => candidate.txn_id === txnId)
+    if (transaction) openReversal(transaction)
+  })
   refreshReceivables.addEventListener('click', () => {
     void loadOutstandingReceivables()
   })
@@ -726,6 +875,10 @@ export function mountApp(
   cancelSettle.addEventListener('click', closeSettlement)
   confirmSettle.addEventListener('click', () => {
     void onConfirmSettlement()
+  })
+  cancelReverse.addEventListener('click', closeReversal)
+  confirmReverse.addEventListener('click', () => {
+    void onConfirmReversal()
   })
 
   root.querySelector('#type-toggle')!.addEventListener('click', event => {

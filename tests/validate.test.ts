@@ -4,6 +4,7 @@ import {
   validateTransaction,
   validateTransactionDateRange,
 } from '../functions/lib/validate'
+import * as ValidateModule from '../functions/lib/validate'
 
 const valid = {
   type: '支出',
@@ -145,6 +146,45 @@ describe('isValidUuid', () => {
 
   it('rejects a non-UUID idempotency key', () => {
     expect(isValidUuid('not-a-uuid')).toBe(false)
+  })
+})
+
+describe('validateReversal', () => {
+  it('accepts only txn_id and a real calendar date', () => {
+    const validateReversal = (
+      ValidateModule as typeof ValidateModule & {
+        validateReversal?: (input: unknown) => unknown
+      }
+    ).validateReversal
+    expect(validateReversal).toBeTypeOf('function')
+    if (!validateReversal) return
+
+    expect(validateReversal({
+      txn_id: 'original-1',
+      date: '2024-02-29',
+    })).toEqual({
+      ok: true,
+      reversal: {
+        txn_id: 'original-1',
+        date: '2024-02-29',
+      },
+    })
+  })
+
+  it.each([
+    [{ txn_id: '', date: '2026-07-27' }, 'invalid txn_id'],
+    [{ txn_id: 'original-1', date: '2026-02-30' }, 'invalid date'],
+    [{ txn_id: 'original-1', date: '2026-07-27', currency: 'TWD' }, 'currency is not accepted'],
+  ])('rejects an invalid reversal %#', (input, error) => {
+    const validateReversal = (
+      ValidateModule as typeof ValidateModule & {
+        validateReversal?: (input: unknown) => unknown
+      }
+    ).validateReversal
+    expect(validateReversal).toBeTypeOf('function')
+    if (!validateReversal) return
+
+    expect(validateReversal(input)).toEqual({ ok: false, error })
   })
 })
 

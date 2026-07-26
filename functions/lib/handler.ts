@@ -3,6 +3,7 @@ import { buildEnvelope } from './envelope'
 import { verifyAccessJwt } from './jwt'
 import {
   isValidUuid,
+  validateReversal,
   validateSettlement,
   validateTransaction,
   validateTransactionDateRange,
@@ -29,6 +30,7 @@ const ALLOWED = new Set([
   'list_transactions',
   'list_receivables',
   'settle',
+  'reverse_transaction',
 ])
 
 function json(status: number, body: unknown): Response {
@@ -112,6 +114,31 @@ export async function handleAction(
       action: 'settle',
       idempotencyKey: body.idempotencyKey,
       ...validated.settlement,
+    }
+  } else if (action === 'reverse_transaction') {
+    let body: Record<string, unknown> = {}
+    try {
+      const parsed = await request.json()
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        body = parsed as Record<string, unknown>
+      }
+    } catch {
+      // Invalid JSON is handled as an invalid reversal below.
+    }
+
+    const validated = validateReversal(body)
+    if (!validated.ok) {
+      return json(400, { ok: false, error: validated.error })
+    }
+    if (!isValidUuid(body.idempotencyKey)) {
+      return json(400, { ok: false, error: 'invalid idempotency key' })
+    }
+
+    nonce = body.idempotencyKey
+    payload = {
+      action: 'reverse_transaction',
+      idempotencyKey: body.idempotencyKey,
+      ...validated.reversal,
     }
   } else if (action === 'list_transactions') {
     let body: Record<string, unknown> = {}

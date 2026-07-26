@@ -197,3 +197,41 @@ describe('receivables API', () => {
     })
   })
 })
+
+describe('reverseTransaction', () => {
+  it('POSTs the reversal without a currency field and maps success like other mutations', async () => {
+    const reverseTransaction = (
+      ApiModule as typeof ApiModule & {
+        reverseTransaction?: (
+          reversal: Record<string, unknown>,
+          idempotencyKey: string,
+          fetchFn: typeof fetch,
+        ) => Promise<unknown>
+      }
+    ).reverseTransaction
+    expect(reverseTransaction).toBeTypeOf('function')
+    if (!reverseTransaction) return
+
+    const reversal = {
+      txn_id: 'txn-recent',
+      date: '2026-07-27',
+    }
+    const fetchFn = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(url)).toBe('/api/reverse_transaction')
+      expect(init?.method).toBe('POST')
+      expect(JSON.parse(String(init?.body))).toEqual({
+        ...reversal,
+        idempotencyKey: KEY,
+      })
+      expect(JSON.parse(String(init?.body))).not.toHaveProperty('currency')
+      return jsonResponse(200, { ok: true, txn_id: KEY })
+    }) as unknown as typeof fetch
+
+    await expect(
+      reverseTransaction(reversal, KEY, fetchFn),
+    ).resolves.toEqual({
+      ok: true,
+      alreadyRecorded: false,
+    })
+  })
+})

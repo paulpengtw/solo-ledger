@@ -73,6 +73,9 @@ function route_(payload, nonce) {
   if (action === 'settle') {
     return settle_(payload, nonce);
   }
+  if (action === 'reverse_transaction') {
+    return reverseTransaction_(payload, nonce);
+  }
 
   throw new Error('unsupported action: ' + action);
 }
@@ -690,6 +693,129 @@ function settle_(payload, nonce) {
       row: rowNumber,
       outstanding: remaining,
       status: status,
+    };
+    cache.put(nonceKey, JSON.stringify(result), NONCE_CACHE_SECONDS);
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function reverseTransaction_(payload, nonce) {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('payload is required');
+  }
+  requireField_(payload, 'idempotencyKey');
+  requireField_(payload, 'txn_id');
+  requireField_(payload, 'date');
+
+  var idempotencyKey = String(payload.idempotencyKey);
+  if (idempotencyKey !== nonce) {
+    throw new Error('idempotencyKey must match nonce');
+  }
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(LOCK_WAIT_MILLISECONDS);
+
+  try {
+    var cache = CacheService.getScriptCache();
+    var nonceKey = 'nonce:' + nonce;
+    var storedResult = cache.get(nonceKey);
+    if (storedResult) {
+      return withAlready_(JSON.parse(storedResult));
+    }
+
+    var spreadsheet = SpreadsheetApp.openById(
+      requiredProp_('LEDGER_SPREADSHEET_ID'),
+    );
+    var journal = requiredSheet_(spreadsheet, '日記帳');
+    var headerRow = journal
+      .getRange(1, 1, 1, journal.getLastColumn())
+      .getDisplayValues()[0];
+    var journalColumns = resolveHeaders_(headerRow, JOURNAL_HEADERS);
+    var records = readJournalRecords_(journal, journalColumns);
+    var targetTxnId = String(payload.txn_id);
+    var index;
+
+    for (index = 0; index < records.length; index += 1) {
+      if (
+        records[index].values['類型'] === '沖銷' &&
+        records[index].values['沖銷txn_id'] === targetTxnId
+      ) {
+        var existingResult = { ok: true, already: true };
+        cache.put(
+          nonceKey,
+          JSON.stringify(existingResult),
+          NONCE_CACHE_SECONDS,
+        );
+        return existingResult;
+      }
+    }
+
+    var original = findRecordByTxnId_(records, targetTxnId);
+    if (original === null) {
+      throw new Error('unknown txn_id: ' + payload.txn_id);
+    }
+
+    var originalType = original.values['類型'];
+    var linkedTxnId = original.values['沖銷txn_id'];
+    if (originalType === '沖銷') {
+      throw new Error('cannot reverse reversal row: ' + targetTxnId);
+    }
+    if (originalType === '轉帳' && linkedTxnId !== '') {
+      throw new Error('cannot reverse settlement row: ' + targetTxnId);
+    }
+    if (
+      originalType !== '支出' &&
+      originalType !== '收入' &&
+      originalType !== '轉帳'
+    ) {
+      throw new Error('cannot reverse non-ordinary row: ' + targetTxnId);
+    }
+
+    for (index = 0; index < records.length; index += 1) {
+      if (
+        records[index].values['類型'] === '轉帳' &&
+        records[index].values['沖銷txn_id'] === targetTxnId
+      ) {
+        throw new Error(
+          'cannot reverse transaction with settlements: ' + targetTxnId,
+        );
+      }
+    }
+
+    rejectField_(payload, 'currency');
+    var vocabulary = readAccountVocabulary_(spreadsheet);
+    var defaultCurrency = readSetting_(spreadsheet, '預設幣別');
+    var originalPosting = {};
+    for (var field in original.values) {
+      if (Object.prototype.hasOwnProperty.call(original.values, field)) {
+        originalPosting[field] = original.values[field];
+      }
+    }
+    originalPosting['金額'] = original.amount;
+    var posting = expandPosting_({
+      kind: 'reverse',
+      original: originalPosting,
+      date: payload.date,
+      defaultCurrency: defaultCurrency,
+      accountTypes: vocabulary.accountTypes,
+      txnId: idempotencyKey,
+      now: taipeiIsoNow_(),
+    });
+
+    var rowNumber = appendPosting_(journal, journalColumns, posting);
+    var originalStatus = original.values['結清狀態'];
+    if (originalStatus === '未結' || originalStatus === '部分') {
+      journal
+        .getRange(original.sheetRow, journalColumns['結清狀態'])
+        .setValues([['已沖銷']]);
+    }
+
+    var result = {
+      ok: true,
+      txn_id: idempotencyKey,
+      row: rowNumber,
     };
     cache.put(nonceKey, JSON.stringify(result), NONCE_CACHE_SECONDS);
     return result;

@@ -97,7 +97,7 @@ describe('handleAction', () => {
     const fetchFn = noFetch()
 
     const response = await handleAction(
-      'reverse_transaction',
+      'closeAndOpenBooks',
       req({}),
       env,
       deps(fetchFn),
@@ -367,6 +367,59 @@ describe('handleAction', () => {
 
     expect(response.status).toBe(200)
     expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses the client idempotency key as reverse_transaction nonce and sends only the reversal contract', async () => {
+    const upstreamBody = '{"ok":true,"txn_id":"reverse-1","row":42}'
+    const reversal = {
+      txn_id: 'original-1',
+      date: '2026-07-27',
+    }
+    const fetchFn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const envelope = JSON.parse(String(init?.body)) as {
+        nonce: string
+        payload: string
+      }
+
+      expect(envelope.nonce).toBe(KEY)
+      expect(decodePayload(envelope.payload)).toEqual({
+        action: 'reverse_transaction',
+        idempotencyKey: KEY,
+        ...reversal,
+      })
+      return new Response(upstreamBody, { status: 201 })
+    }) as unknown as typeof fetch
+
+    const response = await handleAction(
+      'reverse_transaction',
+      req({ idempotencyKey: KEY, ...reversal }),
+      env,
+      deps(fetchFn),
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(response.status).toBe(201)
+    expect(await response.text()).toBe(upstreamBody)
+  })
+
+  it.each([
+    ['blank txn_id', { txn_id: ' ', date: '2026-07-27' }, 'invalid txn_id'],
+    ['impossible date', { txn_id: 'original-1', date: '2026-02-30' }, 'invalid date'],
+    ['non-UUID key', { idempotencyKey: 'not-a-uuid', txn_id: 'original-1', date: '2026-07-27' }, 'invalid idempotency key'],
+    ['currency input', { txn_id: 'original-1', date: '2026-07-27', currency: 'USD' }, 'currency is not accepted'],
+  ])('rejects reverse_transaction with %s before contacting Apps Script', async (_label, body, error) => {
+    const fetchFn = noFetch()
+
+    const response = await handleAction(
+      'reverse_transaction',
+      req({ idempotencyKey: KEY, ...body }),
+      env,
+      deps(fetchFn),
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ ok: false, error })
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 
   it.each([

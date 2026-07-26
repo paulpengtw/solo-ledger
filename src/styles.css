@@ -416,6 +416,17 @@ h3 {
   color: var(--warning-ink);
 }
 
+.reverse-button {
+  width: 100%;
+  min-height: 44px;
+  margin-top: 12px;
+  border: 1px solid #dfe5e1;
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 750;
+}
+
 .receivable-group {
   display: grid;
   gap: 8px;
@@ -516,7 +527,8 @@ h3 {
   box-shadow: 0 20px 50px rgb(23 52 45 / 28%);
 }
 
-#settle-target {
+#settle-target,
+#reverse-target {
   margin-bottom: 8px;
   font-weight: 750;
 }
