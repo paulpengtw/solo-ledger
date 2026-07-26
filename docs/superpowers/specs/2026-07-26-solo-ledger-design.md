@@ -1,7 +1,7 @@
 # solo-ledger — Personal Double-Entry Expense PWA — Design
 
 Date: 2026-07-26
-Status: approved design (brainstorming session); revised after adversarial spec review; pending user spec review
+Status: approved design (brainstorming session); revised after adversarial spec review and user grilling session 2026-07-26
 
 ## 1. Purpose
 
@@ -91,13 +91,13 @@ Cloudflare Access application: one email, one-time PIN login, 1-month session
 | `選項清單` | user, by hand | Named enum lists, one list per column: row 1 = list name (v1 ships one column, `對象`), rows 2+ = values. |
 | `設定` | user, by hand | Key/value rows, columns `設定項目` / `值`. v1 keys: `預設幣別` (TWD), `預設帳戶` (an account name). Unknown keys ignored. |
 | `餘額` | formulas only | Per-account live balance: SUMIFS over 借方帳戶/貸方帳戶, signed by 類型; columns located via INDEX/MATCH on header names. |
-| `試算與檢查` | formulas only | Trial balance (total debits == total credits), unknown-account detector, 收款狀態-vs-derived-balance cross-check (scoped per §5.4), non-text 日期/時間 cell detector. |
+| `試算與檢查` | formulas only | Trial balance (total debits == total credits), unknown-account detector, 結清狀態-vs-derived-balance cross-check (scoped per §5.4), non-text 日期/時間 cell detector. |
 
 `日記帳` required headers (15):
 
 ```
 日期 · 時間 · 類型 · 借方帳戶 · 貸方帳戶 · 金額 · 幣別 · 分類 · 對象 · 說明 ·
-收款狀態 · 沖銷txn_id · txn_id · 來源 · 建立時間
+結清狀態 · 沖銷txn_id · txn_id · 來源 · 建立時間
 ```
 
 Column semantics:
@@ -105,25 +105,25 @@ Column semantics:
 - **Code.gs resolves every column by header name, per call.** Adding,
   reordering, or renaming *extra* columns is free. Deleting or renaming one of
   the 15 required headers fails loudly, naming the missing header.
-- `類型` ∈ {`支出`, `收入`, `轉帳`, `調整`} (closed enum; `調整` is written
+- `類型` ∈ {`支出`, `收入`, `轉帳`, `沖銷`} (closed enum; `沖銷` is written
   only by `reverse_transaction`).
 - `分類` = the name of the nominal account (a 會計科目 row with 類型=收入 or
   支出) appearing in either leg of the row; **blank when neither leg is
   nominal** (transfers, 代墊, settlements). One rule, no exceptions.
 - `對象` = payee/counterparty display name (free text, suggested from
   選項清單). Required when `iou` is set.
-- `收款狀態` ∈ {blank, `未收`, `部分`, `已收`, `已沖銷`}. Blank for ordinary
-  rows. Set to `未收` at creation of an 應收/應付 row; recomputed to `部分` or
-  `已收` from settlement arithmetic (§5.3); `已沖銷` when the row is reversed.
-  "Open" rows (for lists and outstanding math) = {`未收`, `部分`}.
+- `結清狀態` ∈ {blank, `未結`, `部分`, `已結`, `已沖銷`}. Blank for ordinary
+  rows. Set to `未結` at creation of an 應收/應付 row; recomputed to `部分` or
+  `已結` from settlement arithmetic (§5.3); `已沖銷` when the row is reversed.
+  "Open" rows (for lists and outstanding math) = {`未結`, `部分`}.
 - `沖銷txn_id` = on a settlement or reversal row, the `txn_id` of the original
   row it settles/reverses; blank otherwise. Originals are never edited except
-  the `收款狀態` cell.
+  the `結清狀態` cell.
 - `txn_id` = the client-generated idempotency key (UUIDv4), one per journal
   row. Hand rows may leave it blank (such rows are invisible to
   txn_id-addressed actions). Doubles as the dedupe fingerprint for any future
   bank-CSV import.
-- `來源` ∈ {`pwa`, `手動`, future `import`}.
+- `來源` ∈ {`pwa`, `手動`, `移轉`, future `import`}.
 - `金額` is always positive; direction lives entirely in the debit/credit legs.
 - `日期` = `YYYY-MM-DD`; `時間` = `HH:mm`, blank when the user omits it;
   `建立時間` = ISO-8601 with `+08:00` offset. All three are written as plain
@@ -142,17 +142,17 @@ Every row below also writes: 金額 (positive), 幣別, 說明, 對象 (as noted
 txn_id = idempotencyKey, 來源=pwa, 建立時間 = server now. "分類" follows the
 §4 rule automatically; it is listed for clarity.
 
-| Case | 類型 | 借方帳戶 | 貸方帳戶 | 分類 | 收款狀態 | 沖銷txn_id |
+| Case | 類型 | 借方帳戶 | 貸方帳戶 | 分類 | 結清狀態 | 沖銷txn_id |
 |---|---|---|---|---|---|---|
 | 支出 from asset (現金/銀行/悠遊卡) | 支出 | the category | the asset account | the category | blank | blank |
 | 支出 by credit card | 支出 | the category | that card's 負債 account | the category | blank | blank |
 | 轉帳 (繳卡費, 悠遊卡加值, …) | 轉帳 | to-account | from-account | blank | blank | blank |
 | 收入 | 收入 | receiving account | the income category | the category | blank | blank |
-| 代墊 (`iou: '應收'`) | 支出 | 應收帳款 | paying account | blank | 未收 | blank |
-| Friend paid for user (`iou: '應付'`) | 支出 | the category | 應付帳款 | the category | 未收 | blank |
+| 代墊 (`iou: '應收'`) | 支出 | 應收帳款 | paying account | blank | 未結 | blank |
+| Friend paid for user (`iou: '應付'`) | 支出 | the category | 應付帳款 | the category | 未結 | blank |
 | Settle (collect 應收 / repay 應付) | 轉帳 | derived (§5.3) | derived (§5.3) | blank | blank | original txn_id |
 | Opening balance (bootstrap/migration) | 轉帳 | asset account | 期初餘額 (類型=權益) | blank | blank | blank |
-| Reverse (mistake) | 調整 | original 貸方 | original 借方 | per §4 rule | blank | original txn_id |
+| Reverse (mistake) | 沖銷 | original 貸方 | original 借方 | per §4 rule | blank | original txn_id |
 
 Account names in this table are descriptions, not literal names: "that card's
 負債 account" means whatever the user named it in 會計科目 (e.g. `國泰卡`);
@@ -166,7 +166,7 @@ names with the stated 類型. Liability opening balances mirror the asset rule
 |---|---|---|---|
 | account (paying/receiving) | required | required | required (from) |
 | toAccount | rejected | rejected | required |
-| category | required (unless `iou:'應收'`, then ignored) | required | rejected |
+| category | required; rejected when `iou:'應收'` | required | rejected |
 | payee | optional; required when iou set | optional | rejected |
 | iou | optional | rejected | rejected |
 
@@ -184,20 +184,29 @@ silent dropping — a stale field after a type toggle must fail loudly.
 - `amount` omitted → remaining outstanding. `amount` > remaining outstanding →
   named error.
 - Outstanding(original) = original 金額 − Σ 金額 of rows whose 沖銷txn_id =
-  original txn_id and 類型=轉帳. After each settle, the original's 收款狀態
-  cell is recomputed: outstanding = 0 → `已收`, else `部分`.
+  original txn_id and 類型=轉帳. After each settle, the original's 結清狀態
+  cell is recomputed: outstanding = 0 → `已結`, else `部分`.
+- Settlement rows and 沖銷 mirror rows stamp 幣別 = the 設定 default (預設幣別).
+  `settle` returns a named error when the original row's 幣別 differs from the
+  default (v1 answer: settle foreign-currency rows by hand). Neither `settle`
+  nor `reverse_transaction` accepts a currency input.
 - Writes are ordered settlement-row-first, status-cell-second; a crash between
   the two leaves arithmetic truth intact (status is a cache) and
   `check_consistency` flags/repairs the stale cell.
 
 ### 5.4 Reversal semantics
 
+- `reverse_transaction` may target only ordinary rows: 類型 ∈ {支出, 收入, 轉帳}
+  AND the row is not a settlement row (類型=轉帳 with 沖銷txn_id set) AND not a
+  沖銷 row. Targeting a settlement or 沖銷 row → named error.
 - The mirror row writes 沖銷txn_id = original txn_id.
-- Reversing a row whose 收款狀態 ∈ {未收, 部分} sets the original's status to
+- Reversing a row whose 結清狀態 ∈ {未結, 部分} sets the original's status to
   `已沖銷`; such rows leave lists and outstanding math. Reversing an original
-  that already has settlements is rejected with a named error (settle the
-  remainder or reverse the settlements first — v1 keeps this strict).
-- The 試算與檢查 status cross-check applies only to rows with 收款狀態 set;
+  that already has settlements is rejected with a named error; a mistaken
+  settlement is corrected by a documented manual procedure — hand-delete the
+  settlement row in the sheet, then `check_consistency` repairs the stale
+  結清狀態 cell.
+- The 試算與檢查 status cross-check applies only to rows with 結清狀態 set;
   the 分類-consistency check applies only to rows with a nominal leg.
 
 ### 5.5 Deliberate constraints
@@ -233,7 +242,7 @@ with these fixes to bugs inherited from the production expense-hermes Code.js:
    `reverse_transaction` use the idempotencyKey as nonce; their "already done"
    pre-checks read the journal, not the status cache: settle → a row with
    txn_id = key exists, or outstanding ≤ 0 → `{ ok, already: true }`; reverse
-   → any 類型=調整 row with 沖銷txn_id = target → `{ ok, already: true }`.
+   → any 類型=沖銷 row with 沖銷txn_id = target → `{ ok, already: true }`.
 
 `schema_version` = first 12 hex chars of SHA-256 over the canonical JSON
 serialization (row-major arrays of display values of the used ranges) of
@@ -248,11 +257,11 @@ Actions (9):
 | `auth-check` | Pages-Function-only; returns Access JWT expiry for the visibilitychange re-check flow (ported) |
 | `get_options` | → `{ schema_version, accounts: [{name, type, subtype, sort}] (啟用 only, real accounts: 類型 資產/負債), categories: { 支出: [names], 收入: [names] } (啟用 only), payees: [names], defaults: { currency, account } }` |
 | `create_transaction` | `{ type: 支出\|收入\|轉帳, date, time?, amount, currency?, account, toAccount?, category?, payee?, description, iou?: 應收\|應付 }` + idempotencyKey→nonce. Validates per §5.2 against 會計科目 (must be 啟用), expands per §5.1, appends one row. Omitted time → blank cell; omitted currency → 設定 default |
-| `list_transactions` | `{ date_from, date_to }` (YYYY-MM-DD, inclusive) → rows newest-first, max 200: `{ txn_id, 日期, 時間, 類型, 借方帳戶, 貸方帳戶, 金額, 幣別, 分類, 對象, 說明, 收款狀態 }` as written (text strings) |
-| `list_receivables` | rows with 收款狀態 ∈ {未收, 部分}, grouped by 對象, each with direction (應收/應付) and computed outstanding per §5.3 |
-| `settle` | `{ txn_id, account, date, amount? }` + idempotencyKey → settlement row per §5.3 + status recompute; partial OK; idempotent per fix 4. Settles both 應收 and 應付 (orientation derived) |
-| `reverse_transaction` | `{ txn_id, date }` + idempotencyKey → mirror row per §5.4; idempotent per fix 4. `settle`/`reverse` skip the 啟用 check (they reuse legs of an existing row, which may reference since-disabled accounts) |
-| `check_consistency` | audit report: unknown/disabled accounts in journal, 分類 vs nominal-leg mismatch (nominal-leg rows only), 收款狀態 vs derived outstanding (status-bearing rows only), stale status cells (repairable), non-positive amounts, non-text 日期/時間 cells, stray cells below the journal, 調整 rows without 沖銷txn_id; installable as a weekly trigger that emails on failure |
+| `list_transactions` | `{ date_from, date_to }` (YYYY-MM-DD, inclusive) → rows newest-first, max 200: `{ txn_id, 日期, 時間, 類型, 借方帳戶, 貸方帳戶, 金額, 幣別, 分類, 對象, 說明, 結清狀態 }` as written (text strings) |
+| `list_receivables` | rows with 結清狀態 ∈ {未結, 部分}, grouped by 對象, each with direction (應收/應付) and computed outstanding per §5.3; includes hand rows (來源=手動, blank txn_id) returned as view-only entries (no txn_id → no settle button; outstanding = full 金額; lifecycle by hand) |
+| `settle` | `{ txn_id, account, date, amount? }` + idempotencyKey → settlement row per §5.3 + status recompute; partial OK; idempotent per fix 4. Settles both 應收 and 應付 (orientation derived). `account` must name an existing, 啟用 real account (類型 資產/負債) — derived legs (應收帳款/應付帳款 from the original) skip the 啟用 check. Returns a named error when the original's 幣別 differs from the 設定 default (stamp 幣別 = default; no currency input) |
+| `reverse_transaction` | `{ txn_id, date }` + idempotencyKey → mirror row per §5.4; rejects settlement and 沖銷 rows (named error); idempotent per fix 4. All legs derived → full 啟用 exemption (may reference since-disabled accounts). Stamps 幣別 = 設定 default; no currency input |
+| `check_consistency` | audit report: unknown/disabled accounts in journal, 分類 vs nominal-leg mismatch (nominal-leg rows only), 結清狀態 vs derived outstanding (status-bearing rows only, regardless of 來源), stale status cells (repairable), non-positive amounts, non-text 日期/時間 cells, stray cells below the journal, 沖銷 rows without 沖銷txn_id, linked-row 幣別 mismatch (settlement/沖銷 rows whose 幣別 differs from their linked original's); installable as a weekly trigger that emails on failure |
 
 `setupSpreadsheet()` (bootstrap) and `closeAndOpenBooks()` (migration) are
 **editor-run only**, never routed through `doPost`.
@@ -270,6 +279,13 @@ comes from `get_options` (localStorage cache, background refresh). On
 `schema_version` change mid-session: soft warning banner only, never a hard
 block.
 
+Input principle — **selection-first, mobile-first**: accounts, categories, and
+counterparties are tap targets drawn from `get_options`; typing is reserved for
+the amount keypad and free-form text fields (說明, custom 對象 entry). 說明
+(description) is deliberately required: the user enters it via speech-to-text
+so that every row carries a narrative — future maintainers must not make it
+optional.
+
 ## 8. Error handling
 
 - PWA: 15 s timeout; retries reuse the idempotency key; replay detection via
@@ -282,7 +298,10 @@ block.
   LockService.
 - Hand-edit safety net: COA-fed data-validation dropdowns on 借方帳戶/貸方帳戶
   (advisory), 試算與檢查 tab always on, `check_consistency` weekly email
-  trigger.
+  trigger. Manual procedure for a mistaken settlement (settlements are
+  irreversible via API in v1): hand-delete the settlement row in the sheet,
+  then run `check_consistency` — it detects and repairs the stale 結清狀態
+  cell on the original row.
 - Documented operating rule: **never sort 日記帳 in place** (filter views
   only); the journal tab holds no formulas.
 
@@ -313,21 +332,24 @@ block.
   會計科目 with 期初餘額(權益), 應收帳款(資產), 應付帳款(負債),
   調整支出(支出), 調整收入(收入) plus starter accounts. Script Properties:
   `EXPENSE_API_SECRET`, `LEDGER_SPREADSHEET_ID`. Pages env vars: same four
-  names as expense-pwa.
+  names as expense-pwa. Opening-balance rows at bootstrap are a hand-row
+  procedure (typed directly into 日記帳, 來源=手動); 期初餘額 is a 權益
+  account and intentionally absent from `get_options` and the PWA pickers.
 - **Migration to a new spreadsheet** (Path A, fresh book): (1) create blank
   spreadsheet, run `setupSpreadsheet()` against it (operator temporarily
   points `LEDGER_SPREADSHEET_ID` at the new ID); (2) run
   `closeAndOpenBooks(oldSpreadsheetId)`, which reads the OLD book and writes
   into the NEW (current) book: per-account opening-balance rows at balances
-  as of migration (assets and liabilities, against 期初餘額), plus one row per
-  still-open 應收/應付 item **at its remaining outstanding** (fresh txn_id,
-  收款狀態=未收, original description prefixed `承前-`; linked settlement
-  history intentionally stays in the old book); (3) run `check_consistency`;
+  as of migration (assets and liabilities, against 期初餘額, 來源=移轉), plus
+  one row per still-open 應收/應付 item **at its remaining outstanding** (fresh
+  txn_id, 來源=移轉, 結清狀態=未結, original description prefixed `承前-`;
+  linked settlement history intentionally stays in the old book); (3) run `check_consistency`;
   (4) confirm `health` shows the new `spreadsheet_id_tail`. Path B (full
   history): File → Make a copy, point the Script Property at the copy. Zero
   code changes either way.
 - **Backup**: weekly GAS time-driven trigger copies the spreadsheet to a Drive
-  backup folder (the sheet is the only datastore).
+  backup folder (the sheet is the only datastore); the trigger prunes the
+  backup folder to the 12 most recent copies (timestamped names).
 - Pinned contracts: `appsscript.json` timeZone `Asia/Taipei`; date/time
   formats per §4; data rows start at row 2.
 
