@@ -1,7 +1,7 @@
 # solo-ledger — Personal Double-Entry Expense PWA — Design
 
 Date: 2026-07-26
-Status: approved by user (brainstorming session), pending final spec review
+Status: approved design (brainstorming session); revised after adversarial spec review; pending user spec review
 
 ## 1. Purpose
 
@@ -31,12 +31,12 @@ Success criteria:
   ergonomics; triples validation/test surface.
 - **C. Balanced-pair journal + sheet-resident chart of accounts, pure form**:
   closest, but multi-row compound transactions break the inherited idempotency
-  guarantee, colon account paths (`支出:食:個人`) make renames rewrite history,
-  and 12 API actions is v1 overreach.
+  guarantee, colon-path account names make renames rewrite history, and 12 API
+  actions is v1 overreach.
 - **D (chosen): synthesis** — C's spine (header-name column resolution,
   sheet-resident COA, consistency checking), A's scope discipline (one row per
   create, static form), B's best tabs (選項清單, 設定, in-GAS bootstrap), plus
-  fixes to three idempotency bugs inherited from the production Code.js.
+  fixes to idempotency bugs inherited from the production Code.js.
 
 ## 3. Architecture
 
@@ -50,8 +50,10 @@ Cloudflare Pages Function
     │  build HMAC-SHA256 envelope { ts, nonce, payload, sig }
     ▼
 Apps Script web app (execute-as-me)   apps-script/Code.gs
-    │  verifyEnvelope_ → LockService → vocabulary validation vs 會計科目
-    │  posting expansion → append one journal row
+    │  verify signature + timestamp skew (lock-free)
+    │  acquire LockService → nonce check → vocabulary validation vs 會計科目
+    │  → txn_id-uniqueness backstop scan → expandPosting_ → append row
+    │  → commit nonce→result → release lock
     ▼
 Google Spreadsheet (the only datastore)
 ```
@@ -68,9 +70,11 @@ solo-ledger/
 ├── src/                  # PWA (forked shell from expense-pwa)
 ├── functions/
 │   ├── api/[action].ts   # verbatim fork
-│   └── lib/              # envelope.ts, jwt.ts verbatim; handler.ts, validate.ts reworked
-├── apps-script/Code.gs   # new standalone script (~350 lines), pushed via clasp
-├── scripts/gen-fixture.py# verbatim fork (HMAC byte-parity fixtures)
+│   └── lib/              # envelope.ts, jwt.ts verbatim; handler.ts, validate.ts rewritten
+├── apps-script/Code.gs   # new standalone script, pushed via clasp
+├── scripts/gen-fixture.py# adapted fork: inlines envelope signing (HMAC-SHA256 over
+│                         #   ts.nonce.payloadB64, base64url), emits a create_transaction
+│                         #   payload; no import from the Hermes python client
 ├── tests/                # vitest
 └── README.md / DEPLOY.md / CONTEXT.md
 ```
@@ -82,12 +86,12 @@ Cloudflare Access application: one email, one-time PIN login, 1-month session
 
 | Tab | Written by | Purpose |
 |---|---|---|
-| `日記帳` | code only | Journal. Single zh-TW header row (row 1), data from row 2. Pure data — never any formula. |
-| `會計科目` | user, by hand | Chart of accounts: `名稱`, `類型` (資產/負債/收入/支出/權益), `子類型` (現金/銀行/信用卡/儲值卡/…), `啟用`, `排序`. Categories are rows here too (類型=收入 or 支出) — one tab holds the entire vocabulary. Plain unique display names; **no colon paths**. |
-| `選項清單` | user, by hand | Named enum lists: `對象` (payees), plus any future dropdown list. |
-| `設定` | user, by hand | Runtime knobs: default currency, default account, journal tab name. |
+| `日記帳` | code, plus occasional hand rows (marked 來源=手動) | Journal. Single zh-TW header row (row 1), data from row 2. No formulas ever on this tab. |
+| `會計科目` | user, by hand | Chart of accounts: `名稱`, `類型` (資產/負債/收入/支出/權益), `子類型` (free text, used only for picker grouping), `啟用` (TRUE/FALSE), `排序` (number). Categories are rows here too (類型=收入 or 支出) — one tab holds the entire vocabulary. Plain unique display names; **no colon or path separators in names**. |
+| `選項清單` | user, by hand | Named enum lists, one list per column: row 1 = list name (v1 ships one column, `對象`), rows 2+ = values. |
+| `設定` | user, by hand | Key/value rows, columns `設定項目` / `值`. v1 keys: `預設幣別` (TWD), `預設帳戶` (an account name). Unknown keys ignored. |
 | `餘額` | formulas only | Per-account live balance: SUMIFS over 借方帳戶/貸方帳戶, signed by 類型; columns located via INDEX/MATCH on header names. |
-| `試算與檢查` | formulas only | Trial balance (total debits == total credits), unknown-account detector, 收款狀態 vs derived AR/AP balance cross-check. |
+| `試算與檢查` | formulas only | Trial balance (total debits == total credits), unknown-account detector, 收款狀態-vs-derived-balance cross-check (scoped per §5.4), non-text 日期/時間 cell detector. |
 
 `日記帳` required headers (15):
 
@@ -96,15 +100,35 @@ Cloudflare Access application: one email, one-time PIN login, 1-month session
 收款狀態 · 沖銷txn_id · txn_id · 來源 · 建立時間
 ```
 
+Column semantics:
+
 - **Code.gs resolves every column by header name, per call.** Adding,
   reordering, or renaming *extra* columns is free. Deleting or renaming one of
   the 15 required headers fails loudly, naming the missing header.
-- `分類` is a denormalized reporting copy; the 借方/貸方 legs are authoritative.
-  `check_consistency` cross-checks the two.
-- `來源` ∈ {`pwa`, `手動`, future `import`}. A fingerprint convention (txn_id
-  doubles as dedupe key for imports) is reserved so a masobu-style bank-CSV
-  import can be re-ported later.
+- `類型` ∈ {`支出`, `收入`, `轉帳`, `調整`} (closed enum; `調整` is written
+  only by `reverse_transaction`).
+- `分類` = the name of the nominal account (a 會計科目 row with 類型=收入 or
+  支出) appearing in either leg of the row; **blank when neither leg is
+  nominal** (transfers, 代墊, settlements). One rule, no exceptions.
+- `對象` = payee/counterparty display name (free text, suggested from
+  選項清單). Required when `iou` is set.
+- `收款狀態` ∈ {blank, `未收`, `部分`, `已收`, `已沖銷`}. Blank for ordinary
+  rows. Set to `未收` at creation of an 應收/應付 row; recomputed to `部分` or
+  `已收` from settlement arithmetic (§5.3); `已沖銷` when the row is reversed.
+  "Open" rows (for lists and outstanding math) = {`未收`, `部分`}.
+- `沖銷txn_id` = on a settlement or reversal row, the `txn_id` of the original
+  row it settles/reverses; blank otherwise. Originals are never edited except
+  the `收款狀態` cell.
+- `txn_id` = the client-generated idempotency key (UUIDv4), one per journal
+  row. Hand rows may leave it blank (such rows are invisible to
+  txn_id-addressed actions). Doubles as the dedupe fingerprint for any future
+  bank-CSV import.
+- `來源` ∈ {`pwa`, `手動`, future `import`}.
 - `金額` is always positive; direction lives entirely in the debit/credit legs.
+- `日期` = `YYYY-MM-DD`; `時間` = `HH:mm`, blank when the user omits it;
+  `建立時間` = ISO-8601 with `+08:00` offset. All three are written as plain
+  text; `setupSpreadsheet()` sets those columns' number format to text (`@`).
+  The same `YYYY-MM-DD` string is the API wire format for all date fields.
 
 ## 5. Posting rules (single input → true double entry)
 
@@ -112,45 +136,109 @@ One `create_transaction` = **exactly one balanced journal row** (one debit
 account, one credit account, one amount). The book balances by construction;
 no hand edit can unbalance a single row.
 
-| User input | Row written |
-|---|---|
-| 支出 paid from asset (現金/銀行/悠遊卡) | debit 分類 / credit that asset account |
-| 支出 paid by credit card | debit 分類 / credit 負債:該卡 |
-| 繳卡費, 悠遊卡加值 (轉帳) | debit to-account / credit from-account; 分類 blank |
-| 收入 | debit receiving account / credit 分類(收入) |
-| 代墊 for someone (toggle + 對象) | debit 應收帳款 / credit paying account; 收款狀態=未收 |
-| Friend paid for the user (應付 toggle) | debit 分類 / credit 應付帳款; 對象 set; 收款狀態=未收 |
-| Collect / repay | transfer row against 應收帳款/應付帳款; `沖銷txn_id` links to the original; partial amounts allowed; original's 收款狀態 → 已收 or 部分 |
-| Opening balance | ordinary row: debit asset / credit 權益:期初餘額 (餘額 stays a pure formula, zero special cases) |
-| Mistake | `reverse_transaction`: mirror row, 類型=調整; no deletes via API |
+### 5.1 Column-complete posting table
 
-- 應收帳款 and 應付帳款 are single accounts in 會計科目; per-person tracking is
-  via the `對象` column. Outstanding per 對象 = sum of uncollected rows minus
-  linked 沖銷 rows.
-- A split purchase (e.g. groceries partly 代墊) = **two creates**, presented as
-  one split screen in the PWA. Rationale: one-nonce-one-row keeps
-  retry-idempotency airtight — a mid-write crash can never half-post a
-  transaction.
+Every row below also writes: 金額 (positive), 幣別, 說明, 對象 (as noted),
+txn_id = idempotencyKey, 來源=pwa, 建立時間 = server now. "分類" follows the
+§4 rule automatically; it is listed for clarity.
+
+| Case | 類型 | 借方帳戶 | 貸方帳戶 | 分類 | 收款狀態 | 沖銷txn_id |
+|---|---|---|---|---|---|---|
+| 支出 from asset (現金/銀行/悠遊卡) | 支出 | the category | the asset account | the category | blank | blank |
+| 支出 by credit card | 支出 | the category | that card's 負債 account | the category | blank | blank |
+| 轉帳 (繳卡費, 悠遊卡加值, …) | 轉帳 | to-account | from-account | blank | blank | blank |
+| 收入 | 收入 | receiving account | the income category | the category | blank | blank |
+| 代墊 (`iou: '應收'`) | 支出 | 應收帳款 | paying account | blank | 未收 | blank |
+| Friend paid for user (`iou: '應付'`) | 支出 | the category | 應付帳款 | the category | 未收 | blank |
+| Settle (collect 應收 / repay 應付) | 轉帳 | derived (§5.3) | derived (§5.3) | blank | blank | original txn_id |
+| Opening balance (bootstrap/migration) | 轉帳 | asset account | 期初餘額 (類型=權益) | blank | blank | blank |
+| Reverse (mistake) | 調整 | original 貸方 | original 借方 | per §4 rule | blank | original txn_id |
+
+Account names in this table are descriptions, not literal names: "that card's
+負債 account" means whatever the user named it in 會計科目 (e.g. `國泰卡`);
+`期初餘額`, `應收帳款`, `應付帳款` are seeded by `setupSpreadsheet()` as plain
+names with the stated 類型. Liability opening balances mirror the asset rule
+(credit the liability, debit 期初餘額).
+
+### 5.2 Per-type field matrix for create_transaction
+
+| Field | 支出 | 收入 | 轉帳 |
+|---|---|---|---|
+| account (paying/receiving) | required | required | required (from) |
+| toAccount | rejected | rejected | required |
+| category | required (unless `iou:'應收'`, then ignored) | required | rejected |
+| payee | optional; required when iou set | optional | rejected |
+| iou | optional | rejected | rejected |
+
+Presence rules are enforced by Code.gs (vocabulary layer); the Pages Function
+checks structure only. Fields marked "rejected" cause a named error, not
+silent dropping — a stale field after a type toggle must fail loudly.
+
+### 5.3 Settlement (`settle` action) semantics
+
+- Orientation is derived from the original row (looked up by txn_id): if the
+  original's **debit** leg is 應收帳款, the settlement row is debit
+  `account` (money received) / credit 應收帳款; if the original's **credit**
+  leg is 應付帳款, the settlement row is debit 應付帳款 / credit `account`
+  (money paid out).
+- `amount` omitted → remaining outstanding. `amount` > remaining outstanding →
+  named error.
+- Outstanding(original) = original 金額 − Σ 金額 of rows whose 沖銷txn_id =
+  original txn_id and 類型=轉帳. After each settle, the original's 收款狀態
+  cell is recomputed: outstanding = 0 → `已收`, else `部分`.
+- Writes are ordered settlement-row-first, status-cell-second; a crash between
+  the two leaves arithmetic truth intact (status is a cache) and
+  `check_consistency` flags/repairs the stale cell.
+
+### 5.4 Reversal semantics
+
+- The mirror row writes 沖銷txn_id = original txn_id.
+- Reversing a row whose 收款狀態 ∈ {未收, 部分} sets the original's status to
+  `已沖銷`; such rows leave lists and outstanding math. Reversing an original
+  that already has settlements is rejected with a named error (settle the
+  remainder or reverse the settlements first — v1 keeps this strict).
+- The 試算與檢查 status cross-check applies only to rows with 收款狀態 set;
+  the 分類-consistency check applies only to rows with a nominal leg.
+
+### 5.5 Deliberate constraints
+
+- A split purchase (e.g. groceries partly 代墊) = **two creates** with two
+  idempotency keys, presented as one split screen in the PWA. Rationale:
+  one-nonce-one-row keeps retry-idempotency airtight — a mid-write crash can
+  never half-post a transaction.
 - 悠遊卡/cash drift reconciliation is a v1 *workflow*, not an action: check
-  餘額 in the Sheets app, enter one adjustment 支出/收入 with 分類=調整. A
-  one-tap reconcile screen is deferred to v2.
+  餘額 in the Sheets app, then enter one adjustment 支出 with 分類=調整支出 or
+  收入 with 分類=調整收入 (both seeded by `setupSpreadsheet()`). A one-tap
+  reconcile screen is deferred to v2.
 
 ## 6. API contract
 
-Envelope: `{ ts, nonce, payload, sig }`, HMAC-SHA256, ±300 s skew, replay
-cache — ported, with three fixes to bugs inherited from the production
-expense-hermes Code.js:
+Envelope: `{ ts, nonce, payload, sig }`, HMAC-SHA256, ±300 s skew — ported,
+with these fixes to bugs inherited from the production expense-hermes Code.js:
 
-1. **Nonce committed only after a successful write.** (Current production
-   caches the nonce during verify, before the write: a failed write + client
-   retry returns `replayed nonce`, which the client maps to success — a
-   silently lost entry.) New: cache `nonce → result` post-write; replays return
-   the stored result.
-2. **LockService wraps verify+write**, closing the CacheService check-then-put
-   race (timeout-retry landing while the first call still runs).
-3. **Mutating non-create actions are idempotent too**: `collect_receivable`
-   and `reverse_transaction` take the PWA idempotencyKey as nonce and pre-check
-   state (already collected/reversed → `{ ok, already: true }`).
+1. **Lock before nonce.** Signature and timestamp-skew verification are
+   lock-free; then LockService is acquired and the nonce check, vocabulary
+   validation, write, and nonce commit all happen inside the lock. (Production
+   checks-and-commits the nonce before the write, outside any lock — both a
+   lost-entry bug and a same-nonce race.)
+2. **Nonce committed only after a successful write**, as `nonce → result`
+   (CacheService, 600 s TTL). A replayed create returns the stored result with
+   `already: true` added. The taxonomy change for the client: the old
+   `replayed nonce`-string → success mapping is deleted; the PWA reads
+   `already` from the response body.
+3. **Durable idempotency backstop**: because txn_id = idempotencyKey, `create`
+   and `settle` scan the txn_id column for the key before appending (covers
+   CacheService eviction). Personal-scale row counts make this cheap.
+4. **Mutating non-create actions are idempotent too**: `settle` and
+   `reverse_transaction` use the idempotencyKey as nonce; their "already done"
+   pre-checks read the journal, not the status cache: settle → a row with
+   txn_id = key exists, or outstanding ≤ 0 → `{ ok, already: true }`; reverse
+   → any 類型=調整 row with 沖銷txn_id = target → `{ ok, already: true }`.
+
+`schema_version` = first 12 hex chars of SHA-256 over the canonical JSON
+serialization (row-major arrays of display values of the used ranges) of
+會計科目 + 選項清單 + 設定, computed by one shared function used by both
+`health` and `get_options`.
 
 Actions (9):
 
@@ -158,13 +246,13 @@ Actions (9):
 |---|---|
 | `health` | → `{ ok, now, schema_version, spreadsheet_id_tail }` |
 | `auth-check` | Pages-Function-only; returns Access JWT expiry for the visibilitychange re-check flow (ported) |
-| `get_options` | reads 會計科目 + 選項清單 + 設定 → grouped accounts, categories, payees, defaults, `schema_version` (content hash of the vocabulary tabs). PWA caches in localStorage, background-refreshes |
-| `create_transaction` | `{ type: 支出\|收入\|轉帳, date, time?, amount, currency?, account, toAccount?, category?, payee?, description, ar? }` + idempotencyKey→nonce. GAS validates vocabulary, expands per §5, appends one row |
-| `list_transactions` | `{ date_from, date_to }` → recent entries (row data incl. txn_id) |
-| `list_receivables` | open 應收/應付 grouped by 對象, each with computed outstanding |
-| `collect_receivable` | `{ txn_id, account, date, amount? }` → settlement row + status flip; partial OK; idempotent |
-| `reverse_transaction` | `{ txn_id, date }` → mirror legs, 類型=調整; idempotent |
-| `check_consistency` | audit report: unknown/disabled accounts in journal, 分類 vs nominal-leg mismatch, 收款狀態 vs derived balance, non-positive amounts, stray cells below the journal; installable as a weekly trigger that emails on failure |
+| `get_options` | → `{ schema_version, accounts: [{name, type, subtype, sort}] (啟用 only, real accounts: 類型 資產/負債), categories: { 支出: [names], 收入: [names] } (啟用 only), payees: [names], defaults: { currency, account } }` |
+| `create_transaction` | `{ type: 支出\|收入\|轉帳, date, time?, amount, currency?, account, toAccount?, category?, payee?, description, iou?: 應收\|應付 }` + idempotencyKey→nonce. Validates per §5.2 against 會計科目 (must be 啟用), expands per §5.1, appends one row. Omitted time → blank cell; omitted currency → 設定 default |
+| `list_transactions` | `{ date_from, date_to }` (YYYY-MM-DD, inclusive) → rows newest-first, max 200: `{ txn_id, 日期, 時間, 類型, 借方帳戶, 貸方帳戶, 金額, 幣別, 分類, 對象, 說明, 收款狀態 }` as written (text strings) |
+| `list_receivables` | rows with 收款狀態 ∈ {未收, 部分}, grouped by 對象, each with direction (應收/應付) and computed outstanding per §5.3 |
+| `settle` | `{ txn_id, account, date, amount? }` + idempotencyKey → settlement row per §5.3 + status recompute; partial OK; idempotent per fix 4. Settles both 應收 and 應付 (orientation derived) |
+| `reverse_transaction` | `{ txn_id, date }` + idempotencyKey → mirror row per §5.4; idempotent per fix 4. `settle`/`reverse` skip the 啟用 check (they reuse legs of an existing row, which may reference since-disabled accounts) |
+| `check_consistency` | audit report: unknown/disabled accounts in journal, 分類 vs nominal-leg mismatch (nominal-leg rows only), 收款狀態 vs derived outstanding (status-bearing rows only), stale status cells (repairable), non-positive amounts, non-text 日期/時間 cells, stray cells below the journal, 調整 rows without 沖銷txn_id; installable as a weekly trigger that emails on failure |
 
 `setupSpreadsheet()` (bootstrap) and `closeAndOpenBooks()` (migration) are
 **editor-run only**, never routed through `doPost`.
@@ -172,21 +260,26 @@ Actions (9):
 ## 7. PWA UI
 
 Forked Wise-style shell: type toggle 支出/收入/轉帳 → amount keypad → account
-picker → category grid → optional 對象/代墊/應付 row → submit. Two additional
-screens: recent entries; outstanding 應收/應付 with one-tap collect.
+picker (grouped by 子類型) → category grid (per-type list from get_options) →
+optional 對象 row with 代墊(應收)/應付 toggles → submit. Two additional
+screens: recent entries (list_transactions); outstanding 應收/應付 grouped by
+對象 with one-tap settle.
 
 The form is **static code** (no dynamic field renderer), but every option list
-comes from `get_options`. On `schema_version` change mid-session: soft warning
-banner only, never a hard block.
+comes from `get_options` (localStorage cache, background refresh). On
+`schema_version` change mid-session: soft warning banner only, never a hard
+block.
 
 ## 8. Error handling
 
-- PWA: 15 s timeout; error taxonomy ported from expense-pwa; retries reuse the
-  idempotency key; no offline queue.
+- PWA: 15 s timeout; retries reuse the idempotency key; replay detection via
+  `already: true` in response bodies (see §6 fix 2); no offline queue.
 - Pages Function: 401 bad/missing JWT; 400 structural; GAS errors forwarded
   verbatim.
-- Code.gs: unknown account/category → error naming the value; missing required
-  header → error naming the header; all writes under LockService.
+- Code.gs: unknown/disabled account or category → error naming the value;
+  missing required header → error naming the header; §5.2 "rejected" fields →
+  error naming the field; over-settlement → error; all mutations inside
+  LockService.
 - Hand-edit safety net: COA-fed data-validation dropdowns on 借方帳戶/貸方帳戶
   (advisory), 試算與檢查 tab always on, `check_consistency` weekly email
   trigger.
@@ -195,43 +288,73 @@ banner only, never a hard block.
 
 ## 9. Testing
 
-- Fork the passing envelope/JWT/handler vitest suites; keep `gen-fixture.py`
-  byte-parity HMAC fixtures.
-- Posting rules: table tests per §5 row, plus a **property test: for every
-  representable input, debits == credits**.
+- Fork the envelope/JWT vitest suites (near-verbatim; they test
+  contract-independent crypto/JWT plumbing). handler/validate suites are
+  **rewritten** against the new 9-action contract. `gen-fixture.py` is adapted
+  (see §3) and regenerated fixtures keep byte-parity between Python and TS
+  envelope builders.
+- Posting engine: `expandPosting_(input)` in Code.gs is a **pure function**
+  (no GAS API calls). Vitest evals Code.gs with stubbed GAS globals and runs:
+  table tests for every §5.1 row, the §5.2 matrix (required/rejected), §5.3
+  orientation+outstanding cases, and a **property test: for every representable
+  input, debits == credits**. Single implementation — no TS mirror, no drift.
 - Header resolution: reorder/insert/rename-extra → works; delete required
   header → loud named failure.
-- Drift guard: a vitest parses `Code.gs` and cross-checks its posting table
-  against the TS preview copy.
 - Manual smoke checklist in README: Access gate 401 unauthenticated, `health`
   from phone, one real entry visible in the sheet, PWA home-screen install,
   visibilitychange re-auth.
 
 ## 10. Ops, migration, backup
 
-- **Bootstrap**: run `setupSpreadsheet()` in the Apps Script editor against a
-  blank spreadsheet — builds all tabs, headers, formulas, dropdown
-  validations. No xlsx template. Script Properties: `EXPENSE_API_SECRET`,
-  `LEDGER_SPREADSHEET_ID`. Pages env vars: same four names as expense-pwa.
-- **Migration to a new spreadsheet**: Path A `closeAndOpenBooks(oldId)` —
-  fresh book carrying opening balances + still-open 應收/應付 rows (row-level
-  history intentionally left behind); Path B — File → Make a copy (full
-  history). Both end: paste new ID into the Script Property, run
-  `check_consistency`, confirm `health` shows the new `spreadsheet_id_tail`.
-  Zero code changes.
+- **Bootstrap**: create a blank spreadsheet → paste its ID into Script
+  Property `LEDGER_SPREADSHEET_ID` → run `setupSpreadsheet()` in the Apps
+  Script editor: builds all tabs and headers, sets text format (`@`) on
+  日期/時間 columns, installs formulas and dropdown validations, seeds
+  會計科目 with 期初餘額(權益), 應收帳款(資產), 應付帳款(負債),
+  調整支出(支出), 調整收入(收入) plus starter accounts. Script Properties:
+  `EXPENSE_API_SECRET`, `LEDGER_SPREADSHEET_ID`. Pages env vars: same four
+  names as expense-pwa.
+- **Migration to a new spreadsheet** (Path A, fresh book): (1) create blank
+  spreadsheet, run `setupSpreadsheet()` against it (operator temporarily
+  points `LEDGER_SPREADSHEET_ID` at the new ID); (2) run
+  `closeAndOpenBooks(oldSpreadsheetId)`, which reads the OLD book and writes
+  into the NEW (current) book: per-account opening-balance rows at balances
+  as of migration (assets and liabilities, against 期初餘額), plus one row per
+  still-open 應收/應付 item **at its remaining outstanding** (fresh txn_id,
+  收款狀態=未收, original description prefixed `承前-`; linked settlement
+  history intentionally stays in the old book); (3) run `check_consistency`;
+  (4) confirm `health` shows the new `spreadsheet_id_tail`. Path B (full
+  history): File → Make a copy, point the Script Property at the copy. Zero
+  code changes either way.
 - **Backup**: weekly GAS time-driven trigger copies the spreadsheet to a Drive
   backup folder (the sheet is the only datastore).
-- Pinned contracts: `appsscript.json` timeZone `Asia/Taipei`; 日期/時間 written
-  as text with explicit formats (avoids Date-serial/1899-12-30 coercion bugs);
-  data rows start at row 2.
+- Pinned contracts: `appsscript.json` timeZone `Asia/Taipei`; date/time
+  formats per §4; data rows start at row 2.
 
-## 11. Non-goals (v1)
+## 11. Build order (three independently verifiable phases)
+
+1. **Spine**: Code.gs envelope layer with §6 fixes 1–3 + `health` +
+   `create_transaction` + `expandPosting_` + `setupSpreadsheet()`; rewritten
+   Pages functions; adapted gen-fixture.py; envelope/posting tests green; one
+   real row appended end-to-end.
+2. **Vocabulary & form**: `get_options` + schema_version + 餘額/試算與檢查
+   formulas + the PWA entry form + auth-check flow; entry usable daily from
+   the phone.
+3. **Receivables & ops**: `list_transactions`, `list_receivables`, `settle`,
+   `reverse_transaction`, `check_consistency` + the two PWA screens + weekly
+   backup/consistency triggers + `closeAndOpenBooks()`.
+
+Each phase gets its own implementation plan and review checkpoint.
+
+## 12. Non-goals (v1)
 
 - Offline queue / background sync
 - Budgets; reports beyond the 餘額/試算與檢查 formula tabs
 - Multi-currency balance math (幣別 stored; totals assume TWD)
-- Bank-CSV import (fingerprint/txn_id convention reserved for later re-port)
-- Edit-in-place (`reverse` + re-enter instead)
+- Bank-CSV import (txn_id doubles as the dedupe fingerprint, reserved for a
+  later re-port of the masobu-style import)
+- Edit-in-place (`reverse` + re-enter instead); reversing an original that
+  already has settlements (kept strict in v1, see §5.4)
 - Dynamic form fields (new *form fields* cost a small code edit + Pages
   auto-deploy — accepted trade-off)
 - Dedicated one-tap reconcile screen (v2)
