@@ -638,7 +638,8 @@ function setupSpreadsheet() {
   initializeBlankSheet_(balances, [['名稱', '類型', '餘額']]);
   initializeBlankSheet_(checks, [['檢查項目', '結果']]);
 
-  // Issue #6 fills formula rows under the 餘額 and 試算與檢查 headers.
+  installBalanceFormulas_(balances, accounts, journal.getMaxRows());
+  installCheckFormulas_(checks, accounts, journal.getMaxRows());
 
   var journalHeaderRow = journal
     .getRange(1, 1, 1, journal.getLastColumn())
@@ -696,6 +697,193 @@ function initializeBlankSheet_(sheet, rows) {
     return;
   }
   sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+function installBalanceFormulas_(sheet, accounts, journalMaxRows) {
+  if (sheet.getLastRow() !== 1 || sheet.getLastColumn() !== 3) {
+    return;
+  }
+
+  var accountCount = accounts.getLastRow() - 1;
+  if (accountCount < 1) {
+    return;
+  }
+
+  var accountTypes = accounts.getRange(2, 2, accountCount, 1).getValues();
+  var accountMaxRows = accounts.getMaxRows();
+  var accountHeaderRow = "'會計科目'!$1:$1";
+  var accountRows = "'會計科目'!$1:$" + accountMaxRows;
+  var amounts = journalColumnFormula_('金額', journalMaxRows);
+  var debitAccounts = journalColumnFormula_('借方帳戶', journalMaxRows);
+  var creditAccounts = journalColumnFormula_('貸方帳戶', journalMaxRows);
+  var rows = [];
+  var index;
+
+  for (index = 0; index < accountCount; index += 1) {
+    var sheetRow = index + 2;
+    var accountType = accountTypes[index][0];
+    var debitTotal =
+      'SUMIFS(' + amounts + ',' + debitAccounts + ',$A' + sheetRow + ')';
+    var creditTotal =
+      'SUMIFS(' + amounts + ',' + creditAccounts + ',$A' + sheetRow + ')';
+    var balanceFormula;
+
+    if (accountType === '資產' || accountType === '支出') {
+      balanceFormula =
+        '=IF(OR($B' +
+        sheetRow +
+        '="資產",$B' +
+        sheetRow +
+        '="支出"),' +
+        debitTotal +
+        '-' +
+        creditTotal +
+        ',' +
+        creditTotal +
+        '-' +
+        debitTotal +
+        ')';
+    } else {
+      balanceFormula =
+        '=IF(OR($B' +
+        sheetRow +
+        '="負債",$B' +
+        sheetRow +
+        '="收入",$B' +
+        sheetRow +
+        '="權益"),' +
+        creditTotal +
+        '-' +
+        debitTotal +
+        ',' +
+        debitTotal +
+        '-' +
+        creditTotal +
+        ')';
+    }
+
+    rows.push([
+      '=INDEX(' +
+        accountRows +
+        ',ROW(),MATCH("名稱",' +
+        accountHeaderRow +
+        ',0))',
+      '=INDEX(' +
+        accountRows +
+        ',ROW(),MATCH("類型",' +
+        accountHeaderRow +
+        ',0))',
+      balanceFormula,
+    ]);
+  }
+
+  sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+function installCheckFormulas_(sheet, accounts, journalMaxRows) {
+  if (sheet.getLastRow() !== 1 || sheet.getLastColumn() !== 2) {
+    return;
+  }
+
+  var accountNames =
+    "INDEX('會計科目'!$2:$" +
+    accounts.getMaxRows() +
+    ',0,MATCH("名稱",\'會計科目\'!$1:$1,0))';
+  var dates = journalColumnFormula_('日期', journalMaxRows);
+  var times = journalColumnFormula_('時間', journalMaxRows);
+  var types = journalColumnFormula_('類型', journalMaxRows);
+  var debitAccounts = journalColumnFormula_('借方帳戶', journalMaxRows);
+  var creditAccounts = journalColumnFormula_('貸方帳戶', journalMaxRows);
+  var amounts = journalColumnFormula_('金額', journalMaxRows);
+  var statuses = journalColumnFormula_('結清狀態', journalMaxRows);
+  var linkedTxnIds = journalColumnFormula_('沖銷txn_id', journalMaxRows);
+  var txnIds = journalColumnFormula_('txn_id', journalMaxRows);
+  var debitTotal = 'SUMIF(' + debitAccounts + ',"<>",' + amounts + ')';
+  var creditTotal = 'SUMIF(' + creditAccounts + ',"<>",' + amounts + ')';
+
+  var trialBalanceFormula =
+    '=LET(debitTotal,' +
+    debitTotal +
+    ',creditTotal,' +
+    creditTotal +
+    ',IF(debitTotal=creditTotal,"OK","異常：借方總額 "&debitTotal&"；貸方總額 "&creditTotal))';
+
+  var unknownAccountFormula =
+    '=LET(unknownCount,' +
+    'SUM(ARRAYFORMULA(IF(' +
+    debitAccounts +
+    '="",0,--(COUNTIF(' +
+    accountNames +
+    ',' +
+    debitAccounts +
+    ')=0))))+' +
+    'SUM(ARRAYFORMULA(IF(' +
+    creditAccounts +
+    '="",0,--(COUNTIF(' +
+    accountNames +
+    ',' +
+    creditAccounts +
+    ')=0)))),' +
+    'IF(unknownCount=0,"OK","異常："&unknownCount&" 個未知帳戶"))';
+
+  var statusFormula =
+    '=LET(statuses,' +
+    statuses +
+    ',txnIds,' +
+    txnIds +
+    ',amounts,' +
+    amounts +
+    ',mismatchCount,' +
+    'SUM(MAP(statuses,txnIds,amounts,LAMBDA(status,txnId,originalAmount,' +
+    'IF(status="",0,' +
+    'IF(status="已沖銷",' +
+    '--(COUNTIFS(' +
+    linkedTxnIds +
+    ',txnId,' +
+    types +
+    ',"沖銷")=0),' +
+    'LET(settledAmount,SUMIFS(' +
+    amounts +
+    ',' +
+    linkedTxnIds +
+    ',txnId,' +
+    types +
+    ',"轉帳"),' +
+    'outstanding,originalAmount-settledAmount,' +
+    'expectedStatus,IF(outstanding=0,"已結",IF(outstanding<originalAmount,"部分","未結")),' +
+    '--(status<>expectedStatus))))))),' +
+    'IF(mismatchCount=0,"OK","異常："&mismatchCount&" 筆結清狀態不一致"))';
+
+  var nonTextDateTimeFormula =
+    '=LET(nonTextCount,' +
+    'SUM(ARRAYFORMULA(IF(' +
+    dates +
+    '="",0,--NOT(ISTEXT(' +
+    dates +
+    ')))))+' +
+    'SUM(ARRAYFORMULA(IF(' +
+    times +
+    '="",0,--NOT(ISTEXT(' +
+    times +
+    '))))),' +
+    'IF(nonTextCount=0,"OK","異常："&nonTextCount&" 個日期/時間儲存格不是文字"))';
+
+  sheet.getRange(2, 1, 4, 2).setValues([
+    ['試算平衡', trialBalanceFormula],
+    ['未知帳戶', unknownAccountFormula],
+    ['結清狀態與衍生餘額', statusFormula],
+    ['非文字日期/時間', nonTextDateTimeFormula],
+  ]);
+}
+
+function journalColumnFormula_(header, journalMaxRows) {
+  return (
+    "INDEX('日記帳'!$2:$" +
+    journalMaxRows +
+    ',0,MATCH("' +
+    header +
+    '",\'日記帳\'!$1:$1,0))'
+  );
 }
 
 function expandPosting_(input) {
