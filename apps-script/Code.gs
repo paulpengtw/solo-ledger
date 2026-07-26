@@ -1618,6 +1618,254 @@ function installWeeklyTriggers() {
 }
 
 // Editor-run only: setupSpreadsheet() and closeAndOpenBooks() are never routed through doPost.
+function closeAndOpenBooks(oldSpreadsheetId) {
+  var sourceId = String(oldSpreadsheetId || '').trim();
+  if (!sourceId) {
+    throw new Error('oldSpreadsheetId is required');
+  }
+
+  var targetId = requiredProp_('LEDGER_SPREADSHEET_ID');
+  if (sourceId === targetId) {
+    throw new Error('old and new spreadsheet ids must differ');
+  }
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(LOCK_WAIT_MILLISECONDS);
+  try {
+    setupSpreadsheet();
+
+    var targetSpreadsheet = SpreadsheetApp.openById(targetId);
+    var targetJournal = requiredSheet_(targetSpreadsheet, '日記帳');
+    if (targetJournal.getLastRow() > 1) {
+      throw new Error('new book journal must be empty before migration');
+    }
+
+    // The source book is intentionally read-only. All writes below target
+    // targetJournal in the current spreadsheet.
+    var sourceSpreadsheet = SpreadsheetApp.openById(sourceId);
+    var sourceJournal = requiredSheet_(sourceSpreadsheet, '日記帳');
+    var sourceHeader = sourceJournal
+      .getRange(1, 1, 1, sourceJournal.getLastColumn())
+      .getDisplayValues()[0];
+    var sourceColumns = resolveHeaders_(sourceHeader, JOURNAL_HEADERS);
+    var sourceRecords = readJournalRecords_(
+      sourceJournal,
+      sourceColumns,
+    );
+    var sourceVocabulary = readAccountVocabulary_(sourceSpreadsheet);
+    var targetVocabulary = readAccountVocabulary_(targetSpreadsheet);
+    var targetHeader = targetJournal
+      .getRange(1, 1, 1, targetJournal.getLastColumn())
+      .getDisplayValues()[0];
+    var targetColumns = resolveHeaders_(targetHeader, JOURNAL_HEADERS);
+    var defaultCurrency = readSetting_(targetSpreadsheet, '預設幣別');
+    var migrationNow = taipeiIsoNow_();
+    var migrationDate = migrationNow.slice(0, 10);
+    var balances = migrationAccountBalances_(
+      sourceRecords,
+      sourceVocabulary.accountTypes,
+    );
+    var carried = migrationOutstandingItems_(sourceRecords);
+    var carriedTotals = {
+      '應收帳款': 0,
+      '應付帳款': 0,
+    };
+    var index;
+
+    for (index = 0; index < carried.length; index += 1) {
+      var carriedAccount = carried[index].account;
+      carriedTotals[carriedAccount] = normalizedAmount_(
+        carriedTotals[carriedAccount] + carried[index].outstanding,
+      );
+    }
+
+    var postings = [];
+    var openingCount = 0;
+    var accountTypes = sourceVocabulary.accountTypes;
+    for (var account in accountTypes) {
+      if (!Object.prototype.hasOwnProperty.call(accountTypes, account)) {
+        continue;
+      }
+      var accountType = accountTypes[account];
+      if (accountType !== '資產' && accountType !== '負債') {
+        continue;
+      }
+
+      var openingAmount = balances[account];
+      if (
+        account === '應收帳款' ||
+        account === '應付帳款'
+      ) {
+        openingAmount = normalizedAmount_(
+          openingAmount - carriedTotals[account],
+        );
+      }
+      if (openingAmount === 0) {
+        continue;
+      }
+      if (openingAmount < 0) {
+        throw new Error(
+          'cannot migrate negative balance for account: ' + account,
+        );
+      }
+
+      var openingPosting = expandPosting_({
+        kind: 'opening',
+        account: account,
+        amount: openingAmount,
+        date: migrationDate,
+        currency: defaultCurrency,
+        source: '移轉',
+        accountTypes: accountTypes,
+        txnId: Utilities.getUuid(),
+        now: migrationNow,
+      });
+      validatePostingVocabulary_(openingPosting, targetVocabulary);
+      postings.push(openingPosting);
+      openingCount += 1;
+    }
+
+    for (index = 0; index < carried.length; index += 1) {
+      var item = carried[index];
+      var carriedPosting = expandPosting_({
+        kind: 'opening',
+        account: item.account,
+        amount: item.outstanding,
+        date: migrationDate,
+        currency: item.record.values['幣別'] || defaultCurrency,
+        source: '移轉',
+        accountTypes: accountTypes,
+        txnId: Utilities.getUuid(),
+        now: migrationNow,
+      });
+      carriedPosting['對象'] = item.record.values['對象'];
+      carriedPosting['說明'] = '承前-' + item.record.values['說明'];
+      carriedPosting['結清狀態'] = '未結';
+      validatePostingVocabulary_(carriedPosting, targetVocabulary);
+      postings.push(carriedPosting);
+    }
+
+    if (postings.length > 0) {
+      targetJournal
+        .getRange(
+          2,
+          1,
+          postings.length,
+          targetJournal.getLastColumn(),
+        )
+        .setValues(
+          migrationPostingValues_(
+            postings,
+            targetColumns,
+            targetJournal.getLastColumn(),
+          ),
+        );
+    }
+
+    return {
+      ok: true,
+      opening_rows: openingCount,
+      carried_rows: carried.length,
+      rows: postings.length,
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function migrationAccountBalances_(records, accountTypes) {
+  var balances = Object.create(null);
+  var account;
+  var index;
+
+  for (account in accountTypes) {
+    if (!Object.prototype.hasOwnProperty.call(accountTypes, account)) {
+      continue;
+    }
+    if (
+      accountTypes[account] === '資產' ||
+      accountTypes[account] === '負債'
+    ) {
+      balances[account] = 0;
+    }
+  }
+
+  for (index = 0; index < records.length; index += 1) {
+    var record = records[index];
+    var amount = record.amount;
+    var debitAccount = record.values['借方帳戶'];
+    var creditAccount = record.values['貸方帳戶'];
+
+    if (Object.prototype.hasOwnProperty.call(balances, debitAccount)) {
+      balances[debitAccount] +=
+        accountTypes[debitAccount] === '資產' ? amount : -amount;
+    }
+    if (Object.prototype.hasOwnProperty.call(balances, creditAccount)) {
+      balances[creditAccount] +=
+        accountTypes[creditAccount] === '資產' ? -amount : amount;
+    }
+  }
+
+  for (account in balances) {
+    if (Object.prototype.hasOwnProperty.call(balances, account)) {
+      balances[account] = normalizedAmount_(balances[account]);
+    }
+  }
+  return balances;
+}
+
+function migrationOutstandingItems_(records) {
+  var items = [];
+  for (var index = 0; index < records.length; index += 1) {
+    var record = records[index];
+    var status = record.values['結清狀態'];
+    if (status !== '未結' && status !== '部分') {
+      continue;
+    }
+
+    var outstanding = outstandingForRecord_(records, record);
+    if (outstanding === 0) {
+      continue;
+    }
+    if (outstanding < 0) {
+      throw new Error(
+        'cannot migrate negative outstanding for txn_id: ' +
+          record.values.txn_id,
+      );
+    }
+    items.push({
+      record: record,
+      account:
+        receivableDirection_(record.values) === '應收'
+          ? '應收帳款'
+          : '應付帳款',
+      outstanding: outstanding,
+    });
+  }
+  return items;
+}
+
+function migrationPostingValues_(postings, columns, columnCount) {
+  var rows = [];
+  for (var rowIndex = 0; rowIndex < postings.length; rowIndex += 1) {
+    var row = [];
+    var columnIndex;
+    for (columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
+      row.push('');
+    }
+    for (
+      columnIndex = 0;
+      columnIndex < JOURNAL_HEADERS.length;
+      columnIndex += 1
+    ) {
+      var header = JOURNAL_HEADERS[columnIndex];
+      row[columns[header] - 1] = postings[rowIndex][header];
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
 function setupSpreadsheet() {
   var spreadsheetId = PropertiesService.getScriptProperties().getProperty(
     'LEDGER_SPREADSHEET_ID',

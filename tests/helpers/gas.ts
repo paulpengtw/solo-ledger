@@ -565,6 +565,7 @@ export type FakeDoPostEvent = {
 
 type SetupGasFunctions = Pick<GasFunctions, 'resolveHeaders_' | 'JOURNAL_HEADERS'> & {
   setupSpreadsheet: () => void
+  closeAndOpenBooks: (oldSpreadsheetId: string) => Record<string, unknown>
   doPost: (event: FakeDoPostEvent) => FakeTextOutput
   checkConsistency_: (payload?: { repair?: boolean }) => Record<string, unknown>
   weeklyConsistencyCheck: () => Record<string, unknown>
@@ -579,6 +580,9 @@ type SetupGasFunctions = Pick<GasFunctions, 'resolveHeaders_' | 'JOURNAL_HEADERS
 
 export type FakeGasHarness = SetupGasFunctions & {
   spreadsheet: FakeSpreadsheet
+  oldSpreadsheet: FakeSpreadsheet
+  spreadsheetId: string
+  oldSpreadsheetId: string
   drive: FakeDrive
   mailMessages: FakeMailMessage[]
   triggers: FakeTrigger[]
@@ -595,14 +599,22 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
   const source = readFileSync(codePath, 'utf8')
   const events: string[] = []
   const recordEvent = (event: string) => events.push(event)
+  const spreadsheetId = 'test-ledger-spreadsheet-id'
+  const oldSpreadsheetId = 'test-old-ledger-spreadsheet-id'
   const spreadsheet = new FakeSpreadsheet(recordEvent)
-  const drive = new FakeDrive('test-ledger-spreadsheet-id')
+  const oldSpreadsheet = new FakeSpreadsheet(recordEvent)
+  const spreadsheets = new Map<string, FakeSpreadsheet>([
+    [spreadsheetId, spreadsheet],
+    [oldSpreadsheetId, oldSpreadsheet],
+  ])
+  const drive = new FakeDrive(spreadsheetId)
   const mailMessages: FakeMailMessage[] = []
   const triggers: FakeTrigger[] = []
+  let nextUuid = 1
   let cacheNow = Date.now()
   const cacheEntries = new Map<string, { value: string; expiresAt: number }>()
   const scriptProperties = new Map<string, string>([
-    ['LEDGER_SPREADSHEET_ID', 'test-ledger-spreadsheet-id'],
+    ['LEDGER_SPREADSHEET_ID', spreadsheetId],
     ['EXPENSE_API_SECRET', 'test-secret'],
   ])
   const scriptCache = {
@@ -637,10 +649,9 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
   }
   const spreadsheetApp = {
     openById(id: string) {
-      if (id !== 'test-ledger-spreadsheet-id') {
-        throw new Error(`unknown spreadsheet id: ${id}`)
-      }
-      return spreadsheet
+      const resolved = spreadsheets.get(id)
+      if (!resolved) throw new Error(`unknown spreadsheet id: ${id}`)
+      return resolved
     },
     newDataValidation() {
       return new FakeDataValidationBuilder()
@@ -679,6 +690,11 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
         throw new Error(`unsupported digest algorithm: ${algorithm}`)
       }
       return Array.from(createHash('sha256').update(value, 'utf8').digest())
+    },
+    getUuid() {
+      const suffix = String(nextUuid).padStart(12, '0')
+      nextUuid += 1
+      return `00000000-0000-4000-8000-${suffix}`
     },
     base64EncodeWebSafe(bytes: number[]) {
       return Buffer.from(bytes)
@@ -797,6 +813,7 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
       source,
       'return {',
       '  setupSpreadsheet: typeof setupSpreadsheet === "function" ? setupSpreadsheet : undefined,',
+      '  closeAndOpenBooks: typeof closeAndOpenBooks === "function" ? closeAndOpenBooks : undefined,',
       '  doPost: typeof doPost === "function" ? doPost : undefined,',
       '  checkConsistency_: typeof checkConsistency_ === "function" ? checkConsistency_ : undefined,',
       '  weeklyConsistencyCheck: typeof weeklyConsistencyCheck === "function" ? weeklyConsistencyCheck : undefined,',
@@ -846,6 +863,9 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
   return {
     ...functions,
     spreadsheet,
+    oldSpreadsheet,
+    spreadsheetId,
+    oldSpreadsheetId,
     drive,
     mailMessages,
     triggers,
