@@ -16,6 +16,431 @@ var JOURNAL_HEADERS = [
   '建立時間',
 ];
 
+var MAX_SKEW_SECONDS = 300;
+var NONCE_CACHE_SECONDS = 600;
+var LOCK_WAIT_MILLISECONDS = 30000;
+var SCHEMA_SHEET_NAMES = ['會計科目', '選項清單', '設定'];
+var SPREADSHEET_ID_TAIL_LENGTH = 8;
+
+function doPost(e) {
+  try {
+    var requestText =
+      e && e.postData && e.postData.contents ? e.postData.contents : '{}';
+    var verified = verifyEnvelope_(JSON.parse(requestText));
+    return json_(route_(verified.payload, verified.nonce));
+  } catch (error) {
+    return json_({
+      ok: false,
+      error: String(error && error.message ? error.message : error),
+    });
+  }
+}
+
+function route_(payload, nonce) {
+  var action = payload && payload.action;
+
+  if (action === 'health') {
+    return health_();
+  }
+  if (action === 'create_transaction') {
+    return createTransaction_(payload, nonce);
+  }
+
+  throw new Error('unsupported action: ' + action);
+}
+
+function verifyEnvelope_(envelope) {
+  if (!envelope || typeof envelope !== 'object') {
+    throw new Error('invalid envelope');
+  }
+
+  var ts = Number(envelope.ts);
+  var nonce = String(envelope.nonce || '');
+  var payloadB64 = String(envelope.payload || '');
+  var sig = String(envelope.sig || '');
+
+  if (!isFinite(ts)) {
+    throw new Error('missing ts');
+  }
+  if (!nonce) {
+    throw new Error('missing nonce');
+  }
+  if (!payloadB64) {
+    throw new Error('missing payload');
+  }
+  if (!sig) {
+    throw new Error('missing sig');
+  }
+
+  var now = Math.floor(Date.now() / 1000);
+  if (Math.abs(now - ts) > MAX_SKEW_SECONDS) {
+    throw new Error('request timestamp outside allowed window');
+  }
+
+  var secret = requiredProp_('EXPENSE_API_SECRET');
+  var signingInput = ts + '.' + nonce + '.' + payloadB64;
+  var expected = base64UrlEncode_(
+    Utilities.computeHmacSha256Signature(signingInput, secret),
+  );
+  if (!constantTimeEqual_(sig, expected)) {
+    throw new Error('bad signature');
+  }
+
+  var jsonText = Utilities.newBlob(base64UrlDecode_(payloadB64))
+    .getDataAsString('UTF-8');
+  return { payload: JSON.parse(jsonText), nonce: nonce };
+}
+
+function health_() {
+  var spreadsheetId = requiredProp_('LEDGER_SPREADSHEET_ID');
+  var spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+  var tailLength = Math.min(
+    SPREADSHEET_ID_TAIL_LENGTH,
+    Math.max(1, spreadsheetId.length - 1),
+  );
+
+  return {
+    ok: true,
+    now: new Date().toISOString(),
+    schema_version: schemaVersion_(spreadsheet),
+    spreadsheet_id_tail: spreadsheetId.slice(-tailLength),
+  };
+}
+
+function schemaVersion_(spreadsheet) {
+  var tables = [];
+
+  for (var index = 0; index < SCHEMA_SHEET_NAMES.length; index += 1) {
+    var sheetName = SCHEMA_SHEET_NAMES[index];
+    var sheet = spreadsheet.getSheetByName(sheetName);
+    if (!sheet) {
+      throw new Error('missing sheet: ' + sheetName);
+    }
+
+    var lastRow = sheet.getLastRow();
+    var lastColumn = sheet.getLastColumn();
+    tables.push(
+      lastRow === 0 || lastColumn === 0
+        ? []
+        : sheet.getRange(1, 1, lastRow, lastColumn).getDisplayValues(),
+    );
+  }
+
+  var digest = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    JSON.stringify(tables),
+  );
+  return digestHex_(digest).slice(0, 12);
+}
+
+function digestHex_(bytes) {
+  var hex = '';
+  for (var index = 0; index < bytes.length; index += 1) {
+    var unsignedByte = (bytes[index] + 256) % 256;
+    hex += ('0' + unsignedByte.toString(16)).slice(-2);
+  }
+  return hex;
+}
+
+function createTransaction_(payload, nonce) {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('payload is required');
+  }
+  requireField_(payload, 'idempotencyKey');
+  requireField_(payload, 'transaction');
+
+  var idempotencyKey = String(payload.idempotencyKey);
+  if (idempotencyKey !== nonce) {
+    throw new Error('idempotencyKey must match nonce');
+  }
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(LOCK_WAIT_MILLISECONDS);
+
+  try {
+    var cache = CacheService.getScriptCache();
+    var nonceKey = 'nonce:' + nonce;
+    var storedResult = cache.get(nonceKey);
+    if (storedResult) {
+      return withAlready_(JSON.parse(storedResult));
+    }
+
+    var spreadsheet = SpreadsheetApp.openById(
+      requiredProp_('LEDGER_SPREADSHEET_ID'),
+    );
+    var journal = requiredSheet_(spreadsheet, '日記帳');
+    var headerRow = journal
+      .getRange(1, 1, 1, journal.getLastColumn())
+      .getDisplayValues()[0];
+    var journalColumns = resolveHeaders_(headerRow, JOURNAL_HEADERS);
+    var vocabulary = readAccountVocabulary_(spreadsheet);
+    var transaction = payload.transaction;
+
+    validateTransactionVocabulary_(transaction, vocabulary);
+
+    var existingRow = findTxnRow_(
+      journal,
+      journalColumns.txn_id,
+      idempotencyKey,
+    );
+    if (existingRow !== null) {
+      var existingResult = {
+        ok: true,
+        txn_id: idempotencyKey,
+        row: existingRow,
+        already: true,
+      };
+      cache.put(
+        nonceKey,
+        JSON.stringify(existingResult),
+        NONCE_CACHE_SECONDS,
+      );
+      return existingResult;
+    }
+
+    var defaultCurrency = readSetting_(spreadsheet, '預設幣別');
+    var postingInput = {
+      kind: 'create',
+      type: transaction.type,
+      date: transaction.date,
+      time: blank_(transaction.time),
+      amount: transaction.amount,
+      currency: blank_(transaction.currency) || defaultCurrency,
+      account: transaction.account,
+      toAccount: transaction.toAccount,
+      category: transaction.category,
+      payee: transaction.payee,
+      description: transaction.description,
+      accountTypes: vocabulary.accountTypes,
+      txnId: idempotencyKey,
+      now: taipeiIsoNow_(),
+    };
+    if (hasField_(transaction, 'iou')) {
+      postingInput.iou = transaction.iou;
+    }
+    var posting = expandPosting_(postingInput);
+
+    validatePostingVocabulary_(posting, vocabulary);
+    var rowNumber = appendPosting_(journal, journalColumns, posting);
+    var result = {
+      ok: true,
+      txn_id: idempotencyKey,
+      row: rowNumber,
+    };
+    cache.put(nonceKey, JSON.stringify(result), NONCE_CACHE_SECONDS);
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function readAccountVocabulary_(spreadsheet) {
+  var sheet = requiredSheet_(spreadsheet, '會計科目');
+  var lastRow = sheet.getLastRow();
+  var lastColumn = sheet.getLastColumn();
+  var values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
+  var columns = resolveHeaders_(values[0], ['名稱', '類型', '啟用']);
+  var accountTypes = Object.create(null);
+  var enabled = Object.create(null);
+
+  for (var rowIndex = 1; rowIndex < values.length; rowIndex += 1) {
+    var row = values[rowIndex];
+    var name = String(row[columns['名稱'] - 1] || '').trim();
+    if (!name) {
+      continue;
+    }
+    accountTypes[name] = String(row[columns['類型'] - 1] || '').trim();
+    enabled[name] = isTrue_(row[columns['啟用'] - 1]);
+  }
+
+  return { accountTypes: accountTypes, enabled: enabled };
+}
+
+function validateTransactionVocabulary_(transaction, vocabulary) {
+  if (!transaction || typeof transaction !== 'object') {
+    throw new Error('transaction is required');
+  }
+
+  validateOptionalVocabulary_(
+    transaction.account,
+    'account',
+    vocabulary,
+    null,
+  );
+  validateOptionalVocabulary_(
+    transaction.toAccount,
+    'account',
+    vocabulary,
+    null,
+  );
+
+  var categoryType = null;
+  if (transaction.type === '支出') {
+    categoryType = '支出';
+  } else if (transaction.type === '收入') {
+    categoryType = '收入';
+  }
+  validateOptionalVocabulary_(
+    transaction.category,
+    'category',
+    vocabulary,
+    categoryType,
+  );
+}
+
+function validateOptionalVocabulary_(value, label, vocabulary, requiredType) {
+  if (value === undefined || value === null || value === '') {
+    return;
+  }
+
+  var name = String(value);
+  var knownAndEnabled =
+    Object.prototype.hasOwnProperty.call(vocabulary.accountTypes, name) &&
+    vocabulary.enabled[name] === true;
+  var hasRequiredType =
+    requiredType === null || vocabulary.accountTypes[name] === requiredType;
+
+  if (!knownAndEnabled || !hasRequiredType) {
+    throw new Error('unknown or disabled ' + label + ': ' + name);
+  }
+}
+
+function validatePostingVocabulary_(posting, vocabulary) {
+  validateOptionalVocabulary_(
+    posting['借方帳戶'],
+    'account',
+    vocabulary,
+    null,
+  );
+  validateOptionalVocabulary_(
+    posting['貸方帳戶'],
+    'account',
+    vocabulary,
+    null,
+  );
+}
+
+function findTxnRow_(journal, txnColumn, idempotencyKey) {
+  var lastRow = journal.getLastRow();
+  if (lastRow < 2) {
+    return null;
+  }
+
+  var values = journal
+    .getRange(2, txnColumn, lastRow - 1, 1)
+    .getDisplayValues();
+  for (var index = 0; index < values.length; index += 1) {
+    if (String(values[index][0]) === idempotencyKey) {
+      return index + 2;
+    }
+  }
+  return null;
+}
+
+function appendPosting_(journal, journalColumns, posting) {
+  var rowNumber = journal.getLastRow() + 1;
+  var columnCount = journal.getLastColumn();
+  var values = [];
+  var index;
+
+  for (index = 0; index < columnCount; index += 1) {
+    values.push('');
+  }
+  for (index = 0; index < JOURNAL_HEADERS.length; index += 1) {
+    var header = JOURNAL_HEADERS[index];
+    values[journalColumns[header] - 1] = posting[header];
+  }
+
+  journal.getRange(rowNumber, 1, 1, columnCount).setValues([values]);
+  return rowNumber;
+}
+
+function readSetting_(spreadsheet, key) {
+  var sheet = requiredSheet_(spreadsheet, '設定');
+  var lastRow = sheet.getLastRow();
+  var lastColumn = sheet.getLastColumn();
+  var values = sheet.getRange(1, 1, lastRow, lastColumn).getDisplayValues();
+  var columns = resolveHeaders_(values[0], ['設定項目', '值']);
+
+  for (var rowIndex = 1; rowIndex < values.length; rowIndex += 1) {
+    if (String(values[rowIndex][columns['設定項目'] - 1]) === key) {
+      var value = String(values[rowIndex][columns['值'] - 1] || '');
+      if (!value) {
+        break;
+      }
+      return value;
+    }
+  }
+  throw new Error('missing setting: ' + key);
+}
+
+function requiredSheet_(spreadsheet, name) {
+  var sheet = spreadsheet.getSheetByName(name);
+  if (!sheet) {
+    throw new Error('missing sheet: ' + name);
+  }
+  return sheet;
+}
+
+function isTrue_(value) {
+  return value === true || String(value).toUpperCase() === 'TRUE';
+}
+
+function withAlready_(result) {
+  var replay = {};
+  for (var key in result) {
+    if (Object.prototype.hasOwnProperty.call(result, key)) {
+      replay[key] = result[key];
+    }
+  }
+  replay.already = true;
+  return replay;
+}
+
+function taipeiIsoNow_() {
+  var offsetMilliseconds = 8 * 60 * 60 * 1000;
+  return new Date(Date.now() + offsetMilliseconds)
+    .toISOString()
+    .replace('Z', '+08:00');
+}
+
+function requiredProp_(name) {
+  var value = PropertiesService.getScriptProperties().getProperty(name);
+  if (!value) {
+    throw new Error('missing script property: ' + name);
+  }
+  return value;
+}
+
+function json_(object) {
+  return ContentService.createTextOutput(JSON.stringify(object)).setMimeType(
+    ContentService.MimeType.JSON,
+  );
+}
+
+function base64UrlEncode_(bytes) {
+  return Utilities.base64EncodeWebSafe(bytes).replace(/=+$/, '');
+}
+
+function base64UrlDecode_(text) {
+  var normalized = text.replace(/-/g, '+').replace(/_/g, '/');
+  while (normalized.length % 4) {
+    normalized += '=';
+  }
+  return Utilities.base64Decode(normalized);
+}
+
+function constantTimeEqual_(a, b) {
+  if (a.length !== b.length) {
+    return false;
+  }
+  var difference = 0;
+  for (var index = 0; index < a.length; index += 1) {
+    difference |= a.charCodeAt(index) ^ b.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
 function resolveHeaders_(headerRow, requiredHeaders) {
   var required = Object.create(null);
   var positions = Object.create(null);
@@ -63,7 +488,7 @@ function resolveHeaders_(headerRow, requiredHeaders) {
   return resolved;
 }
 
-// Editor-run bootstrap only. Never route setupSpreadsheet() through doPost.
+// Editor-run only: setupSpreadsheet() and closeAndOpenBooks() are never routed through doPost.
 function setupSpreadsheet() {
   var spreadsheetId = PropertiesService.getScriptProperties().getProperty(
     'LEDGER_SPREADSHEET_ID',

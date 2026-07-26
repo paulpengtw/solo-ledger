@@ -1,6 +1,10 @@
 // @ts-expect-error Vitest runs in Node, while the app tsconfig deliberately omits Node types.
 import { readFileSync } from 'node:fs'
 // @ts-expect-error Vitest runs in Node, while the app tsconfig deliberately omits Node types.
+import { createHash, createHmac } from 'node:crypto'
+// @ts-expect-error Vitest runs in Node, while the app tsconfig deliberately omits Node types.
+import { Buffer } from 'node:buffer'
+// @ts-expect-error Vitest runs in Node, while the app tsconfig deliberately omits Node types.
 import { fileURLToPath } from 'node:url'
 
 export type PostingInput = Record<string, unknown>
@@ -35,6 +39,7 @@ const gasGlobalNames = [
   'LockService',
   'PropertiesService',
   'Utilities',
+  'ContentService',
   'Session',
 ] as const
 
@@ -135,6 +140,8 @@ export class FakeRange {
       throw new Error('setValues dimensions must match the range')
     }
 
+    this.sheet.beforeSetValues()
+
     for (let rowOffset = 0; rowOffset < this.numRows; rowOffset += 1) {
       for (let columnOffset = 0; columnOffset < this.numColumns; columnOffset += 1) {
         this.sheet.writeValue(
@@ -144,6 +151,7 @@ export class FakeRange {
         )
       }
     }
+    this.sheet.afterSetValues(this.row)
     return this
   }
 
@@ -153,6 +161,10 @@ export class FakeRange {
         this.sheet.readValue(this.row + rowOffset, this.column + columnOffset),
       ),
     )
+  }
+
+  getDisplayValues(): string[][] {
+    return this.getValues().map((row) => row.map(displayValue))
   }
 
   setNumberFormat(format: string): FakeRange {
@@ -194,8 +206,12 @@ export class FakeSheet {
   private readonly values: CellValue[][] = []
   private readonly numberFormats = new Map<string, string>()
   private readonly dataValidations = new Map<string, FakeDataValidation>()
+  private nextWriteError: Error | null = null
 
-  constructor(private name: string) {}
+  constructor(
+    private name: string,
+    private readonly recordEvent: (event: string) => void = () => undefined,
+  ) {}
 
   getName(): string {
     return this.name
@@ -269,10 +285,36 @@ export class FakeSheet {
   writeDataValidation(row: number, column: number, validation: FakeDataValidation): void {
     this.dataValidations.set(cellKey(row, column), validation)
   }
+
+  failNextSetValues(message = 'simulated write failure'): void {
+    this.nextWriteError = new Error(message)
+  }
+
+  beforeSetValues(): void {
+    if (!this.nextWriteError) {
+      return
+    }
+    const error = this.nextWriteError
+    this.nextWriteError = null
+    throw error
+  }
+
+  afterSetValues(row: number): void {
+    if (this.name === '日記帳' && row >= 2) {
+      this.recordEvent('row-written')
+    }
+  }
 }
 
 export class FakeSpreadsheet {
-  private readonly sheets: FakeSheet[] = [new FakeSheet('Sheet1')]
+  private readonly sheets: FakeSheet[]
+
+  constructor(recordEvent: (event: string) => void = () => undefined) {
+    this.sheets = [new FakeSheet('Sheet1', recordEvent)]
+    this.recordEvent = recordEvent
+  }
+
+  private readonly recordEvent: (event: string) => void
 
   getSheetByName(name: string): FakeSheet | null {
     return this.sheets.find((sheet) => sheet.getName() === name) || null
@@ -282,7 +324,7 @@ export class FakeSpreadsheet {
     if (this.getSheetByName(name)) {
       throw new Error(`sheet already exists: ${name}`)
     }
-    const sheet = new FakeSheet(name)
+    const sheet = new FakeSheet(name, this.recordEvent)
     this.sheets.push(sheet)
     return sheet
   }
@@ -321,18 +363,69 @@ class FakeDataValidationBuilder {
   }
 }
 
+export type FakeTextOutput = {
+  getContent: () => string
+  getMimeType: () => string
+  setMimeType: (mimeType: string) => FakeTextOutput
+}
+
+export type FakeDoPostEvent = {
+  postData?: {
+    contents?: string
+  }
+}
+
 type SetupGasFunctions = Pick<GasFunctions, 'resolveHeaders_' | 'JOURNAL_HEADERS'> & {
   setupSpreadsheet: () => void
+  doPost: (event: FakeDoPostEvent) => FakeTextOutput
 }
 
 export type FakeGasHarness = SetupGasFunctions & {
   spreadsheet: FakeSpreadsheet
+  events: string[]
+  clearEvents: () => void
+  advanceCacheTime: (seconds: number) => void
+  peekCache: (key: string) => string | null
 }
 
 export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
   const codePath = fileURLToPath(new URL('../../apps-script/Code.gs', import.meta.url))
   const source = readFileSync(codePath, 'utf8')
-  const spreadsheet = new FakeSpreadsheet()
+  const events: string[] = []
+  const recordEvent = (event: string) => events.push(event)
+  const spreadsheet = new FakeSpreadsheet(recordEvent)
+  let cacheNow = Date.now()
+  const cacheEntries = new Map<string, { value: string; expiresAt: number }>()
+  const scriptCache = {
+    get(key: string) {
+      if (key.startsWith('nonce:')) {
+        recordEvent('nonce-checked')
+      }
+      const entry = cacheEntries.get(key)
+      if (!entry) {
+        return null
+      }
+      if (entry.expiresAt <= cacheNow) {
+        cacheEntries.delete(key)
+        return null
+      }
+      return entry.value
+    },
+    put(key: string, value: string, seconds: number) {
+      cacheEntries.set(key, { value, expiresAt: cacheNow + seconds * 1000 })
+      if (key.startsWith('nonce:')) {
+        recordEvent('nonce-committed')
+      }
+    },
+  }
+  const scriptLock = {
+    waitLock(_milliseconds: number) {
+      recordEvent('lock-acquired')
+    },
+    releaseLock() {
+      recordEvent('lock-released')
+    },
+  }
   const spreadsheetApp = {
     openById(id: string) {
       if (id !== 'test-ledger-spreadsheet-id') {
@@ -348,9 +441,71 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
     getScriptProperties() {
       return {
         getProperty(name: string) {
-          return name === 'LEDGER_SPREADSHEET_ID' ? 'test-ledger-spreadsheet-id' : null
+          if (name === 'LEDGER_SPREADSHEET_ID') {
+            return 'test-ledger-spreadsheet-id'
+          }
+          if (name === 'EXPENSE_API_SECRET') {
+            return 'test-secret'
+          }
+          return null
         },
       }
+    },
+  }
+  const cacheService = {
+    getScriptCache() {
+      return scriptCache
+    },
+  }
+  const lockService = {
+    getScriptLock() {
+      return scriptLock
+    },
+  }
+  const utilities = {
+    DigestAlgorithm: { SHA_256: 'SHA_256' },
+    computeHmacSha256Signature(value: string, key: string) {
+      return Array.from(createHmac('sha256', key).update(value, 'utf8').digest())
+    },
+    computeDigest(algorithm: string, value: string) {
+      if (algorithm !== 'SHA_256') {
+        throw new Error(`unsupported digest algorithm: ${algorithm}`)
+      }
+      return Array.from(createHash('sha256').update(value, 'utf8').digest())
+    },
+    base64EncodeWebSafe(bytes: number[]) {
+      return Buffer.from(bytes)
+        .toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+    },
+    base64Decode(text: string) {
+      return Array.from(Buffer.from(text, 'base64'))
+    },
+    newBlob(bytes: number[]) {
+      return {
+        getDataAsString(charset: string) {
+          if (charset !== 'UTF-8') {
+            throw new Error(`unsupported blob charset: ${charset}`)
+          }
+          return Buffer.from(bytes).toString('utf8')
+        },
+      }
+    },
+  }
+  const contentService = {
+    MimeType: { JSON: 'application/json' },
+    createTextOutput(content: string): FakeTextOutput {
+      let mimeType = 'text/plain'
+      const output: FakeTextOutput = {
+        getContent: () => content,
+        getMimeType: () => mimeType,
+        setMimeType(nextMimeType: string) {
+          mimeType = nextMimeType
+          return output
+        },
+      }
+      return output
     },
   }
   const evaluate = new Function(
@@ -360,6 +515,7 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
       source,
       'return {',
       '  setupSpreadsheet: typeof setupSpreadsheet === "function" ? setupSpreadsheet : undefined,',
+      '  doPost: typeof doPost === "function" ? doPost : undefined,',
       '  resolveHeaders_: typeof resolveHeaders_ === "function" ? resolveHeaders_ : undefined,',
       '  JOURNAL_HEADERS: typeof JOURNAL_HEADERS !== "undefined" ? JOURNAL_HEADERS : undefined,',
       '};',
@@ -372,11 +528,37 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
     if (name === 'PropertiesService') {
       return propertiesService
     }
+    if (name === 'CacheService') {
+      return cacheService
+    }
+    if (name === 'LockService') {
+      return lockService
+    }
+    if (name === 'Utilities') {
+      return utilities
+    }
+    if (name === 'ContentService') {
+      return contentService
+    }
     return throwingGasGlobal(name)
   })
   const functions = evaluate(...injectedGlobals) as SetupGasFunctions
 
-  return { ...functions, spreadsheet }
+  return {
+    ...functions,
+    spreadsheet,
+    events,
+    clearEvents() {
+      events.length = 0
+    },
+    advanceCacheTime(seconds: number) {
+      cacheNow += seconds * 1000
+    },
+    peekCache(key: string) {
+      const entry = cacheEntries.get(key)
+      return entry && entry.expiresAt > cacheNow ? entry.value : null
+    },
+  }
 }
 
 function hasCellValue(value: CellValue): boolean {
@@ -385,4 +567,17 @@ function hasCellValue(value: CellValue): boolean {
 
 function cellKey(row: number, column: number): string {
   return `${row}:${column}`
+}
+
+function displayValue(value: CellValue): string {
+  if (value === '' || value === null || value === undefined) {
+    return ''
+  }
+  if (value === true) {
+    return 'TRUE'
+  }
+  if (value === false) {
+    return 'FALSE'
+  }
+  return String(value)
 }
