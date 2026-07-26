@@ -97,7 +97,7 @@ describe('handleAction', () => {
     const fetchFn = noFetch()
 
     const response = await handleAction(
-      'settle',
+      'reverse_transaction',
       req({}),
       env,
       deps(fetchFn),
@@ -270,6 +270,126 @@ describe('handleAction', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(response.status).toBe(206)
     expect(await response.text()).toBe(upstreamBody)
+  })
+
+  it('uses a random nonce for list_receivables and forwards the upstream response verbatim', async () => {
+    const upstreamBody = '[{"對象":"阿明","entries":[]}]'
+    const fetchFn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const envelope = JSON.parse(String(init?.body)) as {
+        nonce: string
+        payload: string
+      }
+
+      expect(envelope.nonce).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      )
+      expect(envelope.nonce).not.toBe(KEY)
+      expect(decodePayload(envelope.payload)).toEqual({
+        action: 'list_receivables',
+      })
+      return new Response(upstreamBody, { status: 206 })
+    }) as unknown as typeof fetch
+
+    const response = await handleAction(
+      'list_receivables',
+      req({}),
+      env,
+      deps(fetchFn),
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(response.status).toBe(206)
+    expect(await response.text()).toBe(upstreamBody)
+  })
+
+  it('uses the client idempotency key as settle nonce and sends only the settlement contract', async () => {
+    const upstreamBody = '{"ok":true,"txn_id":"settle-1","row":42}'
+    const settlement = {
+      txn_id: 'original-1',
+      account: '任意發明的銀行',
+      date: '2026-07-27',
+      amount: 125.5,
+    }
+    const fetchFn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const envelope = JSON.parse(String(init?.body)) as {
+        nonce: string
+        payload: string
+      }
+
+      expect(envelope.nonce).toBe(KEY)
+      expect(decodePayload(envelope.payload)).toEqual({
+        action: 'settle',
+        idempotencyKey: KEY,
+        ...settlement,
+      })
+      return new Response(upstreamBody, { status: 201 })
+    }) as unknown as typeof fetch
+
+    const response = await handleAction(
+      'settle',
+      req({ idempotencyKey: KEY, ...settlement }),
+      env,
+      deps(fetchFn),
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(response.status).toBe(201)
+    expect(await response.text()).toBe(upstreamBody)
+  })
+
+  it('allows settle amount to be omitted', async () => {
+    const fetchFn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const envelope = JSON.parse(String(init?.body)) as {
+        payload: string
+      }
+
+      expect(decodePayload(envelope.payload)).toEqual({
+        action: 'settle',
+        idempotencyKey: KEY,
+        txn_id: 'original-1',
+        account: '銀行',
+        date: '2026-07-27',
+      })
+      return new Response('{"ok":true}', { status: 200 })
+    }) as unknown as typeof fetch
+
+    const response = await handleAction(
+      'settle',
+      req({
+        idempotencyKey: KEY,
+        txn_id: 'original-1',
+        account: '銀行',
+        date: '2026-07-27',
+      }),
+      env,
+      deps(fetchFn),
+    )
+
+    expect(response.status).toBe(200)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['blank txn_id', { txn_id: ' ', account: '銀行', date: '2026-07-27' }, 'invalid txn_id'],
+    ['blank account', { txn_id: 'original-1', account: '', date: '2026-07-27' }, 'invalid account'],
+    ['impossible date', { txn_id: 'original-1', account: '銀行', date: '2026-02-30' }, 'invalid date'],
+    ['zero amount', { txn_id: 'original-1', account: '銀行', date: '2026-07-27', amount: 0 }, 'invalid amount'],
+    ['infinite amount', { txn_id: 'original-1', account: '銀行', date: '2026-07-27', amount: Infinity }, 'invalid amount'],
+    ['non-UUID key', { idempotencyKey: 'not-a-uuid', txn_id: 'original-1', account: '銀行', date: '2026-07-27' }, 'invalid idempotency key'],
+    ['currency input', { txn_id: 'original-1', account: '銀行', date: '2026-07-27', currency: 'USD' }, 'currency is not accepted'],
+  ])('rejects settle with %s before contacting Apps Script', async (_label, body, error) => {
+    const fetchFn = noFetch()
+
+    const response = await handleAction(
+      'settle',
+      req({ idempotencyKey: KEY, ...body }),
+      env,
+      deps(fetchFn),
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ ok: false, error })
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 
   it.each([

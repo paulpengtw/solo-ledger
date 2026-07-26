@@ -5,8 +5,10 @@ import {
   loadOptions,
   submitTransaction,
 } from '../src/api'
+import * as ApiModule from '../src/api'
 import {
   CACHED_OPTIONS,
+  RECEIVABLE_GROUPS,
   RECENT_TRANSACTIONS,
   REFRESHED_OPTIONS,
 } from './pwa-fixtures'
@@ -134,5 +136,64 @@ describe('listTransactions', () => {
     await expect(
       listTransactions('0001-01-01', '9999-12-31', fetchFn),
     ).resolves.toEqual(RECENT_TRANSACTIONS)
+  })
+})
+
+describe('receivables API', () => {
+  it('POSTs list_receivables and accepts the grouped arithmetic response', async () => {
+    const listReceivables = (
+      ApiModule as typeof ApiModule & {
+        listReceivables?: (
+          fetchFn: typeof fetch,
+        ) => Promise<unknown>
+      }
+    ).listReceivables
+    expect(listReceivables).toBeTypeOf('function')
+    if (!listReceivables) return
+    const fetchFn = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(url)).toBe('/api/list_receivables')
+      expect(init?.method).toBe('POST')
+      expect(JSON.parse(String(init?.body))).toEqual({})
+      return jsonResponse(200, RECEIVABLE_GROUPS)
+    }) as unknown as typeof fetch
+
+    await expect(listReceivables(fetchFn)).resolves.toEqual(RECEIVABLE_GROUPS)
+  })
+
+  it('POSTs settle without a currency field and maps success like other mutations', async () => {
+    const settleReceivable = (
+      ApiModule as typeof ApiModule & {
+        settleReceivable?: (
+          settlement: Record<string, unknown>,
+          idempotencyKey: string,
+          fetchFn: typeof fetch,
+        ) => Promise<unknown>
+      }
+    ).settleReceivable
+    expect(settleReceivable).toBeTypeOf('function')
+    if (!settleReceivable) return
+    const settlement = {
+      txn_id: 'receivable-open-001',
+      account: '錢包',
+      date: '2026-07-27',
+      amount: 200,
+    }
+    const fetchFn = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(url)).toBe('/api/settle')
+      expect(init?.method).toBe('POST')
+      expect(JSON.parse(String(init?.body))).toEqual({
+        ...settlement,
+        idempotencyKey: KEY,
+      })
+      expect(JSON.parse(String(init?.body))).not.toHaveProperty('currency')
+      return jsonResponse(200, { ok: true, txn_id: KEY })
+    }) as unknown as typeof fetch
+
+    await expect(
+      settleReceivable(settlement, KEY, fetchFn),
+    ).resolves.toEqual({
+      ok: true,
+      alreadyRecorded: false,
+    })
   })
 })

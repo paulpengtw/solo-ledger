@@ -3,6 +3,7 @@ import { buildEnvelope } from './envelope'
 import { verifyAccessJwt } from './jwt'
 import {
   isValidUuid,
+  validateSettlement,
   validateTransaction,
   validateTransactionDateRange,
 } from './validate'
@@ -26,6 +27,8 @@ const ALLOWED = new Set([
   'get_options',
   'create_transaction',
   'list_transactions',
+  'list_receivables',
+  'settle',
 ])
 
 function json(status: number, body: unknown): Response {
@@ -84,6 +87,31 @@ export async function handleAction(
       action: 'create_transaction',
       idempotencyKey: body.idempotencyKey,
       transaction: validated.transaction,
+    }
+  } else if (action === 'settle') {
+    let body: Record<string, unknown> = {}
+    try {
+      const parsed = await request.json()
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        body = parsed as Record<string, unknown>
+      }
+    } catch {
+      // Invalid JSON is handled as an invalid settlement below.
+    }
+
+    const validated = validateSettlement(body)
+    if (!validated.ok) {
+      return json(400, { ok: false, error: validated.error })
+    }
+    if (!isValidUuid(body.idempotencyKey)) {
+      return json(400, { ok: false, error: 'invalid idempotency key' })
+    }
+
+    nonce = body.idempotencyKey
+    payload = {
+      action: 'settle',
+      idempotencyKey: body.idempotencyKey,
+      ...validated.settlement,
     }
   } else if (action === 'list_transactions') {
     let body: Record<string, unknown> = {}

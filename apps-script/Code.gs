@@ -64,8 +64,14 @@ function route_(payload, nonce) {
   if (action === 'list_transactions') {
     return listTransactions_(payload);
   }
+  if (action === 'list_receivables') {
+    return listReceivables_();
+  }
   if (action === 'create_transaction') {
     return createTransaction_(payload, nonce);
+  }
+  if (action === 'settle') {
+    return settle_(payload, nonce);
   }
 
   throw new Error('unsupported action: ' + action);
@@ -345,6 +351,137 @@ function listTransactions_(payload) {
   return result;
 }
 
+function listReceivables_() {
+  var spreadsheet = SpreadsheetApp.openById(
+    requiredProp_('LEDGER_SPREADSHEET_ID'),
+  );
+  var journal = requiredSheet_(spreadsheet, '日記帳');
+  var headerRow = journal
+    .getRange(1, 1, 1, journal.getLastColumn())
+    .getDisplayValues()[0];
+  var journalColumns = resolveHeaders_(headerRow, JOURNAL_HEADERS);
+  var records = readJournalRecords_(journal, journalColumns);
+  var groupsByCounterparty = Object.create(null);
+  var groups = [];
+
+  for (var index = 0; index < records.length; index += 1) {
+    var record = records[index];
+    var status = record.values['結清狀態'];
+    if (status !== '未結' && status !== '部分') {
+      continue;
+    }
+
+    var counterparty = record.values['對象'];
+    var group = groupsByCounterparty[counterparty];
+    if (!group) {
+      group = { '對象': counterparty, entries: [] };
+      groupsByCounterparty[counterparty] = group;
+      groups.push(group);
+    }
+
+    var txnId = record.values.txn_id;
+    var viewOnly = txnId === '';
+    group.entries.push({
+      txn_id: txnId,
+      '日期': record.values['日期'],
+      '金額': record.amount,
+      '幣別': record.values['幣別'],
+      '對象': counterparty,
+      '說明': record.values['說明'],
+      '結清狀態': status,
+      direction: receivableDirection_(record.values),
+      outstanding: viewOnly
+        ? record.amount
+        : outstandingForRecord_(records, record),
+      view_only: viewOnly,
+    });
+  }
+
+  return groups;
+}
+
+function readJournalRecords_(journal, journalColumns) {
+  var lastRow = journal.getLastRow();
+  if (lastRow < 2) {
+    return [];
+  }
+
+  var lastColumn = journal.getLastColumn();
+  var rowCount = lastRow - 1;
+  var range = journal.getRange(2, 1, rowCount, lastColumn);
+  var rawRows = range.getValues();
+  var displayRows = range.getDisplayValues();
+  var records = [];
+
+  for (var rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    var values = {};
+    for (var headerIndex = 0; headerIndex < JOURNAL_HEADERS.length; headerIndex += 1) {
+      var header = JOURNAL_HEADERS[headerIndex];
+      values[header] = displayRows[rowIndex][journalColumns[header] - 1];
+    }
+    records.push({
+      sheetRow: rowIndex + 2,
+      values: values,
+      amount: journalAmount_(
+        rawRows[rowIndex][journalColumns['金額'] - 1],
+        rowIndex + 2,
+      ),
+    });
+  }
+
+  return records;
+}
+
+function journalAmount_(value, sheetRow) {
+  var amount = Number(value);
+  if (!isFinite(amount)) {
+    throw new Error('invalid journal amount at row ' + sheetRow);
+  }
+  return amount;
+}
+
+function outstandingForRecord_(records, originalRecord) {
+  var txnId = originalRecord.values.txn_id;
+  if (!txnId) {
+    return originalRecord.amount;
+  }
+
+  var settled = 0;
+  for (var index = 0; index < records.length; index += 1) {
+    var candidate = records[index];
+    if (
+      candidate.values['類型'] === '轉帳' &&
+      candidate.values['沖銷txn_id'] === txnId
+    ) {
+      settled += candidate.amount;
+    }
+  }
+  return normalizedAmount_(originalRecord.amount - settled);
+}
+
+function normalizedAmount_(amount) {
+  return Math.round(amount * 1000000000) / 1000000000;
+}
+
+function receivableDirection_(row) {
+  if (row['借方帳戶'] === '應收帳款') {
+    return '應收';
+  }
+  if (row['貸方帳戶'] === '應付帳款') {
+    return '應付';
+  }
+  throw new Error('open row is not an 應收帳款 or 應付帳款 posting');
+}
+
+function findRecordByTxnId_(records, txnId) {
+  for (var index = 0; index < records.length; index += 1) {
+    if (records[index].values.txn_id === txnId) {
+      return records[index];
+    }
+  }
+  return null;
+}
+
 function createTransaction_(payload, nonce) {
   if (!payload || typeof payload !== 'object') {
     throw new Error('payload is required');
@@ -435,6 +572,142 @@ function createTransaction_(payload, nonce) {
     return result;
   } finally {
     lock.releaseLock();
+  }
+}
+
+function settle_(payload, nonce) {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('payload is required');
+  }
+  requireField_(payload, 'idempotencyKey');
+  requireField_(payload, 'txn_id');
+  requireField_(payload, 'account');
+  requireField_(payload, 'date');
+
+  var idempotencyKey = String(payload.idempotencyKey);
+  if (idempotencyKey !== nonce) {
+    throw new Error('idempotencyKey must match nonce');
+  }
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(LOCK_WAIT_MILLISECONDS);
+
+  try {
+    var cache = CacheService.getScriptCache();
+    var nonceKey = 'nonce:' + nonce;
+    var storedResult = cache.get(nonceKey);
+    if (storedResult) {
+      return withAlready_(JSON.parse(storedResult));
+    }
+
+    var spreadsheet = SpreadsheetApp.openById(
+      requiredProp_('LEDGER_SPREADSHEET_ID'),
+    );
+    var journal = requiredSheet_(spreadsheet, '日記帳');
+    var headerRow = journal
+      .getRange(1, 1, 1, journal.getLastColumn())
+      .getDisplayValues()[0];
+    var journalColumns = resolveHeaders_(headerRow, JOURNAL_HEADERS);
+
+    if (
+      findTxnRow_(journal, journalColumns.txn_id, idempotencyKey) !== null
+    ) {
+      var existingResult = { ok: true, already: true };
+      cache.put(
+        nonceKey,
+        JSON.stringify(existingResult),
+        NONCE_CACHE_SECONDS,
+      );
+      return existingResult;
+    }
+
+    var records = readJournalRecords_(journal, journalColumns);
+    var original = findRecordByTxnId_(records, String(payload.txn_id));
+    if (original === null) {
+      throw new Error('unknown txn_id: ' + payload.txn_id);
+    }
+
+    var outstanding = outstandingForRecord_(records, original);
+    if (outstanding <= 0) {
+      var alreadySettledResult = { ok: true, already: true };
+      cache.put(
+        nonceKey,
+        JSON.stringify(alreadySettledResult),
+        NONCE_CACHE_SECONDS,
+      );
+      return alreadySettledResult;
+    }
+
+    rejectField_(payload, 'currency');
+    var vocabulary = readAccountVocabulary_(spreadsheet);
+    validateSettlementAccount_(payload.account, vocabulary);
+
+    var defaultCurrency = readSetting_(spreadsheet, '預設幣別');
+    if (original.values['幣別'] !== defaultCurrency) {
+      throw new Error(
+        'original currency ' +
+          original.values['幣別'] +
+          ' differs from default ' +
+          defaultCurrency,
+      );
+    }
+
+    var amount = hasField_(payload, 'amount')
+      ? payload.amount
+      : outstanding;
+    validatePositiveAmount_(amount);
+    if (amount > outstanding) {
+      throw new Error(
+        'over-settlement: amount ' +
+          amount +
+          ' exceeds outstanding ' +
+          outstanding,
+      );
+    }
+
+    var posting = expandPosting_({
+      kind: 'settle',
+      original: original.values,
+      account: payload.account,
+      amount: amount,
+      date: payload.date,
+      defaultCurrency: defaultCurrency,
+      accountTypes: vocabulary.accountTypes,
+      txnId: idempotencyKey,
+      now: taipeiIsoNow_(),
+    });
+
+    var rowNumber = appendPosting_(journal, journalColumns, posting);
+    var remaining = normalizedAmount_(outstanding - amount);
+    var status = remaining === 0 ? '已結' : '部分';
+    journal
+      .getRange(original.sheetRow, journalColumns['結清狀態'])
+      .setValues([[status]]);
+
+    var result = {
+      ok: true,
+      txn_id: idempotencyKey,
+      row: rowNumber,
+      outstanding: remaining,
+      status: status,
+    };
+    cache.put(nonceKey, JSON.stringify(result), NONCE_CACHE_SECONDS);
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function validateSettlementAccount_(value, vocabulary) {
+  var name = String(value);
+  var knownAndEnabled =
+    Object.prototype.hasOwnProperty.call(vocabulary.accountTypes, name) &&
+    vocabulary.enabled[name] === true;
+  var accountType = vocabulary.accountTypes[name];
+  var realAccount = accountType === '資產' || accountType === '負債';
+
+  if (!knownAndEnabled || !realAccount) {
+    throw new Error('unknown or disabled account: ' + name);
   }
 }
 

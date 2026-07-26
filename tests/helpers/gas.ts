@@ -140,7 +140,7 @@ export class FakeRange {
       throw new Error('setValues dimensions must match the range')
     }
 
-    this.sheet.beforeSetValues()
+    this.sheet.beforeSetValues(this.column)
 
     for (let rowOffset = 0; rowOffset < this.numRows; rowOffset += 1) {
       for (let columnOffset = 0; columnOffset < this.numColumns; columnOffset += 1) {
@@ -151,7 +151,12 @@ export class FakeRange {
         )
       }
     }
-    this.sheet.afterSetValues(this.row)
+    this.sheet.afterSetValues(
+      this.row,
+      this.column,
+      this.numRows,
+      this.numColumns,
+    )
     return this
   }
 
@@ -207,6 +212,7 @@ export class FakeSheet {
   private readonly numberFormats = new Map<string, string>()
   private readonly dataValidations = new Map<string, FakeDataValidation>()
   private nextWriteError: Error | null = null
+  private nextWriteErrorColumn: number | null = null
 
   constructor(
     private name: string,
@@ -288,20 +294,45 @@ export class FakeSheet {
 
   failNextSetValues(message = 'simulated write failure'): void {
     this.nextWriteError = new Error(message)
+    this.nextWriteErrorColumn = null
   }
 
-  beforeSetValues(): void {
-    if (!this.nextWriteError) {
+  failNextSetValuesInColumn(
+    column: number,
+    message = 'simulated write failure',
+  ): void {
+    this.nextWriteError = new Error(message)
+    this.nextWriteErrorColumn = column
+  }
+
+  beforeSetValues(column: number): void {
+    if (
+      !this.nextWriteError
+      || (
+        this.nextWriteErrorColumn !== null
+        && this.nextWriteErrorColumn !== column
+      )
+    ) {
       return
     }
     const error = this.nextWriteError
     this.nextWriteError = null
+    this.nextWriteErrorColumn = null
     throw error
   }
 
-  afterSetValues(row: number): void {
+  afterSetValues(
+    row: number,
+    column: number,
+    numRows: number,
+    numColumns: number,
+  ): void {
     if (this.name === '日記帳' && row >= 2) {
-      this.recordEvent('row-written')
+      const isStatusCell =
+        numRows === 1
+        && numColumns === 1
+        && this.readValue(1, column) === '結清狀態'
+      this.recordEvent(isStatusCell ? 'status-written' : 'row-written')
     }
   }
 }

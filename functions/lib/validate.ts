@@ -20,6 +20,17 @@ type TransactionDateRangeValidationResult =
   | { ok: true; date_from: string; date_to: string }
   | { ok: false; error: string }
 
+export type Settlement = {
+  txn_id: string
+  account: string
+  date: string
+  amount?: number
+}
+
+type SettlementValidationResult =
+  | { ok: true; settlement: Settlement }
+  | { ok: false; error: string }
+
 const TYPES = new Set(['支出', '收入', '轉帳'])
 const IOU_TYPES = new Set(['應收', '應付'])
 const OPTIONAL_STRING_FIELDS = [
@@ -86,6 +97,52 @@ export function validateTransactionDateRange(
     date_from: candidate.date_from,
     date_to: candidate.date_to,
   }
+}
+
+export function validateSettlement(input: unknown): SettlementValidationResult {
+  if (typeof input !== 'object' || input === null) {
+    return { ok: false, error: 'invalid txn_id' }
+  }
+  const candidate = input as Record<string, unknown>
+
+  if (
+    typeof candidate.txn_id !== 'string'
+    || candidate.txn_id.trim() === ''
+  ) {
+    return { ok: false, error: 'invalid txn_id' }
+  }
+  if (
+    typeof candidate.account !== 'string'
+    || candidate.account.trim() === ''
+  ) {
+    return { ok: false, error: 'invalid account' }
+  }
+  if (!isRealDate(candidate.date)) {
+    return { ok: false, error: 'invalid date' }
+  }
+  if (
+    candidate.amount !== undefined
+    && (
+      typeof candidate.amount !== 'number'
+      || !Number.isFinite(candidate.amount)
+      || candidate.amount <= 0
+    )
+  ) {
+    return { ok: false, error: 'invalid amount' }
+  }
+  if (candidate.currency !== undefined) {
+    return { ok: false, error: 'currency is not accepted' }
+  }
+
+  const settlement: Settlement = {
+    txn_id: candidate.txn_id,
+    account: candidate.account,
+    date: candidate.date,
+  }
+  if (typeof candidate.amount === 'number') {
+    settlement.amount = candidate.amount
+  }
+  return { ok: true, settlement }
 }
 
 function isRealTime(value: unknown): value is string {
