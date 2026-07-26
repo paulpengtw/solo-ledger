@@ -127,16 +127,6 @@ export function validateTransaction(input: unknown): ValidationResult {
     return { ok: false, error: 'missing description' }
   }
 
-  for (const field of OPTIONAL_STRING_FIELDS) {
-    const value = candidate[field]
-    if (
-      value !== undefined
-      && (typeof value !== 'string' || value.trim() === '')
-    ) {
-      return { ok: false, error: `invalid ${field}` }
-    }
-  }
-
   if (
     candidate.iou !== undefined
     && (
@@ -145,6 +135,25 @@ export function validateTransaction(input: unknown): ValidationResult {
     )
   ) {
     return { ok: false, error: 'invalid iou' }
+  }
+  if (
+    candidate.iou !== undefined
+    && (
+      typeof candidate.payee !== 'string'
+      || candidate.payee.trim() === ''
+    )
+  ) {
+    return { ok: false, error: 'missing payee' }
+  }
+
+  for (const field of OPTIONAL_STRING_FIELDS) {
+    const value = candidate[field]
+    if (
+      value !== undefined
+      && (typeof value !== 'string' || value.trim() === '')
+    ) {
+      return { ok: false, error: `invalid ${field}` }
+    }
   }
 
   const transaction: Transaction = {

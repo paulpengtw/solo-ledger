@@ -351,6 +351,162 @@ describe('doPost', () => {
     ])
   })
 
+  it('appends a column-complete iou 應收 row with no nominal category', async () => {
+    const response = await postCreate(harness, 'iou-receivable-001', {
+      category: undefined,
+      payee: '阿明',
+      description: '代買午餐',
+      iou: '應收',
+    })
+
+    expect(response).toMatchObject({
+      ok: true,
+      txn_id: 'iou-receivable-001',
+      row: 2,
+    })
+    expect(journalRows(harness)).toEqual([
+      {
+        日期: '2026-07-26',
+        時間: '12:30',
+        類型: '支出',
+        借方帳戶: '應收帳款',
+        貸方帳戶: '現金',
+        金額: 260,
+        幣別: 'TWD',
+        分類: '',
+        對象: '阿明',
+        說明: '代買午餐',
+        結清狀態: '未結',
+        沖銷txn_id: '',
+        txn_id: 'iou-receivable-001',
+        來源: 'pwa',
+        建立時間: '2026-07-27T08:00:00.000+08:00',
+      },
+    ])
+  })
+
+  it('appends a column-complete iou 應付 row with its expense category', async () => {
+    const response = await postCreate(harness, 'iou-payable-001', {
+      category: '餐飲',
+      payee: '阿明',
+      description: '朋友先付午餐',
+      iou: '應付',
+    })
+
+    expect(response).toMatchObject({
+      ok: true,
+      txn_id: 'iou-payable-001',
+      row: 2,
+    })
+    expect(journalRows(harness)).toEqual([
+      {
+        日期: '2026-07-26',
+        時間: '12:30',
+        類型: '支出',
+        借方帳戶: '餐飲',
+        貸方帳戶: '應付帳款',
+        金額: 260,
+        幣別: 'TWD',
+        分類: '餐飲',
+        對象: '阿明',
+        說明: '朋友先付午餐',
+        結清狀態: '未結',
+        沖銷txn_id: '',
+        txn_id: 'iou-payable-001',
+        來源: 'pwa',
+        建立時間: '2026-07-27T08:00:00.000+08:00',
+      },
+    ])
+  })
+
+  it('names payee when an iou create omits its counterparty', async () => {
+    const response = await postCreate(harness, 'iou-missing-payee-001', {
+      category: undefined,
+      payee: undefined,
+      iou: '應收',
+    })
+
+    expect(response).toEqual({ ok: false, error: 'payee is required' })
+    expect(journalRows(harness)).toHaveLength(0)
+  })
+
+  it('names category when an iou 應收 create includes a nominal category', async () => {
+    const response = await postCreate(harness, 'iou-category-rejected-001', {
+      category: '餐飲',
+      payee: '阿明',
+      iou: '應收',
+    })
+
+    expect(response).toEqual({ ok: false, error: 'category is rejected' })
+    expect(journalRows(harness)).toHaveLength(0)
+  })
+
+  it('names a missing 應收帳款 account and leaves the journal byte-for-byte unchanged', async () => {
+    removeAccount(harness, '應收帳款')
+    const before = journalBytes(harness)
+
+    const response = await postCreate(harness, 'iou-missing-account-001', {
+      category: undefined,
+      payee: '阿明',
+      iou: '應收',
+    })
+
+    expect(response).toEqual({
+      ok: false,
+      error: 'unknown or disabled account: 應收帳款',
+    })
+    expect(journalBytes(harness)).toBe(before)
+  })
+
+  it('keeps an iou create idempotent when the same request is replayed', async () => {
+    const payload = createPayload('iou-replay-001', {
+      category: undefined,
+      payee: '阿明',
+      iou: '應收',
+    })
+    const envelope = await buildEnvelope(
+      secret,
+      payload,
+      nowSeconds(),
+      'iou-replay-001',
+    )
+
+    const first = postEnvelope(harness, envelope)
+    const replayed = postEnvelope(harness, envelope)
+
+    expect(journalRows(harness)).toHaveLength(1)
+    expect(replayed).toEqual({ ...first, already: true })
+  })
+
+  it('posts a split as two independent balanced rows with different idempotency keys', async () => {
+    await postCreate(harness, 'split-category-001', {
+      amount: 160,
+      description: '自己的午餐',
+    })
+    await postCreate(harness, 'split-receivable-001', {
+      amount: 100,
+      category: undefined,
+      payee: '阿明',
+      description: '代墊午餐',
+      iou: '應收',
+    })
+
+    expect(journalRows(harness)).toEqual([
+      expect.objectContaining({
+        借方帳戶: '餐飲',
+        貸方帳戶: '現金',
+        金額: 160,
+        txn_id: 'split-category-001',
+      }),
+      expect.objectContaining({
+        借方帳戶: '應收帳款',
+        貸方帳戶: '現金',
+        金額: 100,
+        txn_id: 'split-receivable-001',
+      }),
+    ])
+  })
+
   it('rejects a bad signature without acquiring the lock', async () => {
     const envelope = await buildEnvelope(secret, createPayload('bad-signature-001'), nowSeconds(), 'bad-signature-001')
     envelope.sig = `${envelope.sig.slice(0, -1)}${envelope.sig.endsWith('A') ? 'B' : 'A'}`
@@ -564,6 +720,15 @@ function journalRows(harness: FakeGasHarness): Array<Record<string, unknown>> {
   )
 }
 
+function journalBytes(harness: FakeGasHarness): string {
+  const journal = requiredSheet(harness, '日記帳')
+  return JSON.stringify(
+    journal
+      .getRange(1, 1, journal.getLastRow(), journal.getLastColumn())
+      .getValues(),
+  )
+}
+
 function appendJournalRows(
   harness: FakeGasHarness,
   rows: Array<Record<string, unknown>>,
@@ -605,4 +770,17 @@ function setAccountEnabled(harness: FakeGasHarness, accountName: string, enabled
     throw new Error(`missing test account: ${accountName}`)
   }
   accounts.getRange(row + 1, enabledColumn + 1).setValues([[enabled]])
+}
+
+function removeAccount(harness: FakeGasHarness, accountName: string): void {
+  const accounts = requiredSheet(harness, '會計科目')
+  const values = accounts
+    .getRange(1, 1, accounts.getLastRow(), accounts.getLastColumn())
+    .getValues()
+  const nameColumn = values[0]!.indexOf('名稱')
+  const row = values.findIndex(valuesRow => valuesRow[nameColumn] === accountName)
+  if (row < 1) {
+    throw new Error(`missing test account: ${accountName}`)
+  }
+  accounts.getRange(row + 1, nameColumn + 1).setValues([['']])
 }

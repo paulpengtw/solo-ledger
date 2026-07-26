@@ -93,6 +93,18 @@ describe('validateTransaction', () => {
     expect(validateTransaction({ ...valid, iou }).ok).toBe(true)
   })
 
+  it.each(['應收', '應付'] as const)(
+    'rejects iou %s when payee is missing',
+    iou => {
+      const { payee: _payee, ...withoutPayee } = valid
+
+      expect(validateTransaction({ ...withoutPayee, iou })).toEqual({
+        ok: false,
+        error: 'missing payee',
+      })
+    },
+  )
+
   it('rejects an iou value outside the closed enum', () => {
     expect(validateTransaction({ ...valid, iou: '已收' })).toEqual({
       ok: false,

@@ -9,6 +9,7 @@ import {
   selectCategory,
   selectToAccount,
   setDescription,
+  setIou,
   setPayee,
   setType,
   submitFailed,
@@ -42,6 +43,17 @@ describe('per-type field guards', () => {
 
     expect(state.toAccount).toBeNull()
   })
+
+  it.each(['收入', '轉帳'] as const)(
+    'clears iou when 支出 changes to %s',
+    type => {
+      let state = setIou(filledExpense(), '應付')
+
+      state = setType(state, type)
+
+      expect(state.iou).toBeNull()
+    },
+  )
 })
 
 describe('submit gating and payload construction', () => {
@@ -85,6 +97,50 @@ describe('submit gating and payload construction', () => {
     })
     expect(transaction).not.toHaveProperty('category')
     expect(transaction).not.toHaveProperty('payee')
+  })
+
+  it('selects iou 應收 by clearing category and requiring payee', () => {
+    let state = setIou(filledExpense(), '應收')
+
+    expect(state.category).toBeNull()
+    expect(state.iou).toBe('應收')
+    expect(canSubmit(state)).toBe(false)
+
+    state = setPayee(state, '阿明')
+
+    expect(canSubmit(state)).toBe(true)
+    expect(buildTransaction(state)).toEqual({
+      type: '支出',
+      amount: 260,
+      date: '2026-07-27',
+      description: '晚餐',
+      account: '錢包',
+      payee: '阿明',
+      currency: 'TWD',
+      iou: '應收',
+    })
+  })
+
+  it('selects iou 應付 by preserving and requiring category and payee', () => {
+    let state = setIou(filledExpense(), '應付')
+
+    expect(state.category).toBe('餐飲')
+    expect(canSubmit(state)).toBe(false)
+
+    state = setPayee(state, '阿明')
+    expect(canSubmit(state)).toBe(true)
+    expect(canSubmit({ ...state, category: null })).toBe(false)
+  })
+
+  it('toggles iou off without clearing category or payee still used by a normal expense', () => {
+    let state = setPayee(filledExpense(), '阿明')
+    state = setIou(state, '應付')
+
+    state = setIou(state, '應付')
+
+    expect(state.iou).toBeNull()
+    expect(state.category).toBe('餐飲')
+    expect(state.payee).toBe('阿明')
   })
 })
 

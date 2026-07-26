@@ -88,14 +88,17 @@ describe('selection-first entry form', () => {
     expect(document.querySelector('#category-grid')?.textContent).toContain('餐飲')
     expect(document.querySelector('#category-grid')?.textContent).not.toContain('薪資')
     expect(document.querySelector('#payee-suggestions')?.textContent).toContain('全聯')
+    expect(document.querySelector<HTMLElement>('#iou-toggle')?.hidden).toBe(false)
 
     click('#type-toggle [data-type="收入"]')
     expect(document.querySelector('#category-grid')?.textContent).toContain('薪資')
     expect(document.querySelector('#category-grid')?.textContent).not.toContain('餐飲')
+    expect(document.querySelector<HTMLElement>('#iou-toggle')?.hidden).toBe(true)
 
     click('#type-toggle [data-type="轉帳"]')
     expect(document.querySelector('#category-section')).toHaveProperty('hidden', true)
     expect(document.querySelector('#to-account-section')).toHaveProperty('hidden', false)
+    expect(document.querySelector<HTMLElement>('#iou-toggle')?.hidden).toBe(true)
   })
 
   it('keeps submit blocked when required 說明 is whitespace', () => {
@@ -126,6 +129,139 @@ describe('selection-first entry form', () => {
       payee: '全聯',
       currency: 'TWD',
     }, '3b241101-e2bb-4255-8caf-4136c566a962')
+  })
+
+  it('selects 代墊 應收 by hiding and clearing category and requiring 對象', async () => {
+    mount()
+    fillExpense()
+
+    const toggle = document.querySelector<HTMLButtonElement>(
+      '#iou-toggle [data-iou="應收"]',
+    )
+    expect(toggle).not.toBeNull()
+    toggle?.click()
+
+    expect(document.querySelector<HTMLElement>('#category-section')?.hidden).toBe(true)
+    expect(document.querySelector('#category-grid .selected')).toBeNull()
+    expect(document.querySelector('#payee-heading')?.textContent).toContain('必填')
+    expect(document.querySelector<HTMLInputElement>('#payee-input')?.required).toBe(true)
+    expect(document.querySelector<HTMLButtonElement>('#submit-btn')?.disabled).toBe(true)
+
+    input('#payee-input', '阿明')
+    click('#submit-btn')
+
+    await vi.waitFor(() => expect(apiMocks.submitTransaction).toHaveBeenCalledTimes(1))
+    expect(apiMocks.submitTransaction).toHaveBeenCalledWith({
+      type: '支出',
+      amount: 260,
+      date: '2026-07-27',
+      description: '晚餐',
+      account: '錢包',
+      payee: '阿明',
+      currency: 'TWD',
+      iou: '應收',
+    }, '3b241101-e2bb-4255-8caf-4136c566a962')
+  })
+
+  it('selects 應付 while keeping category and requiring 對象', async () => {
+    mount()
+    fillExpense()
+
+    const toggle = document.querySelector<HTMLButtonElement>(
+      '#iou-toggle [data-iou="應付"]',
+    )
+    expect(toggle).not.toBeNull()
+    toggle?.click()
+
+    expect(document.querySelector<HTMLElement>('#category-section')?.hidden).toBe(false)
+    expect(document.querySelector('#category-grid .selected')?.textContent).toBe('餐飲')
+    expect(document.querySelector<HTMLInputElement>('#payee-input')?.required).toBe(true)
+    expect(document.querySelector<HTMLButtonElement>('#submit-btn')?.disabled).toBe(true)
+
+    input('#payee-input', '阿明')
+    click('#submit-btn')
+
+    await vi.waitFor(() => expect(apiMocks.submitTransaction).toHaveBeenCalledTimes(1))
+    expect(apiMocks.submitTransaction).toHaveBeenCalledWith({
+      type: '支出',
+      amount: 260,
+      date: '2026-07-27',
+      description: '晚餐',
+      account: '錢包',
+      category: '餐飲',
+      payee: '阿明',
+      currency: 'TWD',
+      iou: '應付',
+    }, '3b241101-e2bb-4255-8caf-4136c566a962')
+  })
+
+  it('toggles iou off without clearing category or 對象', () => {
+    mount()
+    fillExpense()
+    input('#payee-input', '阿明')
+
+    const toggle = document.querySelector<HTMLButtonElement>(
+      '#iou-toggle [data-iou="應付"]',
+    )
+    expect(toggle).not.toBeNull()
+    toggle?.click()
+    toggle?.click()
+
+    expect(document.querySelector<HTMLElement>('#category-section')?.hidden).toBe(false)
+    expect(document.querySelector('#category-grid .selected')?.textContent).toBe('餐飲')
+    expect(document.querySelector<HTMLInputElement>('#payee-input')?.value).toBe('阿明')
+    expect(document.querySelector<HTMLInputElement>('#payee-input')?.required).toBe(false)
+    expect(document.querySelector<HTMLButtonElement>('#submit-btn')?.disabled).toBe(false)
+  })
+
+  it('posts a split as two creates with two different idempotency keys', async () => {
+    const randomUUID = vi.fn()
+      .mockReturnValueOnce('3b241101-e2bb-4255-8caf-4136c566a962')
+      .mockReturnValueOnce('a4dd45e4-4741-42bc-8750-40d3b0bbccca')
+    apiMocks.loadOptions.mockReturnValue({
+      cached: CACHED_OPTIONS,
+      refresh: new Promise(() => {}),
+    })
+    unmount = mountApp(document.querySelector<HTMLElement>('#app')!, {
+      today: () => '2026-07-27',
+      randomUUID,
+    })
+
+    fillExpense('自己的午餐')
+    click('#submit-btn')
+    await vi.waitFor(() => expect(apiMocks.submitTransaction).toHaveBeenCalledTimes(1))
+    await new Promise(resolve => setTimeout(resolve, 650))
+
+    fillExpense('代墊午餐')
+    const toggle = document.querySelector<HTMLButtonElement>(
+      '#iou-toggle [data-iou="應收"]',
+    )
+    expect(toggle).not.toBeNull()
+    toggle?.click()
+    input('#payee-input', '阿明')
+    click('#submit-btn')
+    await vi.waitFor(() => expect(apiMocks.submitTransaction).toHaveBeenCalledTimes(2))
+
+    expect(apiMocks.submitTransaction.mock.calls).toEqual([
+      [
+        expect.objectContaining({
+          amount: 260,
+          category: '餐飲',
+          description: '自己的午餐',
+        }),
+        '3b241101-e2bb-4255-8caf-4136c566a962',
+      ],
+      [
+        expect.objectContaining({
+          amount: 260,
+          payee: '阿明',
+          description: '代墊午餐',
+          iou: '應收',
+        }),
+        'a4dd45e4-4741-42bc-8750-40d3b0bbccca',
+      ],
+    ])
+    expect(apiMocks.submitTransaction.mock.calls[1]?.[0]).not.toHaveProperty('category')
   })
 
   it('reuses the same idempotencyKey for the second request after failure', async () => {

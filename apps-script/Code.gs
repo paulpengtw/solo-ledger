@@ -379,6 +379,7 @@ function createTransaction_(payload, nonce) {
     var vocabulary = readAccountVocabulary_(spreadsheet);
     var transaction = payload.transaction;
 
+    validateIouTransactionFields_(transaction);
     validateTransactionVocabulary_(transaction, vocabulary);
 
     var existingRow = findTxnRow_(
@@ -457,6 +458,20 @@ function readAccountVocabulary_(spreadsheet) {
   }
 
   return { accountTypes: accountTypes, enabled: enabled };
+}
+
+function validateIouTransactionFields_(transaction) {
+  if (!transaction || typeof transaction !== 'object') {
+    return;
+  }
+  if (transaction.iou !== '應收' && transaction.iou !== '應付') {
+    return;
+  }
+
+  requireField_(transaction, 'payee');
+  if (transaction.iou === '應收') {
+    rejectField_(transaction, 'category');
+  }
 }
 
 function validateTransactionVocabulary_(transaction, vocabulary) {

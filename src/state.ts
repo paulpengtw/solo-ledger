@@ -23,6 +23,7 @@ export type FormState = {
   toAccount: string | null
   category: string | null
   payee: string
+  iou: '應收' | '應付' | null
   description: string
   status: 'idle' | 'submitting' | 'success' | 'error'
   errorMessage: string | null
@@ -39,6 +40,7 @@ export function initialState(date: string): FormState {
     toAccount: null,
     category: null,
     payee: '',
+    iou: null,
     description: '',
     status: 'idle',
     errorMessage: null,
@@ -63,11 +65,13 @@ export function setType(state: FormState, type: TransactionType): FormState {
       type,
       category: null,
       payee: '',
+      iou: null,
     })
   }
   return edited(state, {
     type,
     toAccount: null,
+    iou: null,
   })
 }
 
@@ -102,6 +106,19 @@ export const selectCategory = (state: FormState, category: string): FormState =>
 export const setPayee = (state: FormState, payee: string): FormState =>
   edited(state, { payee })
 
+export function setIou(
+  state: FormState,
+  iou: '應收' | '應付',
+): FormState {
+  if (state.type !== '支出') return state
+
+  const selected = state.iou === iou ? null : iou
+  return edited(state, {
+    iou: selected,
+    ...(selected === '應收' ? { category: null } : {}),
+  })
+}
+
 export const setDescription = (state: FormState, description: string): FormState =>
   edited(state, { description })
 
@@ -134,9 +151,10 @@ export function canSubmit(state: FormState): boolean {
   ) {
     return false
   }
-  return state.type === '轉帳'
-    ? state.toAccount !== null
-    : state.category !== null
+  if (state.iou !== null && state.payee.trim() === '') return false
+  if (state.type === '轉帳') return state.toAccount !== null
+  if (state.type === '支出' && state.iou === '應收') return true
+  return state.category !== null
 }
 
 export function buildTransaction(state: FormState): Transaction {
@@ -152,9 +170,14 @@ export function buildTransaction(state: FormState): Transaction {
   if (state.type === '轉帳') {
     transaction.toAccount = state.toAccount ?? undefined
   } else {
-    transaction.category = state.category ?? undefined
+    if (!(state.type === '支出' && state.iou === '應收')) {
+      transaction.category = state.category ?? undefined
+    }
     const payee = state.payee.trim()
     if (payee) transaction.payee = payee
+    if (state.type === '支出' && state.iou !== null) {
+      transaction.iou = state.iou
+    }
   }
   return transaction
 }

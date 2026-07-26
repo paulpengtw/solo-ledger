@@ -141,6 +141,27 @@ describe('handleAction', () => {
     expect(fetchFn).not.toHaveBeenCalled()
   })
 
+  it('returns 400 naming payee for an iou without contacting Apps Script', async () => {
+    const { payee: _payee, ...withoutPayee } = transaction
+    const fetchFn = vi.fn(async () =>
+      new Response('{"ok":true}', { status: 200 }),
+    ) as unknown as typeof fetch
+
+    const response = await handleAction(
+      'create_transaction',
+      req({
+        idempotencyKey: KEY,
+        transaction: { ...withoutPayee, iou: '應收' },
+      }),
+      env,
+      deps(fetchFn),
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ ok: false, error: 'missing payee' })
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
   it('uses the client idempotency key as nonce and sends the exact create payload', async () => {
     const upstreamBody = '{"ok":true,"txn_id":"txn-1","row":42}'
     const fetchFn = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {

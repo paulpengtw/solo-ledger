@@ -141,7 +141,12 @@ export function mountApp(
       <div id="category-grid" class="option-grid"></div>
     </section>
     <section id="payee-section" class="form-section" aria-labelledby="payee-heading">
-      <h2 id="payee-heading">對象 <span>選填</span></h2>
+      <h2 id="payee-heading">對象 <span id="payee-requirement">選填</span></h2>
+      <div id="iou-toggle" class="segmented" style="grid-template-columns: repeat(2, 1fr)"
+        aria-label="代墊或應付">
+        <button type="button" data-iou="應收" aria-pressed="false">代墊(應收)</button>
+        <button type="button" data-iou="應付" aria-pressed="false">應付</button>
+      </div>
       <div id="payee-suggestions" class="option-grid compact"></div>
       <label class="text-field">
         <span>自訂對象</span>
@@ -188,7 +193,9 @@ export function mountApp(
   const accountPicker = root.querySelector<HTMLElement>('#account-picker')!
   const toAccountPicker = root.querySelector<HTMLElement>('#to-account-picker')!
   const categoryGrid = root.querySelector<HTMLElement>('#category-grid')!
+  const iouToggle = root.querySelector<HTMLElement>('#iou-toggle')!
   const payeeSuggestions = root.querySelector<HTMLElement>('#payee-suggestions')!
+  const payeeRequirement = root.querySelector<HTMLElement>('#payee-requirement')!
   const payeeInput = root.querySelector<HTMLInputElement>('#payee-input')!
   const descriptionInput = root.querySelector<HTMLInputElement>('#description-input')!
   const dateInput = root.querySelector<HTMLInputElement>('#date-input')!
@@ -320,11 +327,22 @@ export function mountApp(
 
     root.querySelector<HTMLElement>('#category-section')!.hidden =
       state.type === '轉帳'
+      || (state.type === '支出' && state.iou === '應收')
     root.querySelector<HTMLElement>('#to-account-section')!.hidden =
       state.type !== '轉帳'
     root.querySelector<HTMLElement>('#payee-section')!.hidden =
       state.type === '轉帳'
+    iouToggle.hidden = state.type !== '支出'
+    iouToggle.querySelectorAll<HTMLButtonElement>('[data-iou]').forEach(element => {
+      const selected = element.dataset['iou'] === state.iou
+      element.classList.toggle('selected', selected)
+      element.setAttribute('aria-pressed', String(selected))
+    })
 
+    const payeeRequired = state.iou !== null
+    payeeRequirement.textContent = payeeRequired ? '必填' : '選填'
+    payeeInput.required = payeeRequired
+    payeeInput.setAttribute('aria-required', String(payeeRequired))
     payeeInput.value = state.payee
     descriptionInput.value = state.description
     dateInput.value = state.date
@@ -437,6 +455,15 @@ export function mountApp(
     const target = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-category]')
     if (!target) return
     dispatch(State.selectCategory(state, target.dataset['category']!))
+  })
+
+  iouToggle.addEventListener('click', event => {
+    const target = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-iou]')
+    if (!target) return
+    dispatch(State.setIou(
+      state,
+      target.dataset['iou'] as '應收' | '應付',
+    ))
   })
 
   payeeSuggestions.addEventListener('click', event => {
