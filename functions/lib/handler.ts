@@ -31,6 +31,7 @@ const ALLOWED = new Set([
   'list_receivables',
   'settle',
   'reverse_transaction',
+  'check_consistency',
 ])
 
 function json(status: number, body: unknown): Response {
@@ -161,6 +162,31 @@ export async function handleAction(
       action: 'list_transactions',
       date_from: validated.date_from,
       date_to: validated.date_to,
+    }
+  } else if (action === 'check_consistency') {
+    let body: Record<string, unknown> = {}
+    try {
+      const parsed = await request.json()
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        body = parsed as Record<string, unknown>
+      } else {
+        return json(400, { ok: false, error: 'invalid request body' })
+      }
+    } catch {
+      return json(400, { ok: false, error: 'invalid request body' })
+    }
+
+    if (
+      Object.prototype.hasOwnProperty.call(body, 'repair')
+      && typeof body.repair !== 'boolean'
+    ) {
+      return json(400, { ok: false, error: 'invalid repair flag' })
+    }
+
+    nonce = crypto.randomUUID()
+    payload = { action: 'check_consistency' }
+    if (body.repair === true) {
+      payload.repair = true
     }
   } else {
     nonce = crypto.randomUUID()

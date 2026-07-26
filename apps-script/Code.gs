@@ -37,6 +37,9 @@ var NONCE_CACHE_SECONDS = 600;
 var LOCK_WAIT_MILLISECONDS = 30000;
 var SCHEMA_SHEET_NAMES = ['會計科目', '選項清單', '設定'];
 var SPREADSHEET_ID_TAIL_LENGTH = 8;
+var BACKUP_FOLDER_PROPERTY = 'LEDGER_BACKUP_FOLDER_ID';
+var BACKUP_FOLDER_NAME = 'Solo Ledger backups';
+var BACKUP_RETENTION_COUNT = 12;
 
 function doPost(e) {
   try {
@@ -66,6 +69,9 @@ function route_(payload, nonce) {
   }
   if (action === 'list_receivables') {
     return listReceivables_();
+  }
+  if (action === 'check_consistency') {
+    return checkConsistency_(payload);
   }
   if (action === 'create_transaction') {
     return createTransaction_(payload, nonce);
@@ -483,6 +489,395 @@ function findRecordByTxnId_(records, txnId) {
     }
   }
   return null;
+}
+
+function checkConsistency_(payload) {
+  var repair = Boolean(payload && payload.repair === true);
+  if (!repair) {
+    return runConsistencyAudit_(false);
+  }
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(LOCK_WAIT_MILLISECONDS);
+  try {
+    return runConsistencyAudit_(true);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function runConsistencyAudit_(repair) {
+  var spreadsheet = SpreadsheetApp.openById(
+    requiredProp_('LEDGER_SPREADSHEET_ID'),
+  );
+  var journal = requiredSheet_(spreadsheet, '日記帳');
+  var lastRow = journal.getLastRow();
+  var lastColumn = journal.getLastColumn();
+  var headerRow = journal
+    .getRange(1, 1, 1, lastColumn)
+    .getDisplayValues()[0];
+  var columns = resolveHeaders_(headerRow, JOURNAL_HEADERS);
+  var vocabulary = readAccountVocabulary_(spreadsheet);
+  var rules = consistencyRuleLists_();
+  var repairedRows = [];
+
+  if (lastRow < 2) {
+    return consistencyReport_(rules, repairedRows, repair);
+  }
+
+  var range = journal.getRange(2, 1, lastRow - 1, lastColumn);
+  var rawRows = range.getValues();
+  var displayRows = range.getDisplayValues();
+  var records = [];
+  var dataLastRow = 1;
+  var rowIndex;
+
+  for (rowIndex = 0; rowIndex < rawRows.length; rowIndex += 1) {
+    if (!journalRowHasData_(rawRows[rowIndex], columns)) {
+      break;
+    }
+    dataLastRow = rowIndex + 2;
+  }
+
+  for (rowIndex = 0; rowIndex < dataLastRow - 1; rowIndex += 1) {
+    if (!journalRowHasData_(rawRows[rowIndex], columns)) {
+      continue;
+    }
+    records.push(
+      consistencyRecord_(
+        rawRows[rowIndex],
+        displayRows[rowIndex],
+        columns,
+        rowIndex + 2,
+      ),
+    );
+  }
+
+  var recordsByTxnId = Object.create(null);
+  for (rowIndex = 0; rowIndex < records.length; rowIndex += 1) {
+    var recordTxnId = records[rowIndex].values.txn_id;
+    if (
+      recordTxnId &&
+      !Object.prototype.hasOwnProperty.call(recordsByTxnId, recordTxnId)
+    ) {
+      recordsByTxnId[recordTxnId] = records[rowIndex];
+    }
+  }
+
+  for (rowIndex = 0; rowIndex < records.length; rowIndex += 1) {
+    var record = records[rowIndex];
+    auditJournalAccounts_(record, vocabulary, rules);
+    auditJournalCategory_(record, vocabulary, rules);
+    auditJournalAmount_(record, rules);
+    auditJournalDateTime_(record, rules);
+    auditReversalLink_(record, rules);
+    auditLinkedCurrency_(record, recordsByTxnId, rules);
+
+    var status = record.values['結清狀態'];
+    if (status !== '') {
+      var derived = derivedStatusForAudit_(records, record);
+      if (derived && status !== derived.status) {
+        var statusFinding = {
+          row: record.sheetRow,
+          field: '結清狀態',
+          value: status,
+          expected: derived.status,
+          outstanding: derived.outstanding,
+        };
+        rules.settlement_status_mismatch.push(statusFinding);
+        var staleStatusFinding = {
+          row: record.sheetRow,
+          field: '結清狀態',
+          value: status,
+          expected: derived.status,
+          outstanding: derived.outstanding,
+          repairable: true,
+          repaired: false,
+        };
+        rules.stale_status_cells.push(staleStatusFinding);
+        if (repair) {
+          journal
+            .getRange(record.sheetRow, columns['結清狀態'])
+            .setValues([[derived.status]]);
+          staleStatusFinding.repaired = true;
+          repairedRows.push(record.sheetRow);
+        }
+      }
+    }
+  }
+
+  auditStrayJournalCells_(
+    rawRows,
+    displayRows,
+    dataLastRow,
+    lastColumn,
+    headerRow,
+    rules,
+  );
+  return consistencyReport_(rules, repairedRows, repair);
+}
+
+function consistencyRuleLists_() {
+  return {
+    unknown_or_disabled_accounts: [],
+    category_nominal_leg_mismatch: [],
+    settlement_status_mismatch: [],
+    stale_status_cells: [],
+    non_positive_amounts: [],
+    non_text_date_time_cells: [],
+    stray_cells_below_data_range: [],
+    reversals_missing_link: [],
+    linked_currency_mismatch: [],
+  };
+}
+
+function consistencyReport_(rules, repairedRows, repair) {
+  var clean = true;
+  var ruleReports = {};
+  for (var ruleName in rules) {
+    if (!Object.prototype.hasOwnProperty.call(rules, ruleName)) {
+      continue;
+    }
+    var ruleClean = rules[ruleName].length === 0;
+    ruleReports[ruleName] = {
+      clean: ruleClean,
+      offenses: rules[ruleName],
+    };
+    if (!ruleClean) {
+      clean = false;
+    }
+  }
+  return {
+    ok: true,
+    clean: clean,
+    repair_requested: repair === true,
+    repaired: repairedRows.length,
+    repaired_rows: repairedRows,
+    rules: ruleReports,
+  };
+}
+
+function journalRowHasData_(rawRow, columns) {
+  for (var index = 0; index < JOURNAL_HEADERS.length; index += 1) {
+    if (hasAuditValue_(rawRow[columns[JOURNAL_HEADERS[index]] - 1])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasAuditValue_(value) {
+  return value !== '' && value !== null && value !== undefined;
+}
+
+function consistencyRecord_(rawRow, displayRow, columns, sheetRow) {
+  var values = {};
+  for (var index = 0; index < JOURNAL_HEADERS.length; index += 1) {
+    var header = JOURNAL_HEADERS[index];
+    values[header] = displayRow[columns[header] - 1];
+  }
+  var rawAmount = rawRow[columns['金額'] - 1];
+  var amount = Number(rawAmount);
+  return {
+    sheetRow: sheetRow,
+    values: values,
+    rawRow: rawRow,
+    rawAmount: rawAmount,
+    amount: amount,
+    amountValid: hasAuditValue_(rawAmount) && isFinite(amount),
+    columns: columns,
+  };
+}
+
+function auditJournalAccounts_(record, vocabulary, rules) {
+  var fields = ['借方帳戶', '貸方帳戶'];
+  for (var index = 0; index < fields.length; index += 1) {
+    var field = fields[index];
+    var account = record.values[field];
+    if (!account) {
+      continue;
+    }
+    if (
+      !Object.prototype.hasOwnProperty.call(
+        vocabulary.accountTypes,
+        account,
+      )
+    ) {
+      rules.unknown_or_disabled_accounts.push({
+        row: record.sheetRow,
+        field: field,
+        value: account,
+        reason: 'unknown',
+      });
+    } else if (vocabulary.enabled[account] !== true) {
+      rules.unknown_or_disabled_accounts.push({
+        row: record.sheetRow,
+        field: field,
+        value: account,
+        reason: 'disabled',
+      });
+    }
+  }
+}
+
+function auditJournalCategory_(record, vocabulary, rules) {
+  var nominalLeg = nominalLeg_(
+    record.values['借方帳戶'],
+    record.values['貸方帳戶'],
+    vocabulary.accountTypes,
+  );
+  if (!nominalLeg || record.values['分類'] === nominalLeg) {
+    return;
+  }
+  rules.category_nominal_leg_mismatch.push({
+    row: record.sheetRow,
+    field: '分類',
+    value: record.values['分類'],
+    expected: nominalLeg,
+    nominal_leg: nominalLeg,
+  });
+}
+
+function auditJournalAmount_(record, rules) {
+  if (record.amountValid && record.amount > 0) {
+    return;
+  }
+  rules.non_positive_amounts.push({
+    row: record.sheetRow,
+    field: '金額',
+    value: consistencyValue_(record.rawAmount),
+  });
+}
+
+function auditJournalDateTime_(record, rules) {
+  var fields = ['日期', '時間'];
+  for (var index = 0; index < fields.length; index += 1) {
+    var field = fields[index];
+    var rawValue = record.rawRow[record.columns[field] - 1];
+    if (!hasAuditValue_(rawValue) || typeof rawValue === 'string') {
+      continue;
+    }
+    rules.non_text_date_time_cells.push({
+      row: record.sheetRow,
+      field: field,
+      value: consistencyValue_(rawValue),
+    });
+  }
+}
+
+function consistencyValue_(value) {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  return value;
+}
+
+function auditReversalLink_(record, rules) {
+  if (
+    record.values['類型'] === '沖銷' &&
+    record.values['沖銷txn_id'] === ''
+  ) {
+    rules.reversals_missing_link.push({
+      row: record.sheetRow,
+      field: '沖銷txn_id',
+      value: '',
+    });
+  }
+}
+
+function auditLinkedCurrency_(record, recordsByTxnId, rules) {
+  var type = record.values['類型'];
+  var linkedTxnId = record.values['沖銷txn_id'];
+  if (
+    !linkedTxnId ||
+    (type !== '轉帳' && type !== '沖銷') ||
+    !Object.prototype.hasOwnProperty.call(recordsByTxnId, linkedTxnId)
+  ) {
+    return;
+  }
+
+  var original = recordsByTxnId[linkedTxnId];
+  var currency = record.values['幣別'];
+  var originalCurrency = original.values['幣別'];
+  if (currency === originalCurrency) {
+    return;
+  }
+  rules.linked_currency_mismatch.push({
+    row: record.sheetRow,
+    field: '幣別',
+    value: currency,
+    expected: originalCurrency,
+    linked_txn_id: linkedTxnId,
+    linked_row: original.sheetRow,
+  });
+}
+
+function derivedStatusForAudit_(records, original) {
+  if (!original.amountValid) {
+    return null;
+  }
+  var txnId = original.values.txn_id;
+
+  if (txnId) {
+    for (var index = 0; index < records.length; index += 1) {
+      var candidate = records[index];
+      if (
+        candidate.values['沖銷txn_id'] === txnId &&
+        candidate.values['類型'] === '沖銷'
+      ) {
+        return { status: '已沖銷', outstanding: 0 };
+      }
+      if (
+        candidate.values['沖銷txn_id'] === txnId &&
+        candidate.values['類型'] === '轉帳'
+      ) {
+        if (!candidate.amountValid) {
+          return null;
+        }
+      }
+    }
+  }
+
+  var outstanding = outstandingForRecord_(records, original);
+  var status =
+    outstanding === 0
+      ? '已結'
+      : outstanding < original.amount
+        ? '部分'
+        : '未結';
+  return { status: status, outstanding: outstanding };
+}
+
+function auditStrayJournalCells_(
+  rawRows,
+  displayRows,
+  dataLastRow,
+  lastColumn,
+  headerRow,
+  rules,
+) {
+  var firstStrayIndex = Math.max(0, dataLastRow - 1);
+  for (
+    var rowIndex = firstStrayIndex;
+    rowIndex < rawRows.length;
+    rowIndex += 1
+  ) {
+    for (var columnIndex = 0; columnIndex < lastColumn; columnIndex += 1) {
+      var rawValue = rawRows[rowIndex][columnIndex];
+      if (!hasAuditValue_(rawValue)) {
+        continue;
+      }
+      rules.stray_cells_below_data_range.push({
+        row: rowIndex + 2,
+        column: columnIndex + 1,
+        field: headerRow[columnIndex],
+        value:
+          typeof rawValue === 'string'
+            ? displayRows[rowIndex][columnIndex]
+            : consistencyValue_(rawValue),
+      });
+    }
+  }
 }
 
 function createTransaction_(payload, nonce) {
@@ -1103,6 +1498,123 @@ function resolveHeaders_(headerRow, requiredHeaders) {
   }
 
   return resolved;
+}
+
+// Editor-installed weekly operations are intentionally not routed through
+// doPost: Drive deletion and owner-email authority must never be remotely
+// invocable through the API.
+function weeklyConsistencyCheck() {
+  var report = checkConsistency_({ repair: false });
+  if (!report.clean) {
+    MailApp.sendEmail({
+      to: Session.getEffectiveUser().getEmail(),
+      subject: 'solo-ledger consistency failures',
+      body: JSON.stringify(report, null, 2),
+    });
+  }
+  return report;
+}
+
+function weeklyBackup() {
+  var spreadsheetId = requiredProp_('LEDGER_SPREADSHEET_ID');
+  var spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+  var folder = backupFolder_();
+  var backupPrefix = spreadsheet.getName() + ' backup ';
+  var timestamp = taipeiIsoNow_()
+    .replace(/[-:]/g, '')
+    .replace('T', '-')
+    .replace(/\.\d{3}\+0800$/, '');
+  var name = backupPrefix + timestamp;
+  var copy = DriveApp.getFileById(spreadsheetId).makeCopy(name, folder);
+  var pruned = pruneBackups_(folder, backupPrefix, spreadsheetId);
+  var prunedNames = [];
+
+  for (var index = 0; index < pruned.length; index += 1) {
+    prunedNames.push(pruned[index].getName());
+  }
+  return {
+    ok: true,
+    file_id: copy.getId(),
+    name: copy.getName(),
+    pruned: prunedNames,
+  };
+}
+
+function backupFolder_() {
+  var properties = PropertiesService.getScriptProperties();
+  var folderId = properties.getProperty(BACKUP_FOLDER_PROPERTY);
+  if (folderId) {
+    return DriveApp.getFolderById(folderId);
+  }
+
+  var folder = DriveApp.createFolder(BACKUP_FOLDER_NAME);
+  properties.setProperty(BACKUP_FOLDER_PROPERTY, folder.getId());
+  return folder;
+}
+
+function pruneBackups_(folder, backupPrefix, sourceFileId) {
+  var iterator = folder.getFiles();
+  var files = [];
+  while (iterator.hasNext()) {
+    var file = iterator.next();
+    if (
+      file.getId() === sourceFileId ||
+      file.getName().indexOf(backupPrefix) !== 0
+    ) {
+      continue;
+    }
+    files.push(file);
+  }
+  files.sort(function (left, right) {
+    var createdDifference =
+      right.getDateCreated().getTime() - left.getDateCreated().getTime();
+    if (createdDifference !== 0) {
+      return createdDifference;
+    }
+    var leftName = left.getName();
+    var rightName = right.getName();
+    if (leftName === rightName) {
+      return 0;
+    }
+    return leftName < rightName ? 1 : -1;
+  });
+
+  var pruned = [];
+  for (
+    var index = BACKUP_RETENTION_COUNT;
+    index < files.length;
+    index += 1
+  ) {
+    files[index].setTrashed(true);
+    pruned.push(files[index]);
+  }
+  return pruned;
+}
+
+function installWeeklyTriggers() {
+  var handlerNames = {
+    weeklyConsistencyCheck: true,
+    weeklyBackup: true,
+  };
+  var existing = ScriptApp.getProjectTriggers();
+  var index;
+
+  for (index = 0; index < existing.length; index += 1) {
+    if (handlerNames[existing[index].getHandlerFunction()] === true) {
+      ScriptApp.deleteTrigger(existing[index]);
+    }
+  }
+
+  ScriptApp.newTrigger('weeklyConsistencyCheck')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay.MONDAY)
+    .atHour(7)
+    .create();
+  ScriptApp.newTrigger('weeklyBackup')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay.MONDAY)
+    .atHour(8)
+    .create();
 }
 
 // Editor-run only: setupSpreadsheet() and closeAndOpenBooks() are never routed through doPost.
