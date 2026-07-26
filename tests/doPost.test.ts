@@ -69,6 +69,78 @@ describe('doPost', () => {
     expect(changed.schema_version).not.toBe(first.schema_version)
   })
 
+  it('returns sorted enabled form options with the same schema_version as health', async () => {
+    const accounts = requiredSheet(harness, '會計科目')
+    accounts.getRange(accounts.getLastRow() + 1, 1, 5, 5).setValues([
+      ['停用錢包', '資產', '測試', false, 5],
+      ['B 帳戶', '資產', '同序', true, 15],
+      ['A 帳戶', '負債', '同序', true, 15],
+      ['停用支出', '支出', '測試', false, 1],
+      ['停用收入', '收入', '測試', false, 1],
+    ])
+    const options = requiredSheet(harness, '選項清單')
+    options.getRange(2, 1, 3, 1).setValues([
+      ['路易莎'],
+      [''],
+      ['全聯'],
+    ])
+
+    const health = await post(harness, { action: 'health' }, 'options-health-001')
+    const response = await post(harness, { action: 'get_options' }, 'get-options-001')
+
+    expect(response).toEqual({
+      schema_version: health.schema_version,
+      accounts: [
+        { name: 'A 帳戶', type: '負債', subtype: '同序', sort: 15 },
+        { name: 'B 帳戶', type: '資產', subtype: '同序', sort: 15 },
+        { name: '應收帳款', type: '資產', subtype: '往來', sort: 20 },
+        { name: '應付帳款', type: '負債', subtype: '往來', sort: 30 },
+        { name: '現金', type: '資產', subtype: '現金', sort: 100 },
+        { name: '銀行', type: '資產', subtype: '銀行', sort: 110 },
+        { name: '悠遊卡', type: '資產', subtype: '電子票證', sort: 120 },
+      ],
+      categories: {
+        支出: ['調整支出', '餐飲', '交通'],
+        收入: ['調整收入', '薪資收入'],
+      },
+      payees: ['路易莎', '全聯'],
+      defaults: {
+        currency: 'TWD',
+        account: '現金',
+      },
+    })
+    expect((response.accounts as Array<{ name: string }>).map(({ name }) => name))
+      .not.toContain('期初餘額')
+    expect((response.accounts as Array<{ name: string }>).map(({ name }) => name))
+      .not.toContain('停用錢包')
+    expect((response.categories as { 支出: string[] }).支出)
+      .not.toContain('停用支出')
+    expect((response.categories as { 收入: string[] }).收入)
+      .not.toContain('停用收入')
+  })
+
+  it('fingerprints vocabulary edits but ignores journal edits in get_options schema_version', async () => {
+    const first = await post(harness, { action: 'get_options' }, 'options-schema-001')
+    const accounts = requiredSheet(harness, '會計科目')
+    accounts.getRange(6, 3).setValues([['新的子類型']])
+
+    const vocabularyChanged = await post(
+      harness,
+      { action: 'get_options' },
+      'options-schema-002',
+    )
+    const journal = requiredSheet(harness, '日記帳')
+    journal.getRange(2, 1).setValues([['2026-07-27']])
+    const journalChanged = await post(
+      harness,
+      { action: 'get_options' },
+      'options-schema-003',
+    )
+
+    expect(vocabularyChanged.schema_version).not.toBe(first.schema_version)
+    expect(journalChanged.schema_version).toBe(vocabularyChanged.schema_version)
+  })
+
   it('appends exactly one column-complete expense row with the §5.1 legs', async () => {
     const response = await postCreate(harness, 'create-001', {
       type: '支出',

@@ -97,7 +97,7 @@ describe('handleAction', () => {
     const fetchFn = noFetch()
 
     const response = await handleAction(
-      'get_options',
+      'list_transactions',
       req({}),
       env,
       deps(fetchFn),
@@ -216,6 +216,34 @@ describe('handleAction', () => {
 
     expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(response.status).toBe(207)
+    expect(await response.text()).toBe(upstreamBody)
+  })
+
+  it('uses a random nonce for get_options and forwards the upstream response verbatim', async () => {
+    const upstreamBody = '{"schema_version":"abcdef012345","accounts":[]}'
+    const fetchFn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const envelope = JSON.parse(String(init?.body)) as {
+        nonce: string
+        payload: string
+      }
+
+      expect(envelope.nonce).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      )
+      expect(envelope.nonce).not.toBe(KEY)
+      expect(decodePayload(envelope.payload)).toEqual({ action: 'get_options' })
+      return new Response(upstreamBody, { status: 203 })
+    }) as unknown as typeof fetch
+
+    const response = await handleAction(
+      'get_options',
+      req({}),
+      env,
+      deps(fetchFn),
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(response.status).toBe(203)
     expect(await response.text()).toBe(upstreamBody)
   })
 })

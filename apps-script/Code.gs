@@ -42,6 +42,9 @@ function route_(payload, nonce) {
   if (action === 'health') {
     return health_();
   }
+  if (action === 'get_options') {
+    return getOptions_();
+  }
   if (action === 'create_transaction') {
     return createTransaction_(payload, nonce);
   }
@@ -140,6 +143,112 @@ function digestHex_(bytes) {
     hex += ('0' + unsignedByte.toString(16)).slice(-2);
   }
   return hex;
+}
+
+function getOptions_() {
+  var spreadsheet = SpreadsheetApp.openById(
+    requiredProp_('LEDGER_SPREADSHEET_ID'),
+  );
+  var accountSheet = requiredSheet_(spreadsheet, '會計科目');
+  var accountValues = accountSheet
+    .getRange(
+      1,
+      1,
+      accountSheet.getLastRow(),
+      accountSheet.getLastColumn(),
+    )
+    .getValues();
+  var accountColumns = resolveHeaders_(accountValues[0], [
+    '名稱',
+    '類型',
+    '子類型',
+    '啟用',
+    '排序',
+  ]);
+  var accounts = [];
+  var expenseCategories = [];
+  var incomeCategories = [];
+
+  for (var rowIndex = 1; rowIndex < accountValues.length; rowIndex += 1) {
+    var row = accountValues[rowIndex];
+    var name = String(row[accountColumns['名稱'] - 1] || '').trim();
+    var type = String(row[accountColumns['類型'] - 1] || '').trim();
+    if (!name || !isTrue_(row[accountColumns['啟用'] - 1])) {
+      continue;
+    }
+
+    var option = {
+      name: name,
+      type: type,
+      subtype: String(row[accountColumns['子類型'] - 1] || '').trim(),
+      sort: Number(row[accountColumns['排序'] - 1]),
+    };
+    if (type === '資產' || type === '負債') {
+      accounts.push(option);
+    } else if (type === '支出') {
+      expenseCategories.push(option);
+    } else if (type === '收入') {
+      incomeCategories.push(option);
+    }
+  }
+
+  accounts.sort(compareVocabularyOptions_);
+  expenseCategories.sort(compareVocabularyOptions_);
+  incomeCategories.sort(compareVocabularyOptions_);
+
+  var optionsSheet = requiredSheet_(spreadsheet, '選項清單');
+  var optionValues = optionsSheet
+    .getRange(
+      1,
+      1,
+      optionsSheet.getLastRow(),
+      optionsSheet.getLastColumn(),
+    )
+    .getDisplayValues();
+  var optionColumns = resolveHeaders_(optionValues[0], ['對象']);
+  var payees = [];
+  for (rowIndex = 1; rowIndex < optionValues.length; rowIndex += 1) {
+    var payee = String(optionValues[rowIndex][optionColumns['對象'] - 1] || '')
+      .trim();
+    if (payee) {
+      payees.push(payee);
+    }
+  }
+
+  return {
+    schema_version: schemaVersion_(spreadsheet),
+    accounts: accounts,
+    categories: {
+      支出: vocabularyOptionNames_(expenseCategories),
+      收入: vocabularyOptionNames_(incomeCategories),
+    },
+    payees: payees,
+    defaults: {
+      currency: readSetting_(spreadsheet, '預設幣別'),
+      account: readSetting_(spreadsheet, '預設帳戶'),
+    },
+  };
+}
+
+function compareVocabularyOptions_(left, right) {
+  if (left.sort !== right.sort) {
+    return left.sort - right.sort;
+  }
+  if (left.name < right.name) {
+    return -1;
+  }
+  if (left.name > right.name) {
+    return 1;
+  }
+  return 0;
+}
+
+function vocabularyOptionNames_(options) {
+  var names = [];
+  for (var index = 0; index < options.length; index += 1) {
+    names.push(options[index].name);
+  }
+  return names;
 }
 
 function createTransaction_(payload, nonce) {

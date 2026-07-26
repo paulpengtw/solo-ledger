@@ -16,7 +16,12 @@ type Deps = {
   now: () => number
 }
 
-const ALLOWED = new Set(['health', 'auth-check', 'create_transaction'])
+const ALLOWED = new Set([
+  'health',
+  'auth-check',
+  'get_options',
+  'create_transaction',
+])
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
