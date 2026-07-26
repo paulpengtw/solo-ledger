@@ -16,6 +16,10 @@ type ValidationResult =
   | { ok: true; transaction: Transaction }
   | { ok: false; error: string }
 
+type TransactionDateRangeValidationResult =
+  | { ok: true; date_from: string; date_to: string }
+  | { ok: false; error: string }
+
 const TYPES = new Set(['支出', '收入', '轉帳'])
 const IOU_TYPES = new Set(['應收', '應付'])
 const OPTIONAL_STRING_FIELDS = [
@@ -57,6 +61,31 @@ function isRealDate(value: unknown): value is string {
     31,
   ][month - 1] ?? 0
   return day >= 1 && day <= daysInMonth
+}
+
+export function validateTransactionDateRange(
+  input: unknown,
+): TransactionDateRangeValidationResult {
+  if (typeof input !== 'object' || input === null) {
+    return { ok: false, error: 'invalid date_from' }
+  }
+  const candidate = input as Record<string, unknown>
+
+  if (!isRealDate(candidate.date_from)) {
+    return { ok: false, error: 'invalid date_from' }
+  }
+  if (!isRealDate(candidate.date_to)) {
+    return { ok: false, error: 'invalid date_to' }
+  }
+  if (candidate.date_from > candidate.date_to) {
+    return { ok: false, error: 'date_from later than date_to' }
+  }
+
+  return {
+    ok: true,
+    date_from: candidate.date_from,
+    date_to: candidate.date_to,
+  }
 }
 
 function isRealTime(value: unknown): value is string {

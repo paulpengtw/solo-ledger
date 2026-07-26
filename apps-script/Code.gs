@@ -16,6 +16,22 @@ var JOURNAL_HEADERS = [
   '建立時間',
 ];
 
+var LIST_TRANSACTION_HEADERS = [
+  'txn_id',
+  '日期',
+  '時間',
+  '類型',
+  '借方帳戶',
+  '貸方帳戶',
+  '金額',
+  '幣別',
+  '分類',
+  '對象',
+  '說明',
+  '結清狀態',
+];
+
+var MAX_LIST_TRANSACTIONS = 200;
 var MAX_SKEW_SECONDS = 300;
 var NONCE_CACHE_SECONDS = 600;
 var LOCK_WAIT_MILLISECONDS = 30000;
@@ -44,6 +60,9 @@ function route_(payload, nonce) {
   }
   if (action === 'get_options') {
     return getOptions_();
+  }
+  if (action === 'list_transactions') {
+    return listTransactions_(payload);
   }
   if (action === 'create_transaction') {
     return createTransaction_(payload, nonce);
@@ -249,6 +268,81 @@ function vocabularyOptionNames_(options) {
     names.push(options[index].name);
   }
   return names;
+}
+
+function listTransactions_(payload) {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('payload is required');
+  }
+  requireField_(payload, 'date_from');
+  requireField_(payload, 'date_to');
+
+  var spreadsheet = SpreadsheetApp.openById(
+    requiredProp_('LEDGER_SPREADSHEET_ID'),
+  );
+  var journal = requiredSheet_(spreadsheet, '日記帳');
+  var lastColumn = journal.getLastColumn();
+  var headerRow = journal
+    .getRange(1, 1, 1, lastColumn)
+    .getDisplayValues()[0];
+  var columns = resolveHeaders_(headerRow, LIST_TRANSACTION_HEADERS);
+  var lastRow = journal.getLastRow();
+  if (lastRow < 2) {
+    return [];
+  }
+
+  var displayRows = journal
+    .getRange(2, 1, lastRow - 1, lastColumn)
+    .getDisplayValues();
+  var matches = [];
+
+  for (var rowIndex = 0; rowIndex < displayRows.length; rowIndex += 1) {
+    var displayRow = displayRows[rowIndex];
+    var date = displayRow[columns['日期'] - 1];
+    if (date < payload.date_from || date > payload.date_to) {
+      continue;
+    }
+
+    var transaction = {};
+    for (
+      var headerIndex = 0;
+      headerIndex < LIST_TRANSACTION_HEADERS.length;
+      headerIndex += 1
+    ) {
+      var header = LIST_TRANSACTION_HEADERS[headerIndex];
+      transaction[header] = displayRow[columns[header] - 1];
+    }
+    matches.push({ transaction: transaction, sheetRow: rowIndex + 2 });
+  }
+
+  matches.sort(function (left, right) {
+    var leftDate = left.transaction['日期'];
+    var rightDate = right.transaction['日期'];
+    if (leftDate !== rightDate) {
+      return leftDate < rightDate ? 1 : -1;
+    }
+
+    var leftTime = left.transaction['時間'];
+    var rightTime = right.transaction['時間'];
+    if (leftTime === '' && rightTime !== '') {
+      return 1;
+    }
+    if (leftTime !== '' && rightTime === '') {
+      return -1;
+    }
+    if (leftTime !== rightTime) {
+      return leftTime < rightTime ? 1 : -1;
+    }
+
+    return right.sheetRow - left.sheetRow;
+  });
+
+  var result = [];
+  var resultCount = Math.min(matches.length, MAX_LIST_TRANSACTIONS);
+  for (var resultIndex = 0; resultIndex < resultCount; resultIndex += 1) {
+    result.push(matches[resultIndex].transaction);
+  }
+  return result;
 }
 
 function createTransaction_(payload, nonce) {

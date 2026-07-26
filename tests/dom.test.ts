@@ -1,15 +1,21 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { CACHED_OPTIONS, REFRESHED_OPTIONS } from './pwa-fixtures'
+import {
+  CACHED_OPTIONS,
+  RECENT_TRANSACTIONS,
+  REFRESHED_OPTIONS,
+} from './pwa-fixtures'
 
 const apiMocks = vi.hoisted(() => ({
   authCheck: vi.fn(),
+  listTransactions: vi.fn(),
   loadOptions: vi.fn(),
   submitTransaction: vi.fn(),
 }))
 
 vi.mock('../src/api', () => ({
   authCheck: apiMocks.authCheck,
+  listTransactions: apiMocks.listTransactions,
   loadOptions: apiMocks.loadOptions,
   submitTransaction: apiMocks.submitTransaction,
 }))
@@ -58,6 +64,7 @@ beforeEach(() => {
     ok: true,
     exp: Math.floor(Date.now() / 1000) + 3600,
   })
+  apiMocks.listTransactions.mockReset().mockResolvedValue(RECENT_TRANSACTIONS)
   apiMocks.loadOptions.mockReset()
   apiMocks.submitTransaction.mockReset().mockResolvedValue({
     ok: true,
@@ -163,6 +170,56 @@ describe('selection-first entry form', () => {
     click('#submit-btn')
 
     await vi.waitFor(() => expect(apiMocks.submitTransaction).toHaveBeenCalledTimes(1))
+  })
+})
+
+describe('recent entries view', () => {
+  it('renders list_transactions rows with a set or blank 結清狀態', async () => {
+    mount()
+
+    click('[data-view="recent"]')
+
+    await vi.waitFor(() => expect(apiMocks.listTransactions).toHaveBeenCalledWith(
+      '0001-01-01',
+      '9999-12-31',
+    ))
+    const rows = document.querySelectorAll('.transaction-row')
+    expect(rows).toHaveLength(2)
+    expect(rows[0]?.textContent).toContain('晚餐')
+    expect(rows[0]?.textContent).toContain('260.00')
+    expect(rows[1]?.textContent).toContain('手動補登')
+    const statuses = document.querySelectorAll('.transaction-status')
+    expect(statuses[0]?.textContent).toBe('未結')
+    expect(statuses[1]?.textContent).toBe('')
+  })
+
+  it('fetches on each switch and keeps the entry form usable afterward', async () => {
+    const newlyPosted = {
+      ...RECENT_TRANSACTIONS[0],
+      txn_id: 'txn-new',
+      說明: '切換後晚餐',
+    }
+    apiMocks.listTransactions
+      .mockResolvedValueOnce(RECENT_TRANSACTIONS)
+      .mockResolvedValueOnce([newlyPosted, ...RECENT_TRANSACTIONS])
+    mount()
+    fillExpense('切換後晚餐')
+
+    click('[data-view="recent"]')
+    await vi.waitFor(() => expect(apiMocks.listTransactions).toHaveBeenCalledTimes(1))
+    click('[data-view="entry"]')
+
+    expect(document.querySelector<HTMLInputElement>('#description-input')?.value)
+      .toBe('切換後晚餐')
+    expect(document.querySelector<HTMLButtonElement>('#submit-btn')?.disabled)
+      .toBe(false)
+    click('#submit-btn')
+    await vi.waitFor(() => expect(apiMocks.submitTransaction).toHaveBeenCalledTimes(1))
+
+    click('[data-view="recent"]')
+    await vi.waitFor(() => expect(apiMocks.listTransactions).toHaveBeenCalledTimes(2))
+    expect(document.querySelector('.transaction-row')?.textContent)
+      .toContain('切換後晚餐')
   })
 })
 

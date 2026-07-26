@@ -1,7 +1,11 @@
 import type { JWTVerifyGetKey } from 'jose'
 import { buildEnvelope } from './envelope'
 import { verifyAccessJwt } from './jwt'
-import { isValidUuid, validateTransaction } from './validate'
+import {
+  isValidUuid,
+  validateTransaction,
+  validateTransactionDateRange,
+} from './validate'
 
 export type Env = {
   EXPENSE_API_URL: string
@@ -21,6 +25,7 @@ const ALLOWED = new Set([
   'auth-check',
   'get_options',
   'create_transaction',
+  'list_transactions',
 ])
 
 function json(status: number, body: unknown): Response {
@@ -79,6 +84,28 @@ export async function handleAction(
       action: 'create_transaction',
       idempotencyKey: body.idempotencyKey,
       transaction: validated.transaction,
+    }
+  } else if (action === 'list_transactions') {
+    let body: Record<string, unknown> = {}
+    try {
+      const parsed = await request.json()
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        body = parsed as Record<string, unknown>
+      }
+    } catch {
+      // Invalid JSON is handled as an invalid date range below.
+    }
+
+    const validated = validateTransactionDateRange(body)
+    if (!validated.ok) {
+      return json(400, { ok: false, error: validated.error })
+    }
+
+    nonce = crypto.randomUUID()
+    payload = {
+      action: 'list_transactions',
+      date_from: validated.date_from,
+      date_to: validated.date_to,
     }
   } else {
     nonce = crypto.randomUUID()

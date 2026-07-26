@@ -579,5 +579,8 @@ function displayValue(value: CellValue): string {
   if (value === false) {
     return 'FALSE'
   }
+  if (value instanceof Date) {
+    return value.toISOString().slice(0, 10)
+  }
   return String(value)
 }

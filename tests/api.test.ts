@@ -1,10 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   OPTIONS_CACHE_KEY,
+  listTransactions,
   loadOptions,
   submitTransaction,
 } from '../src/api'
-import { CACHED_OPTIONS, REFRESHED_OPTIONS } from './pwa-fixtures'
+import {
+  CACHED_OPTIONS,
+  RECENT_TRANSACTIONS,
+  REFRESHED_OPTIONS,
+} from './pwa-fixtures'
 
 const KEY = '3b241101-e2bb-4255-8caf-4136c566a962'
 const TRANSACTION = {
@@ -111,5 +116,23 @@ describe('loadOptions', () => {
     await expect(loaded.refresh).resolves.toEqual(REFRESHED_OPTIONS)
     expect(onRefresh).toHaveBeenCalledWith(REFRESHED_OPTIONS)
     expect(JSON.parse(storage.getItem(OPTIONS_CACHE_KEY)!)).toEqual(REFRESHED_OPTIONS)
+  })
+})
+
+describe('listTransactions', () => {
+  it('POSTs the inclusive date range and returns the exact string rows', async () => {
+    const fetchFn = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(url)).toBe('/api/list_transactions')
+      expect(init?.method).toBe('POST')
+      expect(JSON.parse(String(init?.body))).toEqual({
+        date_from: '0001-01-01',
+        date_to: '9999-12-31',
+      })
+      return jsonResponse(200, RECENT_TRANSACTIONS)
+    }) as unknown as typeof fetch
+
+    await expect(
+      listTransactions('0001-01-01', '9999-12-31', fetchFn),
+    ).resolves.toEqual(RECENT_TRANSACTIONS)
   })
 })

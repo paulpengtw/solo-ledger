@@ -1,10 +1,12 @@
 import './styles.css'
 import {
   authCheck,
+  listTransactions,
   loadOptions,
   submitTransaction,
   type AccountOption,
   type LedgerOptions,
+  type LedgerTransaction,
 } from './api'
 import { startSessionGuard } from './auth'
 import * as State from './state'
@@ -13,6 +15,9 @@ type MountDependencies = {
   today?: () => string
   randomUUID?: () => string
 }
+
+const RECENT_DATE_FROM = '0001-01-01'
+const RECENT_DATE_TO = '9999-12-31'
 
 function localDate(): string {
   const date = new Date()
@@ -82,14 +87,20 @@ export function mountApp(
   let options: LedgerOptions | null = null
   let sessionSchemaVersion: string | null = null
   let resetTimer: ReturnType<typeof setTimeout> | null = null
+  let recentRequest = 0
   let stopped = false
 
   // 說明 must stay required: speech-to-text gives every journal row a narrative.
   root.innerHTML = `
     <header class="app-header">
       <p class="eyebrow">SOLO LEDGER</p>
-      <h1>快速記帳</h1>
+      <h1 id="page-title">快速記帳</h1>
     </header>
+    <nav id="view-switch" class="segmented" aria-label="畫面">
+      <button type="button" data-view="entry" class="selected" aria-pressed="true">記帳</button>
+      <button type="button" data-view="recent" aria-pressed="false">最近紀錄</button>
+    </nav>
+    <main id="entry-view">
     <div id="schema-banner" role="status" hidden>選項已更新，請確認目前選擇</div>
     <div id="type-toggle" class="segmented" aria-label="類型">
       <button type="button" data-type="支出">支出</button>
@@ -152,8 +163,27 @@ export function mountApp(
     <div id="submit-bar">
       <button id="submit-btn" type="button" disabled>記帳</button>
     </div>
+    </main>
+    <main id="recent-view" hidden>
+      <section class="recent-panel" aria-labelledby="recent-heading">
+        <div class="recent-toolbar">
+          <h2 id="recent-heading">最近 200 筆</h2>
+          <button id="refresh-transactions" type="button">重新整理</button>
+        </div>
+        <p id="recent-status" role="status"></p>
+        <div id="transaction-list"></div>
+      </section>
+    </main>
   `
 
+  const pageTitle = root.querySelector<HTMLElement>('#page-title')!
+  const entryView = root.querySelector<HTMLElement>('#entry-view')!
+  const recentView = root.querySelector<HTMLElement>('#recent-view')!
+  const recentStatus = root.querySelector<HTMLElement>('#recent-status')!
+  const transactionList = root.querySelector<HTMLElement>('#transaction-list')!
+  const refreshTransactions = root.querySelector<HTMLButtonElement>(
+    '#refresh-transactions',
+  )!
   const schemaBanner = root.querySelector<HTMLElement>('#schema-banner')!
   const accountPicker = root.querySelector<HTMLElement>('#account-picker')!
   const toAccountPicker = root.querySelector<HTMLElement>('#to-account-picker')!
@@ -163,6 +193,89 @@ export function mountApp(
   const descriptionInput = root.querySelector<HTMLInputElement>('#description-input')!
   const dateInput = root.querySelector<HTMLInputElement>('#date-input')!
   const submitButton = root.querySelector<HTMLButtonElement>('#submit-btn')!
+
+  function renderTransactions(rows: LedgerTransaction[]): void {
+    transactionList.replaceChildren()
+    for (const row of rows) {
+      const article = document.createElement('article')
+      article.className = 'transaction-row'
+
+      const heading = document.createElement('div')
+      heading.className = 'transaction-heading'
+      const date = document.createElement('time')
+      date.className = 'transaction-date'
+      date.textContent = row.時間 ? `${row.日期} ${row.時間}` : row.日期
+      const type = document.createElement('span')
+      type.className = 'transaction-type'
+      type.textContent = row.類型
+      heading.appendChild(date)
+      heading.appendChild(type)
+
+      const body = document.createElement('div')
+      body.className = 'transaction-body'
+      const description = document.createElement('p')
+      description.className = 'transaction-description'
+      description.textContent = row.說明
+      const amount = document.createElement('p')
+      amount.className = 'transaction-amount'
+      amount.textContent = `${row.金額} ${row.幣別}`.trim()
+      body.appendChild(description)
+      body.appendChild(amount)
+
+      const accounts = document.createElement('p')
+      accounts.className = 'transaction-accounts'
+      accounts.textContent = `${row.借方帳戶} → ${row.貸方帳戶}`
+
+      const details = document.createElement('div')
+      details.className = 'transaction-details'
+      const context = document.createElement('span')
+      context.textContent = [row.分類, row.對象].filter(Boolean).join(' · ')
+      const status = document.createElement('span')
+      status.className = 'transaction-status'
+      status.textContent = row.結清狀態
+      details.appendChild(context)
+      details.appendChild(status)
+
+      article.appendChild(heading)
+      article.appendChild(body)
+      article.appendChild(accounts)
+      article.appendChild(details)
+      transactionList.appendChild(article)
+    }
+  }
+
+  async function loadRecentTransactions(): Promise<void> {
+    const request = ++recentRequest
+    refreshTransactions.disabled = true
+    recentStatus.textContent = '載入中…'
+    transactionList.replaceChildren()
+
+    const rows = await listTransactions(RECENT_DATE_FROM, RECENT_DATE_TO)
+    if (stopped || request !== recentRequest) return
+
+    refreshTransactions.disabled = false
+    if (rows === null) {
+      recentStatus.textContent = '無法載入最近紀錄，請再試一次'
+      return
+    }
+
+    recentStatus.textContent = rows.length === 0 ? '目前沒有紀錄' : ''
+    renderTransactions(rows)
+  }
+
+  function showView(view: 'entry' | 'recent'): void {
+    const recent = view === 'recent'
+    entryView.hidden = recent
+    recentView.hidden = !recent
+    pageTitle.textContent = recent ? '最近紀錄' : '快速記帳'
+    root.querySelectorAll<HTMLButtonElement>('#view-switch [data-view]')
+      .forEach(element => {
+        const selected = element.dataset['view'] === view
+        element.classList.toggle('selected', selected)
+        element.setAttribute('aria-pressed', String(selected))
+      })
+    if (recent) void loadRecentTransactions()
+  }
 
   function renderOptions(): void {
     accountPicker.replaceChildren(
@@ -285,6 +398,16 @@ export function mountApp(
     prompt.appendChild(reload)
     document.body.appendChild(prompt)
   }
+
+  root.querySelector('#view-switch')!.addEventListener('click', event => {
+    const target = (event.target as HTMLElement)
+      .closest<HTMLButtonElement>('[data-view]')
+    if (!target) return
+    showView(target.dataset['view'] as 'entry' | 'recent')
+  })
+  refreshTransactions.addEventListener('click', () => {
+    void loadRecentTransactions()
+  })
 
   root.querySelector('#type-toggle')!.addEventListener('click', event => {
     const target = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-type]')

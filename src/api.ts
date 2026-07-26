@@ -21,6 +21,21 @@ export type LedgerOptions = {
   }
 }
 
+export type LedgerTransaction = {
+  txn_id: string
+  日期: string
+  時間: string
+  類型: string
+  借方帳戶: string
+  貸方帳戶: string
+  金額: string
+  幣別: string
+  分類: string
+  對象: string
+  說明: string
+  結清狀態: string
+}
+
 export type SubmitResult =
   | { ok: true; alreadyRecorded: boolean }
   | { ok: false; kind: 'network' | 'auth' | 'backend'; message: string }
@@ -107,6 +122,44 @@ export async function authCheck(
     // A failed auth check cannot prove that the session is still valid.
   }
   return { ok: false }
+}
+
+function isLedgerTransaction(value: unknown): value is LedgerTransaction {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as Record<string, unknown>
+  return (
+    typeof candidate.txn_id === 'string'
+    && typeof candidate.日期 === 'string'
+    && typeof candidate.時間 === 'string'
+    && typeof candidate.類型 === 'string'
+    && typeof candidate.借方帳戶 === 'string'
+    && typeof candidate.貸方帳戶 === 'string'
+    && typeof candidate.金額 === 'string'
+    && typeof candidate.幣別 === 'string'
+    && typeof candidate.分類 === 'string'
+    && typeof candidate.對象 === 'string'
+    && typeof candidate.說明 === 'string'
+    && typeof candidate.結清狀態 === 'string'
+  )
+}
+
+export async function listTransactions(
+  dateFrom: string,
+  dateTo: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<LedgerTransaction[] | null> {
+  try {
+    const response = await post(
+      '/api/list_transactions',
+      { date_from: dateFrom, date_to: dateTo },
+      fetchFn,
+    )
+    if (!response.ok) return null
+    const body: unknown = await response.json()
+    return Array.isArray(body) && body.every(isLedgerTransaction) ? body : null
+  } catch {
+    return null
+  }
 }
 
 function isStringArray(value: unknown): value is string[] {
