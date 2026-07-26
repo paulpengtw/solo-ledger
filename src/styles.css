@@ -1,0 +1,368 @@
+:root {
+  color-scheme: light;
+  --ink: #17342d;
+  --muted: #64766f;
+  --accent: #a8ef76;
+  --accent-strong: #88d957;
+  --background: #f3f2ec;
+  --surface: #ffffff;
+  --warning: #fff3cb;
+  --warning-ink: #735300;
+  --error: #a82424;
+  --radius-large: 22px;
+  --radius-medium: 16px;
+  --shadow: 0 10px 28px rgb(23 52 45 / 7%);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html {
+  min-height: 100%;
+  background: var(--background);
+}
+
+body {
+  min-height: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+  overflow-x: hidden;
+  background: var(--background);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC",
+    "Helvetica Neue", sans-serif;
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+#app {
+  min-height: 100dvh;
+  padding: calc(20px + env(safe-area-inset-top, 0px)) 16px 0;
+}
+
+.app-header {
+  padding: 4px 4px 18px;
+}
+
+.eyebrow {
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+}
+
+h1 {
+  font-size: clamp(28px, 8vw, 38px);
+  letter-spacing: -0.04em;
+  line-height: 1.05;
+}
+
+h2 {
+  margin-bottom: 10px;
+  font-size: 16px;
+  font-weight: 750;
+}
+
+h2 span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+h3 {
+  margin: 0 2px 7px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+#schema-banner {
+  margin-bottom: 12px;
+  padding: 11px 14px;
+  border-radius: var(--radius-medium);
+  background: var(--warning);
+  color: var(--warning-ink);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.segmented {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
+  margin-bottom: 12px;
+  padding: 5px;
+  border-radius: var(--radius-large);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.segmented button {
+  min-height: 48px;
+  border: 0;
+  border-radius: 17px;
+  background: transparent;
+  font-weight: 650;
+}
+
+.segmented button.selected {
+  background: var(--ink);
+  color: var(--accent);
+}
+
+#amount-section,
+.form-section {
+  margin-bottom: 12px;
+  padding: 16px;
+  border-radius: var(--radius-large);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+#currency-chip {
+  padding: 6px 11px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+}
+
+#amount-display {
+  display: block;
+  min-height: 70px;
+  overflow: hidden;
+  padding: 2px 0 8px;
+  font-size: clamp(50px, 16vw, 76px);
+  font-variant-numeric: tabular-nums;
+  font-weight: 850;
+  letter-spacing: -0.06em;
+  line-height: 0.95;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#keypad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 7px;
+}
+
+#keypad button {
+  min-height: 52px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--background);
+  font-size: 22px;
+  font-weight: 700;
+}
+
+#keypad button:active,
+.option-grid button:active {
+  transform: scale(0.97);
+}
+
+.grouped-picker {
+  display: grid;
+  gap: 12px;
+}
+
+.option-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.option-grid.compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 12px;
+}
+
+.option-grid button {
+  min-height: 48px;
+  overflow: hidden;
+  padding: 8px 10px;
+  border: 1px solid #dfe5e1;
+  border-radius: 14px;
+  background: var(--surface);
+  font-size: 14px;
+  font-weight: 620;
+  text-overflow: ellipsis;
+}
+
+.option-grid button.selected {
+  border-color: var(--accent-strong);
+  background: var(--accent);
+  font-weight: 780;
+}
+
+.text-field {
+  display: grid;
+  gap: 6px;
+}
+
+.text-field + .text-field {
+  margin-top: 12px;
+}
+
+.text-field > span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.text-field.required > span {
+  color: var(--ink);
+}
+
+.text-field input {
+  width: 100%;
+  min-height: 50px;
+  padding: 0 14px;
+  border: 1px solid #dfe5e1;
+  border-radius: 14px;
+  outline: none;
+  background: var(--background);
+  color: var(--ink);
+  font-size: 16px;
+  -webkit-appearance: none;
+}
+
+.text-field input:focus {
+  border-color: var(--accent-strong);
+  box-shadow: 0 0 0 3px rgb(136 217 87 / 20%);
+}
+
+#status-message {
+  min-height: 22px;
+  padding: 0 4px 4px;
+  color: var(--error);
+  font-size: 14px;
+}
+
+#submit-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+  margin: 0 -16px;
+  padding: 10px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+  background: linear-gradient(transparent, var(--background) 18%);
+}
+
+#submit-btn {
+  width: 100%;
+  min-height: 58px;
+  border: 0;
+  border-radius: var(--radius-large);
+  background: var(--ink);
+  color: var(--accent);
+  box-shadow: 0 10px 24px rgb(23 52 45 / 20%);
+  font-size: 18px;
+  font-weight: 800;
+}
+
+#submit-btn:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.flash-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: var(--ink);
+  font-size: 30px;
+  font-weight: 850;
+  pointer-events: none;
+  animation: flash-out 0.7s ease forwards;
+}
+
+@keyframes flash-out {
+  0%,
+  55% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+.reauth-prompt {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  background: var(--ink);
+  color: var(--surface);
+  font-weight: 650;
+}
+
+.reauth-prompt button {
+  min-height: 48px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--accent);
+  color: var(--ink);
+  font-weight: 800;
+}
+
+@media (min-width: 420px) {
+  #app {
+    padding-right: 22px;
+    padding-left: 22px;
+  }
+
+  .option-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
+}

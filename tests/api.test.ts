@@ -1,0 +1,115 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  OPTIONS_CACHE_KEY,
+  loadOptions,
+  submitTransaction,
+} from '../src/api'
+import { CACHED_OPTIONS, REFRESHED_OPTIONS } from './pwa-fixtures'
+
+const KEY = '3b241101-e2bb-4255-8caf-4136c566a962'
+const TRANSACTION = {
+  type: '支出' as const,
+  amount: 260,
+  date: '2026-07-27',
+  description: '晚餐',
+  account: '錢包',
+  category: '餐飲',
+  currency: 'TWD',
+}
+
+const jsonResponse = (status: number, body: unknown): Response =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  })
+
+function memoryStorage(): Storage {
+  const values = new Map<string, string>()
+  return {
+    get length() { return values.size },
+    clear: () => values.clear(),
+    getItem: key => values.get(key) ?? null,
+    key: index => [...values.keys()][index] ?? null,
+    removeItem: key => { values.delete(key) },
+    setItem: (key, value) => { values.set(key, value) },
+  }
+}
+
+afterEach(() => {
+  vi.useRealTimers()
+})
+
+describe('submitTransaction', () => {
+  it('POSTs exactly the Pages Function contract accepted by validate.ts', async () => {
+    const fetchFn = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(url)).toBe('/api/create_transaction')
+      expect(init?.method).toBe('POST')
+      expect(JSON.parse(String(init?.body))).toEqual({
+        transaction: TRANSACTION,
+        idempotencyKey: KEY,
+      })
+      const body = JSON.parse(String(init?.body)) as {
+        transaction: Record<string, unknown>
+      }
+      expect(typeof body.transaction.amount).toBe('number')
+      expect(body.transaction.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+      expect(body.transaction).not.toHaveProperty('toAccount')
+      return jsonResponse(200, { ok: true, txn_id: KEY })
+    }) as unknown as typeof fetch
+
+    await expect(submitTransaction(TRANSACTION, KEY, fetchFn)).resolves.toEqual({
+      ok: true,
+      alreadyRecorded: false,
+    })
+  })
+
+  it('treats already:true as idempotent success', async () => {
+    const fetchFn = (async () =>
+      jsonResponse(200, { ok: true, already: true, txn_id: KEY })) as typeof fetch
+
+    await expect(submitTransaction(TRANSACTION, KEY, fetchFn)).resolves.toEqual({
+      ok: true,
+      alreadyRecorded: true,
+    })
+  })
+
+  it('aborts a request after 15 seconds', async () => {
+    vi.useFakeTimers()
+    const fetchFn = vi.fn((_url: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'))
+        })
+      })) as unknown as typeof fetch
+
+    const request = submitTransaction(TRANSACTION, KEY, fetchFn)
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    await expect(request).resolves.toEqual({
+      ok: false,
+      kind: 'network',
+      message: '連線逾時，請再試一次',
+    })
+  })
+})
+
+describe('loadOptions', () => {
+  it('returns localStorage cache synchronously then refreshes and updates it in the background', async () => {
+    const storage = memoryStorage()
+    storage.setItem(OPTIONS_CACHE_KEY, JSON.stringify(CACHED_OPTIONS))
+    const onRefresh = vi.fn()
+    const fetchFn = (async (url: RequestInfo | URL) => {
+      expect(String(url)).toBe('/api/get_options')
+      return jsonResponse(200, REFRESHED_OPTIONS)
+    }) as typeof fetch
+
+    const loaded = loadOptions({ storage, fetchFn, onRefresh })
+
+    expect(loaded.cached).toEqual(CACHED_OPTIONS)
+    expect(onRefresh).not.toHaveBeenCalled()
+
+    await expect(loaded.refresh).resolves.toEqual(REFRESHED_OPTIONS)
+    expect(onRefresh).toHaveBeenCalledWith(REFRESHED_OPTIONS)
+    expect(JSON.parse(storage.getItem(OPTIONS_CACHE_KEY)!)).toEqual(REFRESHED_OPTIONS)
+  })
+})
