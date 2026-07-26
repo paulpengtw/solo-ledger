@@ -1,0 +1,24 @@
+{
+  "secret": "test-secret",
+  "input": {
+    "action": "create_transaction",
+    "idempotencyKey": "3b241101-e2bb-4255-8caf-4136c566a962",
+    "transaction": {
+      "type": "支出",
+      "date": "2026-07-26",
+      "time": "12:30",
+      "amount": 260,
+      "currency": "TWD",
+      "account": "現金",
+      "category": "食-外食",
+      "payee": "路易莎",
+      "description": "午餐"
+    }
+  },
+  "envelope": {
+    "ts": 1700000000,
+    "nonce": "3b241101-e2bb-4255-8caf-4136c566a962",
+    "payload": "eyJhY3Rpb24iOiJjcmVhdGVfdHJhbnNhY3Rpb24iLCJpZGVtcG90ZW5jeUtleSI6IjNiMjQxMTAxLWUyYmItNDI1NS04Y2FmLTQxMzZjNTY2YTk2MiIsInRyYW5zYWN0aW9uIjp7InR5cGUiOiLmlK_lh7oiLCJkYXRlIjoiMjAyNi0wNy0yNiIsInRpbWUiOiIxMjozMCIsImFtb3VudCI6MjYwLCJjdXJyZW5jeSI6IlRXRCIsImFjY291bnQiOiLnj77ph5EiLCJjYXRlZ29yeSI6Iumjny3lpJbpo58iLCJwYXllZSI6Iui3r-aYk-iOjiIsImRlc2NyaXB0aW9uIjoi5Y2I6aSQIn19",
+    "sig": "1V4I3O1YucC3QW6Jx-4Hkd6jBDL-mdGFACON0-nGthc"
+  }
+}
