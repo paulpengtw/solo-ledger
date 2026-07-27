@@ -65,6 +65,7 @@ describe('startSessionGuard', () => {
       await vi.advanceTimersByTimeAsync(10_000)
 
       expect(check).toHaveBeenCalledTimes(1)
+      expect(delays.length).toBeGreaterThan(0)
       expect(delays.every(d => d < 2_147_483_647)).toBe(true)
 
       guard.stop()
