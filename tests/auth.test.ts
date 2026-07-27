@@ -219,6 +219,57 @@ describe('startSessionGuard', () => {
     guard.stop()
   })
 
+  it('reopens the gate within the minimum interval after the clock jumps backward', async () => {
+    let nowSeconds = 1_753_600_000
+    const check = vi.fn(async () => ({ ok: true as const, exp: nowSeconds + 30 * 24 * 3600 }))
+    const onExpired = vi.fn()
+    const guard = startSessionGuard({ check, onExpired, now: () => nowSeconds })
+
+    await vi.advanceTimersByTimeAsync(0)  // flush startup check — 1 call
+    expect(check).toHaveBeenCalledTimes(1)
+
+    // Advance 301 s past the startup check (sanity: gate opens)
+    await vi.advanceTimersByTimeAsync(301_000)
+    nowSeconds += 301
+    guard.onVisible()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(check).toHaveBeenCalledTimes(2)  // sanity
+
+    // Simulate a backward clock step: wall clock moves back 1 hour, no timer advancement
+    nowSeconds -= 3600
+
+    guard.onVisible()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(check).toHaveBeenCalledTimes(2)  // still gated — acceptable
+
+    // Advance 301 s of real elapsed time — gate must reopen
+    await vi.advanceTimersByTimeAsync(301_000)
+    nowSeconds += 301
+    guard.onVisible()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(check).toHaveBeenCalledTimes(3)  // gate must reopen after one minimum interval
+
+    guard.stop()
+  })
+
+  it('ignores a check that resolves after stop()', async () => {
+    let resolveCheck!: (r: { ok: false }) => void
+    const pendingCheck = new Promise<{ ok: false }>((resolve) => {
+      resolveCheck = resolve
+    })
+    const check = vi.fn(() => pendingCheck as Promise<{ ok: true; exp: number } | { ok: false }>)
+    const onExpired = vi.fn()
+
+    const guard = startSessionGuard({ check, onExpired })
+    await vi.advanceTimersByTimeAsync(0)  // startup → 1 call, promise pending
+
+    guard.stop()
+    resolveCheck({ ok: false })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(onExpired).not.toHaveBeenCalled()
+  })
+
   it('stop() prevents any further checks', async () => {
     let nowSeconds = 1_753_600_000
     const check = vi.fn(async () => ({

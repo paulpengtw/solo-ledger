@@ -18,6 +18,8 @@ export function startSessionGuard(deps: {
   function requestCheck(): void {
     if (stopped) return
     const currentTime = now()
+    // wall clock is not monotonic; a backward step must not extend the gate
+    if (currentTime < lastCheckSeconds) lastCheckSeconds = currentTime
     if (currentTime - lastCheckSeconds < MIN_CHECK_INTERVAL_SECONDS) return
     lastCheckSeconds = currentTime
     void runCheck()
