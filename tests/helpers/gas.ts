@@ -1,10 +1,6 @@
-// @ts-expect-error Vitest runs in Node, while the app tsconfig deliberately omits Node types.
 import { readFileSync } from 'node:fs'
-// @ts-expect-error Vitest runs in Node, while the app tsconfig deliberately omits Node types.
 import { createHash, createHmac } from 'node:crypto'
-// @ts-expect-error Vitest runs in Node, while the app tsconfig deliberately omits Node types.
 import { Buffer } from 'node:buffer'
-// @ts-expect-error Vitest runs in Node, while the app tsconfig deliberately omits Node types.
 import { fileURLToPath } from 'node:url'
 
 export type PostingInput = Record<string, unknown>
