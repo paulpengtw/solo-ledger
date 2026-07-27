@@ -351,6 +351,52 @@ Settlement rows are irreversible through the v1 API. In `日記帳`, identify th
 
 If `LEDGER_BACKUP_FOLDER_ID` is set, backups go to that folder. If it is unset, the function creates `Solo Ledger backups` without a name search, stores the new folder ID in that property, and uses it thereafter.
 
+### Cloudflare request consumption report
+
+`scripts/cf-consumption-report.mjs` prints a 24-hour view of Pages Function
+invocations, drawn from the Cloudflare GraphQL Analytics API.
+
+**Prerequisites — source the environment and add the analytics scope:**
+
+```sh
+set -a && . ./.env && set +a
+node scripts/cf-consumption-report.mjs
+```
+
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` must both be set; the script
+exits immediately with a named error and the `set -a` hint if either is missing.
+The API token needs **Account > Account Analytics > Read** in addition to the
+scopes listed in `.env.example`; without it the request returns
+`authorization denied` and the script prints a pointed scope hint then exits 1.
+
+**What the report shows:**
+
+- An hourly table: UTC hour, request count, and HTTP status breakdown.
+- Total for the window and consumption as a percentage of the 100,000 daily
+  free-tier request cap (resets at 00:00 UTC — query buckets are UTC-aligned).
+- A one-line health verdict:
+  - **OK** — total < 500 (expected single-user range).
+  - **ELEVATED** — total > 500 but no single hour exceeded 1,000.
+  - **WARNING** — any single hour exceeded 1,000 requests (loop signature; the
+    2026-07-27 loop burned roughly 40,000 requests/hour).
+
+**Healthy single-user day:**
+
+A normal day consists of a few hundred requests, dominated by `auth-check` at
+most 289 times per client per day (one per 5-minute visibility window, per
+`src/auth.ts`), plus a handful of `create_transaction`, `list_transactions`, and
+other user-initiated actions. Total daily traffic well under 500 is expected for
+a single-operator ledger.
+
+**Per-endpoint limitation (pages.dev-only project):**
+
+Because this project owns no Cloudflare zone, no per-URL-path dimension is
+available in the GraphQL Analytics API. The report groups by Pages Function
+(`scriptName`), HTTP status, and UTC hour — not by `/api/<action>`. The app has
+exactly one function serving `/api/[action]`, so an hourly spike in total
+requests IS the loop signal; true per-action breakdown would require the paid
+Cloudflare Logs product.
+
 ## 6. Changing vocabulary with zero deploys
 
 Edit these tabs directly:
