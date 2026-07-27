@@ -1,0 +1,33 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '26'
+      - run: npm ci
+      - run: npm run build
+      - run: npx wrangler pages deploy dist --project-name=solo-ledger --branch=main
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - run: |
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST https://solo-ledger.pages.dev/api/health)
+          [[ "$code" == "302" ]] || { echo "Expected 302, got $code"; exit 1; }
+          xhr_code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST https://solo-ledger.pages.dev/api/health -H 'x-requested-with: XMLHttpRequest')
+          [[ "$xhr_code" == "401" ]] || { echo "Expected 401, got $xhr_code"; exit 1; }
