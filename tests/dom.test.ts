@@ -619,18 +619,52 @@ describe('outstanding items view', () => {
 
 describe('visibility auth flow', () => {
   it('visibilitychange triggers auth-check and an expired session surfaces re-auth', async () => {
+    // Under the 5-minute gate, onVisible immediately after startup is coalesced.
+    // Exercise the expired-session path via the startup check instead: startup
+    // check returns ok:false and surfaces the re-auth prompt directly.
+    apiMocks.authCheck.mockResolvedValueOnce({ ok: false })
     mount()
     await vi.waitFor(() => expect(apiMocks.authCheck).toHaveBeenCalledTimes(1))
-    apiMocks.authCheck.mockResolvedValueOnce({ ok: false })
-    Object.defineProperty(document, 'visibilityState', {
-      configurable: true,
-      value: 'visible',
-    })
-
-    document.dispatchEvent(new Event('visibilitychange'))
-
-    await vi.waitFor(() => expect(apiMocks.authCheck).toHaveBeenCalledTimes(2))
     expect(document.querySelector('#reauth-prompt')?.textContent).toContain('登入已過期')
     expect(document.querySelector('#reauth-btn')).not.toBeNull()
+  })
+
+  it('visibility after the minimum interval triggers a gated auth-check', async () => {
+    // Resolve with a far-future session so the session stays live throughout
+    apiMocks.authCheck.mockResolvedValue({
+      ok: true,
+      exp: Math.floor(Date.now() / 1000) + 30 * 24 * 3600,
+    })
+
+    mount()
+
+    // Wait for the startup auth-check
+    await vi.waitFor(() => expect(apiMocks.authCheck).toHaveBeenCalledTimes(1))
+
+    // Three rapid visibilitychange events — all within the 5-minute gate
+    document.dispatchEvent(new Event('visibilitychange'))
+    document.dispatchEvent(new Event('visibilitychange'))
+    document.dispatchEvent(new Event('visibilitychange'))
+    // Flush any triggered microtasks
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+
+    expect(apiMocks.authCheck).toHaveBeenCalledTimes(1)
+
+    // Advance Date.now() past the 5-minute minimum check interval.
+    // We fake only Date (leaving setTimeout/microtasks real so vi.waitFor still works).
+    const realNow = Date.now()
+    try {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(realNow + 301_000)
+
+      // One more visibilitychange — this one should pass the gate
+      document.dispatchEvent(new Event('visibilitychange'))
+
+      await vi.waitFor(() => expect(apiMocks.authCheck).toHaveBeenCalledTimes(2))
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(document.querySelector('#reauth-prompt')).toBeNull()
   })
 })
