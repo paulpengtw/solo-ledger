@@ -15,8 +15,7 @@
  *   hour and HTTP status. The app has exactly one function handling /api/[action],
  *   and auth-check is the only automatically-issued action, so an hourly spike in
  *   "total requests" IS the loop signal. True per-action breakdown would require
- *   the paid Cloudflare Logs product. Daily cap resets at 00:00 UTC; query buckets
- *   are UTC-aligned to match.
+ *   the paid Cloudflare Logs product. Hourly buckets are UTC-aligned; the 100,000/day cap resets per UTC calendar day at 00:00 UTC. A rolling 24 h query window may therefore span two billing days — the cap percentage reflects today-so-far, not the full window.
  */
 
 import { pathToFileURL } from 'node:url'
@@ -28,7 +27,7 @@ const FREE_DAILY_CAP = 100_000
  *
  * @param {Array<{dimensions: {datetimeHour: string, scriptName: string, status: number}, sum: {requests: number}}>} groups
  * @param {{ cap?: number, now?: Date }} options
- * @returns {{ totalRequests: number, capPercent: number, hourlyRows: Array<{hour: string, requests: number, byStatus: Record<string, number>}>, scriptNames: string[] }}
+ * @returns {{ totalRequests: number, todayRequests: number, capPercent: number, hourlyRows: Array<{hour: string, requests: number, byStatus: Record<string, number>}>, scriptNames: string[] }}
  */
 export function aggregateReport(groups, { cap = FREE_DAILY_CAP, now = new Date() } = {}) {
   // Bucket by hour
@@ -39,17 +38,18 @@ export function aggregateReport(groups, { cap = FREE_DAILY_CAP, now = new Date()
   for (const group of groups) {
     const { datetimeHour, scriptName, status } = group.dimensions
     const requests = group.sum.requests
+    const statusKey = String(status ?? 'unknown')
 
     scriptNameSet.add(scriptName)
 
     const existing = byHour.get(datetimeHour)
     if (existing) {
       existing.requests += requests
-      existing.byStatus[String(status)] = (existing.byStatus[String(status)] ?? 0) + requests
+      existing.byStatus[statusKey] = (existing.byStatus[statusKey] ?? 0) + requests
     } else {
       byHour.set(datetimeHour, {
         requests,
-        byStatus: { [String(status)]: requests },
+        byStatus: { [statusKey]: requests },
       })
     }
   }
@@ -66,10 +66,20 @@ export function aggregateReport(groups, { cap = FREE_DAILY_CAP, now = new Date()
   })
 
   const totalRequests = hourlyRows.reduce((sum, row) => sum + row.requests, 0)
-  const capPercent = totalRequests / cap * 100
+
+  // Today's requests: only buckets whose hour falls on the current UTC calendar day
+  const todayStart = new Date(now)
+  todayStart.setUTCHours(0, 0, 0, 0)
+  const todayStartISO = todayStart.toISOString()
+  const todayRequests = hourlyRows
+    .filter(row => row.hour >= todayStartISO)
+    .reduce((sum, row) => sum + row.requests, 0)
+
+  const capPercent = todayRequests / cap * 100
 
   return {
     totalRequests,
+    todayRequests,
     capPercent,
     hourlyRows,
     scriptNames: Array.from(scriptNameSet).sort(),
@@ -95,17 +105,21 @@ async function main() {
   const since = new Date(now)
   since.setUTCHours(since.getUTCHours() - 24, 0, 0, 0)
 
+  const sinceISO = since.toISOString()
+  const untilISO = now.toISOString()
+
   // NOTE (pages.dev-only project): no zone ownership means no per-URL-path
   // dimension is available. We query pagesFunctionsInvocationsAdaptiveGroups
   // per scriptName + status + datetimeHour. An hourly spike IS the loop signal.
   // True per-action breakdown requires paid Cloudflare Logs. See also DEPLOY.md.
+  // Timestamps are inlined as literals (server-generated values, no injection surface).
   const query = /* GraphQL */ `
-    query ConsumptionReport($accountTag: string!, $since: string!, $until: string!) {
+    query ConsumptionReport {
       viewer {
-        accounts(filter: { accountTag: $accountTag }) {
+        accounts(filter: { accountTag: "${accountId}" }) {
           pagesFunctionsInvocationsAdaptiveGroups(
             limit: 10000
-            filter: { datetime_geq: $since, datetime_leq: $until }
+            filter: { datetime_geq: "${sinceISO}", datetime_leq: "${untilISO}" }
             orderBy: [datetimeHour_ASC]
           ) {
             dimensions {
@@ -122,12 +136,6 @@ async function main() {
     }
   `
 
-  const variables = {
-    accountTag: accountId,
-    since: since.toISOString(),
-    until: now.toISOString(),
-  }
-
   let data
   try {
     const response = await fetch('https://api.cloudflare.com/client/v4/graphql', {
@@ -136,7 +144,7 @@ async function main() {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ query, variables }),
+      body: JSON.stringify({ query }),
     })
 
     if (!response.ok) {
@@ -196,7 +204,6 @@ async function main() {
     console.log(`${headerHour}${headerReq}${headerStatus}`)
     console.log('-'.repeat(70))
 
-    let warnings = []
     for (const row of report.hourlyRows) {
       const hourStr = row.hour.replace('T', ' ').slice(0, 16)
       const reqStr = String(row.requests).padStart(10)
@@ -205,16 +212,13 @@ async function main() {
         .map(([s, n]) => `${s}:${n}`)
         .join(' ')
       console.log(`${hourStr.padEnd(18)}${reqStr}  ${statusStr}`)
-      if (row.requests > 1000) {
-        warnings.push(`  WARNING: ${hourStr} UTC had ${row.requests.toLocaleString()} requests (>1,000 — possible request loop)`)
-      }
     }
     console.log('-'.repeat(70))
   }
 
   const pct = report.capPercent.toFixed(1)
-  console.log(`\nTotal  : ${report.totalRequests.toLocaleString()} requests`)
-  console.log(`Consumption: ${report.totalRequests.toLocaleString()} of ${FREE_DAILY_CAP.toLocaleString()} daily free-tier requests (${pct}%)`)
+  console.log(`\nlast 24 h  : ${report.totalRequests.toLocaleString()} requests`)
+  console.log(`today since 00:00 UTC: ${report.todayRequests.toLocaleString()} of ${FREE_DAILY_CAP.toLocaleString()} daily free-tier requests (${pct}%)`)
   console.log()
 
   // Health verdict

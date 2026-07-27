@@ -372,8 +372,11 @@ scopes listed in `.env.example`; without it the request returns
 **What the report shows:**
 
 - An hourly table: UTC hour, request count, and HTTP status breakdown.
-- Total for the window and consumption as a percentage of the 100,000 daily
-  free-tier request cap (resets at 00:00 UTC — query buckets are UTC-aligned).
+  The table covers the rolling last 24 hours and may span two UTC calendar days.
+- Two totals: rolling 24 h request count, and today-so-far count as a percentage
+  of the 100,000 daily free-tier request cap. The cap resets at 00:00 UTC; the
+  24 h window may span two billing days, so the cap percentage reflects
+  today-so-far only, not the entire window.
 - A one-line health verdict:
   - **OK** — total < 500 (expected single-user range).
   - **ELEVATED** — total > 500 but no single hour exceeded 1,000.
