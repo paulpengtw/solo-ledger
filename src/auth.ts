@@ -1,8 +1,9 @@
 type CheckResult = { ok: true; exp: number } | { ok: false }
 
-// 32-bit setTimeout ceiling: delays >= 2^31 ms get clamped to ~1 ms by browsers,
-// causing an immediate re-arm loop. Cap to 24 h (well below the ceiling).
-const MAX_DELAY_MS = 86_400_000
+// The guard never schedules timers — Access sessions outlast the 32-bit setTimeout
+// ceiling (see the 2026-07-27 outage). Expiry surfaces on the next gated check.
+// This gate bounds re-checks to <= 289/day/client (1 startup + one per 5-min window).
+const MIN_CHECK_INTERVAL_SECONDS = 300
 
 export function startSessionGuard(deps: {
   check: () => Promise<CheckResult>
@@ -10,9 +11,19 @@ export function startSessionGuard(deps: {
   now?: () => number
 }): { onVisible: () => void; stop: () => void } {
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000))
-  let expiryTimer: ReturnType<typeof setTimeout> | null = null
-  let heartbeat: ReturnType<typeof setInterval> | null = null
   let stopped = false
+  // -Infinity ensures the startup call always passes the gate on first run
+  let lastCheckSeconds = -Infinity
+
+  function requestCheck(): void {
+    if (stopped) return
+    const currentTime = now()
+    // wall clock is not monotonic; a backward step must not extend the gate
+    if (currentTime < lastCheckSeconds) lastCheckSeconds = currentTime
+    if (currentTime - lastCheckSeconds < MIN_CHECK_INTERVAL_SECONDS) return
+    lastCheckSeconds = currentTime
+    void runCheck()
+  }
 
   async function runCheck(): Promise<void> {
     if (stopped) return
@@ -22,23 +33,14 @@ export function startSessionGuard(deps: {
       deps.onExpired()
       return
     }
-    if (expiryTimer) clearTimeout(expiryTimer)
-    const delaySeconds = result.exp - 60 - now()
-    // skip scheduling if exp is missing, non-finite, or already past — other triggers cover those cases
-    if (!Number.isFinite(delaySeconds) || delaySeconds <= 0) return
-    const milliseconds = Math.min(MAX_DELAY_MS, delaySeconds * 1000)
-    expiryTimer = setTimeout(() => { void runCheck() }, milliseconds)
   }
 
-  void runCheck()
-  heartbeat = setInterval(() => { void runCheck() }, 60_000)
+  requestCheck()
 
   return {
-    onVisible: () => { void runCheck() },
+    onVisible: () => { requestCheck() },
     stop: () => {
       stopped = true
-      if (expiryTimer) clearTimeout(expiryTimer)
-      if (heartbeat) clearInterval(heartbeat)
     },
   }
 }
