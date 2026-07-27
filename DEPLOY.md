@@ -141,7 +141,24 @@ npm run build
      -X POST "${SOLO_LEDGER_ORIGIN}/api/health"
    ```
 
-   Expected: `401`, before the request reaches the Apps Script web app.
+   Expected: `302`, redirecting to `https://<team-domain>/cdn-cgi/access/login/...`, before
+   the request reaches the Apps Script web app. Cloudflare Access rejects at the edge and
+   chooses the form of the rejection from the request headers: a browser-style request such
+   as the `curl` above is redirected with `302`, while a request that explicitly identifies
+   as XHR is rejected with `401`. Either result proves the same thing — unauthenticated
+   traffic never reached Apps Script.
+
+   To assert the `401` form instead:
+
+   ```sh
+   curl -sS -o /dev/null -w '%{http_code}\n' \
+     -X POST "${SOLO_LEDGER_ORIGIN}/api/health" \
+     -H 'content-type: application/json' \
+     -H 'x-requested-with: XMLHttpRequest'
+   ```
+
+   The Pages Function's own `{ok:false,error:"unauthorized"}` response is defence in depth
+   behind Access, so it is observed only by a request that gets past the edge.
 
 2. **Authenticated `health` reaches the correct book.**
 
@@ -358,7 +375,7 @@ Run `check_consistency` without repair and require `clean: true`. Then call `hea
 - **`request timestamp outside allowed window`**: the envelope timestamp differs from Apps Script time by more than `MAX_SKEW_SECONDS=300`. Correct the sending system's clock and sign a fresh envelope; this is a distinct error from `bad signature`.
 - **`missing required header: <name>`**: restore the exact reported header spelling. The 15 journal names are `日期`, `時間`, `類型`, `借方帳戶`, `貸方帳戶`, `金額`, `幣別`, `分類`, `對象`, `說明`, `結清狀態`, `沖銷txn_id`, `txn_id`, `來源`, and `建立時間`; for example, `missing required header: txn_id` means the exact `txn_id` cell is absent or renamed.
 - **`unknown or disabled account: <name>`** (or category): vocabulary lives in `會計科目`, not code. Correct the journal value or add/enable the exact account/category there; do not patch a TypeScript option list.
-- **401 at the edge or from `/api/*`**: first confirm the email is the sole allowed Access policy member and complete the one-time-PIN login. If login succeeded, verify `CF_ACCESS_AUD` and `CF_ACCESS_TEAM_DOMAIN`, then redeploy after any environment change; the Pages Function rejects a missing, expired, wrong-audience, or unverifiable `CF_Authorization` cookie with `{ok:false,error:"unauthorized"}`.
+- **302 to the Access login, or 401 from `/api/*`**: both mean the request was not authenticated, and Access chooses between them by request headers — a browser-style request is redirected with `302`, one identifying as XHR is rejected with `401`. First confirm the email is the sole allowed Access policy member and complete the one-time-PIN login. If login succeeded, verify `CF_ACCESS_AUD` and `CF_ACCESS_TEAM_DOMAIN`, then redeploy after any environment change; behind Access, the Pages Function independently rejects a missing, expired, wrong-audience, or unverifiable `CF_Authorization` cookie with `{ok:false,error:"unauthorized"}`.
 - **`over-settlement: amount <amount> exceeds outstanding <outstanding>`**: do not retry the same amount. Refresh the outstanding list and settle no more than the remaining amount.
 - **`original currency <currency> differs from default <default>`** during settle: v1 stamps settlement currency from `設定` → `預設幣別` and accepts no currency override. Foreign-currency settlement must be handled by hand, or the book's default must genuinely be corrected before retrying; sending `currency` is rejected as `currency is not accepted`.
 
