@@ -41,6 +41,9 @@ const gasGlobalNames = [
   'Utilities',
   'ContentService',
   'Session',
+  'DriveApp',
+  'MailApp',
+  'ScriptApp',
 ] as const
 
 function throwingGasGlobal(name: string): object {
@@ -140,7 +143,7 @@ export class FakeRange {
       throw new Error('setValues dimensions must match the range')
     }
 
-    this.sheet.beforeSetValues()
+    this.sheet.beforeSetValues(this.column)
 
     for (let rowOffset = 0; rowOffset < this.numRows; rowOffset += 1) {
       for (let columnOffset = 0; columnOffset < this.numColumns; columnOffset += 1) {
@@ -151,7 +154,12 @@ export class FakeRange {
         )
       }
     }
-    this.sheet.afterSetValues(this.row)
+    this.sheet.afterSetValues(
+      this.row,
+      this.column,
+      this.numRows,
+      this.numColumns,
+    )
     return this
   }
 
@@ -207,6 +215,7 @@ export class FakeSheet {
   private readonly numberFormats = new Map<string, string>()
   private readonly dataValidations = new Map<string, FakeDataValidation>()
   private nextWriteError: Error | null = null
+  private nextWriteErrorColumn: number | null = null
 
   constructor(
     private name: string,
@@ -288,20 +297,45 @@ export class FakeSheet {
 
   failNextSetValues(message = 'simulated write failure'): void {
     this.nextWriteError = new Error(message)
+    this.nextWriteErrorColumn = null
   }
 
-  beforeSetValues(): void {
-    if (!this.nextWriteError) {
+  failNextSetValuesInColumn(
+    column: number,
+    message = 'simulated write failure',
+  ): void {
+    this.nextWriteError = new Error(message)
+    this.nextWriteErrorColumn = column
+  }
+
+  beforeSetValues(column: number): void {
+    if (
+      !this.nextWriteError
+      || (
+        this.nextWriteErrorColumn !== null
+        && this.nextWriteErrorColumn !== column
+      )
+    ) {
       return
     }
     const error = this.nextWriteError
     this.nextWriteError = null
+    this.nextWriteErrorColumn = null
     throw error
   }
 
-  afterSetValues(row: number): void {
+  afterSetValues(
+    row: number,
+    column: number,
+    numRows: number,
+    numColumns: number,
+  ): void {
     if (this.name === '日記帳' && row >= 2) {
-      this.recordEvent('row-written')
+      const isStatusCell =
+        numRows === 1
+        && numColumns === 1
+        && this.readValue(1, column) === '結清狀態'
+      this.recordEvent(isStatusCell ? 'status-written' : 'row-written')
     }
   }
 }
@@ -315,6 +349,10 @@ export class FakeSpreadsheet {
   }
 
   private readonly recordEvent: (event: string) => void
+
+  getName(): string {
+    return 'Solo Ledger'
+  }
 
   getSheetByName(name: string): FakeSheet | null {
     return this.sheets.find((sheet) => sheet.getName() === name) || null
@@ -332,6 +370,156 @@ export class FakeSpreadsheet {
   getSheets(): FakeSheet[] {
     return [...this.sheets]
   }
+}
+
+type FakeFileIterator = {
+  hasNext: () => boolean
+  next: () => FakeDriveFile
+}
+
+export class FakeDriveFile {
+  private trashed = false
+
+  constructor(
+    private readonly id: string,
+    private readonly name: string,
+    private readonly createdAt: Date,
+    private readonly copyFile: (
+      name: string,
+      folder: FakeDriveFolder,
+    ) => FakeDriveFile,
+  ) {}
+
+  getId(): string {
+    return this.id
+  }
+
+  getName(): string {
+    return this.name
+  }
+
+  getDateCreated(): Date {
+    return new Date(this.createdAt.getTime())
+  }
+
+  isTrashed(): boolean {
+    return this.trashed
+  }
+
+  setTrashed(trashed: boolean): FakeDriveFile {
+    this.trashed = trashed
+    return this
+  }
+
+  makeCopy(name: string, folder: FakeDriveFolder): FakeDriveFile {
+    return this.copyFile(name, folder)
+  }
+}
+
+export class FakeDriveFolder {
+  private readonly files: FakeDriveFile[] = []
+
+  constructor(
+    private readonly id: string,
+    private readonly name: string,
+  ) {}
+
+  getId(): string {
+    return this.id
+  }
+
+  getName(): string {
+    return this.name
+  }
+
+  getFiles(): FakeFileIterator {
+    const files = this.files.filter(file => !file.isTrashed())
+    let index = 0
+    return {
+      hasNext: () => index < files.length,
+      next: () => {
+        const file = files[index]
+        if (!file) throw new Error('no more files')
+        index += 1
+        return file
+      },
+    }
+  }
+
+  addFile(file: FakeDriveFile): void {
+    this.files.push(file)
+  }
+
+  allFiles(): FakeDriveFile[] {
+    return [...this.files]
+  }
+}
+
+export class FakeDrive {
+  private readonly folders = new Map<string, FakeDriveFolder>()
+  private readonly files = new Map<string, FakeDriveFile>()
+  private nextFolderId = 1
+  private nextFileId = 1
+
+  constructor(spreadsheetId: string) {
+    this.createFile('Solo Ledger', new Date(0), null, spreadsheetId)
+  }
+
+  createFolder(name: string): FakeDriveFolder {
+    const folder = new FakeDriveFolder(
+      `fake-folder-${this.nextFolderId}`,
+      name,
+    )
+    this.nextFolderId += 1
+    this.folders.set(folder.getId(), folder)
+    return folder
+  }
+
+  createFile(
+    name: string,
+    createdAt: Date,
+    folder: FakeDriveFolder | null = null,
+    id = `fake-file-${this.nextFileId}`,
+  ): FakeDriveFile {
+    this.nextFileId += 1
+    const file = new FakeDriveFile(
+      id,
+      name,
+      createdAt,
+      (copyName, copyFolder) =>
+        this.createFile(copyName, new Date(Date.now()), copyFolder),
+    )
+    this.files.set(id, file)
+    if (folder) {
+      folder.addFile(file)
+    }
+    return file
+  }
+
+  getFolderById(id: string): FakeDriveFolder {
+    const folder = this.folders.get(id)
+    if (!folder) throw new Error(`unknown folder id: ${id}`)
+    return folder
+  }
+
+  getFileById(id: string): FakeDriveFile {
+    const file = this.files.get(id)
+    if (!file) throw new Error(`unknown file id: ${id}`)
+    return file
+  }
+}
+
+export type FakeMailMessage = {
+  to: string
+  subject: string
+  body: string
+}
+
+export type FakeTrigger = {
+  handler: string
+  weekDay: string
+  hour: number
+  getHandlerFunction: () => string
 }
 
 class FakeDataValidationBuilder {
@@ -377,15 +565,33 @@ export type FakeDoPostEvent = {
 
 type SetupGasFunctions = Pick<GasFunctions, 'resolveHeaders_' | 'JOURNAL_HEADERS'> & {
   setupSpreadsheet: () => void
+  closeAndOpenBooks: (oldSpreadsheetId: string) => Record<string, unknown>
   doPost: (event: FakeDoPostEvent) => FakeTextOutput
+  checkConsistency_: (payload?: { repair?: boolean }) => Record<string, unknown>
+  weeklyConsistencyCheck: () => Record<string, unknown>
+  weeklyBackup: () => Record<string, unknown>
+  pruneBackups_: (
+    folder: FakeDriveFolder,
+    backupPrefix: string,
+    sourceFileId: string,
+  ) => FakeDriveFile[]
+  installWeeklyTriggers: () => void
 }
 
 export type FakeGasHarness = SetupGasFunctions & {
   spreadsheet: FakeSpreadsheet
+  oldSpreadsheet: FakeSpreadsheet
+  spreadsheetId: string
+  oldSpreadsheetId: string
+  drive: FakeDrive
+  mailMessages: FakeMailMessage[]
+  triggers: FakeTrigger[]
   events: string[]
   clearEvents: () => void
+  setScriptProperty: (name: string, value: string) => void
   advanceCacheTime: (seconds: number) => void
   peekCache: (key: string) => string | null
+  peekScriptProperty: (name: string) => string | null
 }
 
 export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
@@ -393,9 +599,24 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
   const source = readFileSync(codePath, 'utf8')
   const events: string[] = []
   const recordEvent = (event: string) => events.push(event)
+  const spreadsheetId = 'test-ledger-spreadsheet-id'
+  const oldSpreadsheetId = 'test-old-ledger-spreadsheet-id'
   const spreadsheet = new FakeSpreadsheet(recordEvent)
+  const oldSpreadsheet = new FakeSpreadsheet(recordEvent)
+  const spreadsheets = new Map<string, FakeSpreadsheet>([
+    [spreadsheetId, spreadsheet],
+    [oldSpreadsheetId, oldSpreadsheet],
+  ])
+  const drive = new FakeDrive(spreadsheetId)
+  const mailMessages: FakeMailMessage[] = []
+  const triggers: FakeTrigger[] = []
+  let nextUuid = 1
   let cacheNow = Date.now()
   const cacheEntries = new Map<string, { value: string; expiresAt: number }>()
+  const scriptProperties = new Map<string, string>([
+    ['LEDGER_SPREADSHEET_ID', spreadsheetId],
+    ['EXPENSE_API_SECRET', 'test-secret'],
+  ])
   const scriptCache = {
     get(key: string) {
       if (key.startsWith('nonce:')) {
@@ -428,10 +649,9 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
   }
   const spreadsheetApp = {
     openById(id: string) {
-      if (id !== 'test-ledger-spreadsheet-id') {
-        throw new Error(`unknown spreadsheet id: ${id}`)
-      }
-      return spreadsheet
+      const resolved = spreadsheets.get(id)
+      if (!resolved) throw new Error(`unknown spreadsheet id: ${id}`)
+      return resolved
     },
     newDataValidation() {
       return new FakeDataValidationBuilder()
@@ -441,13 +661,11 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
     getScriptProperties() {
       return {
         getProperty(name: string) {
-          if (name === 'LEDGER_SPREADSHEET_ID') {
-            return 'test-ledger-spreadsheet-id'
-          }
-          if (name === 'EXPENSE_API_SECRET') {
-            return 'test-secret'
-          }
-          return null
+          return scriptProperties.get(name) ?? null
+        },
+        setProperty(name: string, value: string) {
+          scriptProperties.set(name, value)
+          return this
         },
       }
     },
@@ -472,6 +690,11 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
         throw new Error(`unsupported digest algorithm: ${algorithm}`)
       }
       return Array.from(createHash('sha256').update(value, 'utf8').digest())
+    },
+    getUuid() {
+      const suffix = String(nextUuid).padStart(12, '0')
+      nextUuid += 1
+      return `00000000-0000-4000-8000-${suffix}`
     },
     base64EncodeWebSafe(bytes: number[]) {
       return Buffer.from(bytes)
@@ -508,6 +731,81 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
       return output
     },
   }
+  const session = {
+    getEffectiveUser() {
+      return {
+        getEmail() {
+          return 'ledger-owner@example.com'
+        },
+      }
+    },
+  }
+  const driveApp = {
+    createFolder(name: string) {
+      return drive.createFolder(name)
+    },
+    getFolderById(id: string) {
+      return drive.getFolderById(id)
+    },
+    getFileById(id: string) {
+      return drive.getFileById(id)
+    },
+  }
+  const mailApp = {
+    sendEmail(
+      messageOrTo: FakeMailMessage | string,
+      subject?: string,
+      body?: string,
+    ) {
+      if (typeof messageOrTo === 'string') {
+        mailMessages.push({
+          to: messageOrTo,
+          subject: subject ?? '',
+          body: body ?? '',
+        })
+        return
+      }
+      mailMessages.push({ ...messageOrTo })
+    },
+  }
+  const scriptApp = {
+    WeekDay: { MONDAY: 'MONDAY' },
+    getProjectTriggers() {
+      return [...triggers]
+    },
+    deleteTrigger(trigger: FakeTrigger) {
+      const index = triggers.indexOf(trigger)
+      if (index >= 0) triggers.splice(index, 1)
+    },
+    newTrigger(handler: string) {
+      let weekDay = ''
+      let hour = -1
+      const builder = {
+        timeBased() {
+          return builder
+        },
+        onWeekDay(value: string) {
+          weekDay = value
+          return builder
+        },
+        atHour(value: number) {
+          hour = value
+          return builder
+        },
+        create() {
+          const trigger: FakeTrigger = {
+            handler,
+            weekDay,
+            hour,
+            getHandlerFunction: () => handler,
+          }
+          triggers.push(trigger)
+          return trigger
+        },
+      }
+      return builder
+    },
+  }
   const evaluate = new Function(
     ...gasGlobalNames,
     [
@@ -515,7 +813,13 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
       source,
       'return {',
       '  setupSpreadsheet: typeof setupSpreadsheet === "function" ? setupSpreadsheet : undefined,',
+      '  closeAndOpenBooks: typeof closeAndOpenBooks === "function" ? closeAndOpenBooks : undefined,',
       '  doPost: typeof doPost === "function" ? doPost : undefined,',
+      '  checkConsistency_: typeof checkConsistency_ === "function" ? checkConsistency_ : undefined,',
+      '  weeklyConsistencyCheck: typeof weeklyConsistencyCheck === "function" ? weeklyConsistencyCheck : undefined,',
+      '  weeklyBackup: typeof weeklyBackup === "function" ? weeklyBackup : undefined,',
+      '  pruneBackups_: typeof pruneBackups_ === "function" ? pruneBackups_ : undefined,',
+      '  installWeeklyTriggers: typeof installWeeklyTriggers === "function" ? installWeeklyTriggers : undefined,',
       '  resolveHeaders_: typeof resolveHeaders_ === "function" ? resolveHeaders_ : undefined,',
       '  JOURNAL_HEADERS: typeof JOURNAL_HEADERS !== "undefined" ? JOURNAL_HEADERS : undefined,',
       '};',
@@ -540,6 +844,18 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
     if (name === 'ContentService') {
       return contentService
     }
+    if (name === 'Session') {
+      return session
+    }
+    if (name === 'DriveApp') {
+      return driveApp
+    }
+    if (name === 'MailApp') {
+      return mailApp
+    }
+    if (name === 'ScriptApp') {
+      return scriptApp
+    }
     return throwingGasGlobal(name)
   })
   const functions = evaluate(...injectedGlobals) as SetupGasFunctions
@@ -547,9 +863,18 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
   return {
     ...functions,
     spreadsheet,
+    oldSpreadsheet,
+    spreadsheetId,
+    oldSpreadsheetId,
+    drive,
+    mailMessages,
+    triggers,
     events,
     clearEvents() {
       events.length = 0
+    },
+    setScriptProperty(name: string, value: string) {
+      scriptProperties.set(name, value)
     },
     advanceCacheTime(seconds: number) {
       cacheNow += seconds * 1000
@@ -557,6 +882,9 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
     peekCache(key: string) {
       const entry = cacheEntries.get(key)
       return entry && entry.expiresAt > cacheNow ? entry.value : null
+    },
+    peekScriptProperty(name: string) {
+      return scriptProperties.get(name) ?? null
     },
   }
 }

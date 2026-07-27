@@ -63,3 +63,67 @@ export const RECENT_TRANSACTIONS = [
     結清狀態: '',
   },
 ] as const
+
+export const RECEIVABLE_GROUPS = [
+  {
+    對象: '阿明',
+    entries: [
+      {
+        txn_id: 'receivable-open-001',
+        日期: '2026-07-26',
+        金額: 500,
+        幣別: 'TWD',
+        對象: '阿明',
+        說明: '代買車票',
+        結清狀態: '部分',
+        direction: '應收',
+        outstanding: 320,
+        view_only: false,
+      },
+      {
+        txn_id: '',
+        日期: '2026-07-25',
+        金額: 80,
+        幣別: 'TWD',
+        對象: '阿明',
+        說明: '手動代墊',
+        結清狀態: '未結',
+        direction: '應收',
+        outstanding: 80,
+        view_only: true,
+      },
+    ],
+  },
+  {
+    對象: '小美',
+    entries: [
+      {
+        txn_id: 'payable-open-001',
+        日期: '2026-07-24',
+        金額: 720,
+        幣別: 'TWD',
+        對象: '小美',
+        說明: '朋友先付晚餐',
+        結清狀態: '未結',
+        direction: '應付',
+        outstanding: 720,
+        view_only: false,
+      },
+    ],
+  },
+] as const
+
+export const PARTIALLY_SETTLED_GROUPS = [
+  {
+    ...RECEIVABLE_GROUPS[0],
+    entries: [
+      {
+        ...RECEIVABLE_GROUPS[0].entries[0],
+        outstanding: 120,
+        結清狀態: '部分',
+      },
+      RECEIVABLE_GROUPS[0].entries[1],
+    ],
+  },
+  RECEIVABLE_GROUPS[1],
+] as const

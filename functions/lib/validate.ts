@@ -20,6 +20,26 @@ type TransactionDateRangeValidationResult =
   | { ok: true; date_from: string; date_to: string }
   | { ok: false; error: string }
 
+export type Settlement = {
+  txn_id: string
+  account: string
+  date: string
+  amount?: number
+}
+
+type SettlementValidationResult =
+  | { ok: true; settlement: Settlement }
+  | { ok: false; error: string }
+
+export type Reversal = {
+  txn_id: string
+  date: string
+}
+
+type ReversalValidationResult =
+  | { ok: true; reversal: Reversal }
+  | { ok: false; error: string }
+
 const TYPES = new Set(['支出', '收入', '轉帳'])
 const IOU_TYPES = new Set(['應收', '應付'])
 const OPTIONAL_STRING_FIELDS = [
@@ -88,6 +108,80 @@ export function validateTransactionDateRange(
   }
 }
 
+export function validateSettlement(input: unknown): SettlementValidationResult {
+  if (typeof input !== 'object' || input === null) {
+    return { ok: false, error: 'invalid txn_id' }
+  }
+  const candidate = input as Record<string, unknown>
+
+  if (
+    typeof candidate.txn_id !== 'string'
+    || candidate.txn_id.trim() === ''
+  ) {
+    return { ok: false, error: 'invalid txn_id' }
+  }
+  if (
+    typeof candidate.account !== 'string'
+    || candidate.account.trim() === ''
+  ) {
+    return { ok: false, error: 'invalid account' }
+  }
+  if (!isRealDate(candidate.date)) {
+    return { ok: false, error: 'invalid date' }
+  }
+  if (
+    candidate.amount !== undefined
+    && (
+      typeof candidate.amount !== 'number'
+      || !Number.isFinite(candidate.amount)
+      || candidate.amount <= 0
+    )
+  ) {
+    return { ok: false, error: 'invalid amount' }
+  }
+  if (candidate.currency !== undefined) {
+    return { ok: false, error: 'currency is not accepted' }
+  }
+
+  const settlement: Settlement = {
+    txn_id: candidate.txn_id,
+    account: candidate.account,
+    date: candidate.date,
+  }
+  if (typeof candidate.amount === 'number') {
+    settlement.amount = candidate.amount
+  }
+  return { ok: true, settlement }
+}
+
+export function validateReversal(input: unknown): ReversalValidationResult {
+  if (typeof input !== 'object' || input === null) {
+    return { ok: false, error: 'invalid txn_id' }
+  }
+  const candidate = input as Record<string, unknown>
+
+  if (
+    typeof candidate.txn_id !== 'string'
+    || candidate.txn_id.trim() === ''
+  ) {
+    return { ok: false, error: 'invalid txn_id' }
+  }
+  if (!isRealDate(candidate.date)) {
+    return { ok: false, error: 'invalid date' }
+  }
+  if (candidate.currency !== undefined) {
+    return { ok: false, error: 'currency is not accepted' }
+  }
+
+  return {
+    ok: true,
+    reversal: {
+      txn_id: candidate.txn_id,
+      date: candidate.date,
+    },
+  }
+}
+
 function isRealTime(value: unknown): value is string {
   if (typeof value !== 'string') return false
   const match = /^(\d{2}):(\d{2})$/.exec(value)
@@ -127,16 +221,6 @@ export function validateTransaction(input: unknown): ValidationResult {
     return { ok: false, error: 'missing description' }
   }
 
-  for (const field of OPTIONAL_STRING_FIELDS) {
-    const value = candidate[field]
-    if (
-      value !== undefined
-      && (typeof value !== 'string' || value.trim() === '')
-    ) {
-      return { ok: false, error: `invalid ${field}` }
-    }
-  }
-
   if (
     candidate.iou !== undefined
     && (
@@ -145,6 +229,25 @@ export function validateTransaction(input: unknown): ValidationResult {
     )
   ) {
     return { ok: false, error: 'invalid iou' }
+  }
+  if (
+    candidate.iou !== undefined
+    && (
+      typeof candidate.payee !== 'string'
+      || candidate.payee.trim() === ''
+    )
+  ) {
+    return { ok: false, error: 'missing payee' }
+  }
+
+  for (const field of OPTIONAL_STRING_FIELDS) {
+    const value = candidate[field]
+    if (
+      value !== undefined
+      && (typeof value !== 'string' || value.trim() === '')
+    ) {
+      return { ok: false, error: `invalid ${field}` }
+    }
   }
 
   const transaction: Transaction = {

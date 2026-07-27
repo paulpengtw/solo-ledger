@@ -1,12 +1,19 @@
 import './styles.css'
 import {
   authCheck,
+  listReceivables,
   listTransactions,
   loadOptions,
+  reverseTransaction,
+  settleReceivable,
   submitTransaction,
   type AccountOption,
   type LedgerOptions,
   type LedgerTransaction,
+  type ReceivableEntry,
+  type ReceivableGroup,
+  type Reversal,
+  type Settlement,
 } from './api'
 import { startSessionGuard } from './auth'
 import * as State from './state'
@@ -88,6 +95,27 @@ export function mountApp(
   let sessionSchemaVersion: string | null = null
   let resetTimer: ReturnType<typeof setTimeout> | null = null
   let recentRequest = 0
+  let recentTransactions: LedgerTransaction[] = []
+  let receivablesRequest = 0
+  let receivableGroups: ReceivableGroup[] = []
+  let pendingSettlement: {
+    entry: ReceivableEntry
+    operation: {
+      settlement: Settlement
+      idempotencyKey: string
+    } | null
+    submitting: boolean
+    controlsLocked: boolean
+  } | null = null
+  let pendingReversal: {
+    transaction: LedgerTransaction
+    operation: {
+      reversal: Reversal
+      idempotencyKey: string
+    } | null
+    submitting: boolean
+    controlsLocked: boolean
+  } | null = null
   let stopped = false
 
   // 說明 must stay required: speech-to-text gives every journal row a narrative.
@@ -99,6 +127,7 @@ export function mountApp(
     <nav id="view-switch" class="segmented" aria-label="畫面">
       <button type="button" data-view="entry" class="selected" aria-pressed="true">記帳</button>
       <button type="button" data-view="recent" aria-pressed="false">最近紀錄</button>
+      <button type="button" data-view="outstanding" aria-pressed="false">未結項目</button>
     </nav>
     <main id="entry-view">
     <div id="schema-banner" role="status" hidden>選項已更新，請確認目前選擇</div>
@@ -141,7 +170,12 @@ export function mountApp(
       <div id="category-grid" class="option-grid"></div>
     </section>
     <section id="payee-section" class="form-section" aria-labelledby="payee-heading">
-      <h2 id="payee-heading">對象 <span>選填</span></h2>
+      <h2 id="payee-heading">對象 <span id="payee-requirement">選填</span></h2>
+      <div id="iou-toggle" class="segmented" style="grid-template-columns: repeat(2, 1fr)"
+        aria-label="代墊或應付">
+        <button type="button" data-iou="應收" aria-pressed="false">代墊(應收)</button>
+        <button type="button" data-iou="應付" aria-pressed="false">應付</button>
+      </div>
       <div id="payee-suggestions" class="option-grid compact"></div>
       <label class="text-field">
         <span>自訂對象</span>
@@ -174,21 +208,114 @@ export function mountApp(
         <div id="transaction-list"></div>
       </section>
     </main>
+    <main id="outstanding-view" hidden>
+      <section class="receivables-panel" aria-labelledby="receivables-heading">
+        <div class="recent-toolbar">
+          <h2 id="receivables-heading">應收與應付</h2>
+          <button id="refresh-receivables" type="button">重新整理</button>
+        </div>
+        <p id="receivables-status" role="status"></p>
+        <div id="receivables-list"></div>
+      </section>
+    </main>
+    <aside
+      id="settle-confirmation"
+      class="settle-confirmation"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settle-heading"
+      hidden
+    >
+      <div class="settle-card">
+        <h2 id="settle-heading">確認結清</h2>
+        <p id="settle-target"></p>
+        <p class="irreversible-warning">結清後無法復原。請確認金額與帳戶正確。</p>
+        <label class="text-field required">
+          <span>結清金額</span>
+          <input id="settle-amount" type="number" min="0.01" step="0.01" inputmode="decimal" />
+        </label>
+        <label class="text-field required">
+          <span>收付帳戶</span>
+          <select id="settle-account"></select>
+        </label>
+        <label class="text-field required">
+          <span>日期</span>
+          <input id="settle-date" type="date" />
+        </label>
+        <p id="settle-status" role="alert"></p>
+        <div class="settle-actions">
+          <button id="cancel-settle" type="button">取消</button>
+          <button id="confirm-settle" type="button">確認結清</button>
+        </div>
+      </div>
+    </aside>
+    <aside
+      id="reverse-confirmation"
+      class="settle-confirmation"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="reverse-heading"
+      hidden
+    >
+      <div class="settle-card">
+        <h2 id="reverse-heading">確認沖銷</h2>
+        <p id="reverse-target"></p>
+        <p class="irreversible-warning">將新增一筆相反分錄，原始紀錄不會被編輯。</p>
+        <label class="text-field required">
+          <span>沖銷日期</span>
+          <input id="reverse-date" type="date" />
+        </label>
+        <p id="reverse-status" role="alert"></p>
+        <div class="settle-actions">
+          <button id="cancel-reverse" type="button">取消</button>
+          <button id="confirm-reverse" type="button">確認沖銷</button>
+        </div>
+      </div>
+    </aside>
   `
 
   const pageTitle = root.querySelector<HTMLElement>('#page-title')!
   const entryView = root.querySelector<HTMLElement>('#entry-view')!
   const recentView = root.querySelector<HTMLElement>('#recent-view')!
+  const outstandingView = root.querySelector<HTMLElement>('#outstanding-view')!
   const recentStatus = root.querySelector<HTMLElement>('#recent-status')!
   const transactionList = root.querySelector<HTMLElement>('#transaction-list')!
   const refreshTransactions = root.querySelector<HTMLButtonElement>(
     '#refresh-transactions',
   )!
+  const receivablesStatus = root.querySelector<HTMLElement>(
+    '#receivables-status',
+  )!
+  const receivablesList = root.querySelector<HTMLElement>('#receivables-list')!
+  const refreshReceivables = root.querySelector<HTMLButtonElement>(
+    '#refresh-receivables',
+  )!
+  const settleConfirmation = root.querySelector<HTMLElement>(
+    '#settle-confirmation',
+  )!
+  const settleTarget = root.querySelector<HTMLElement>('#settle-target')!
+  const settleAmount = root.querySelector<HTMLInputElement>('#settle-amount')!
+  const settleAccount = root.querySelector('#settle-account') as unknown as
+    HTMLSelectElement
+  const settleDate = root.querySelector<HTMLInputElement>('#settle-date')!
+  const settleStatus = root.querySelector<HTMLElement>('#settle-status')!
+  const cancelSettle = root.querySelector<HTMLButtonElement>('#cancel-settle')!
+  const confirmSettle = root.querySelector<HTMLButtonElement>('#confirm-settle')!
+  const reverseConfirmation = root.querySelector<HTMLElement>(
+    '#reverse-confirmation',
+  )!
+  const reverseTarget = root.querySelector<HTMLElement>('#reverse-target')!
+  const reverseDate = root.querySelector<HTMLInputElement>('#reverse-date')!
+  const reverseStatus = root.querySelector<HTMLElement>('#reverse-status')!
+  const cancelReverse = root.querySelector<HTMLButtonElement>('#cancel-reverse')!
+  const confirmReverse = root.querySelector<HTMLButtonElement>('#confirm-reverse')!
   const schemaBanner = root.querySelector<HTMLElement>('#schema-banner')!
   const accountPicker = root.querySelector<HTMLElement>('#account-picker')!
   const toAccountPicker = root.querySelector<HTMLElement>('#to-account-picker')!
   const categoryGrid = root.querySelector<HTMLElement>('#category-grid')!
+  const iouToggle = root.querySelector<HTMLElement>('#iou-toggle')!
   const payeeSuggestions = root.querySelector<HTMLElement>('#payee-suggestions')!
+  const payeeRequirement = root.querySelector<HTMLElement>('#payee-requirement')!
   const payeeInput = root.querySelector<HTMLInputElement>('#payee-input')!
   const descriptionInput = root.querySelector<HTMLInputElement>('#description-input')!
   const dateInput = root.querySelector<HTMLInputElement>('#date-input')!
@@ -240,8 +367,96 @@ export function mountApp(
       article.appendChild(body)
       article.appendChild(accounts)
       article.appendChild(details)
+      if (
+        row.txn_id
+        && (row.類型 === '支出' || row.類型 === '收入' || row.類型 === '轉帳')
+        && row.結清狀態 !== '已沖銷'
+      ) {
+        const reverseButton = document.createElement('button')
+        reverseButton.type = 'button'
+        reverseButton.className = 'reverse-button'
+        reverseButton.dataset['reverseTxnId'] = row.txn_id
+        reverseButton.textContent = '沖銷'
+        article.appendChild(reverseButton)
+      }
       transactionList.appendChild(article)
     }
+  }
+
+  function renderReceivables(groups: ReceivableGroup[]): void {
+    receivablesList.replaceChildren()
+    for (const group of groups) {
+      const section = document.createElement('section')
+      section.className = 'receivable-group'
+      section.dataset['counterparty'] = group.對象
+
+      const heading = document.createElement('h3')
+      heading.textContent = group.對象 || '未指定對象'
+      section.appendChild(heading)
+
+      for (const entry of group.entries) {
+        const article = document.createElement('article')
+        article.className = 'receivable-entry'
+        article.dataset['txnId'] = entry.txn_id
+        article.dataset['viewOnly'] = String(entry.view_only)
+
+        const summary = document.createElement('div')
+        summary.className = 'receivable-summary'
+        const direction = document.createElement('span')
+        direction.className = `receivable-direction ${entry.direction}`
+        direction.textContent = entry.direction
+        const description = document.createElement('span')
+        description.className = 'receivable-description'
+        description.textContent = entry.說明 || '未填說明'
+        summary.appendChild(direction)
+        summary.appendChild(description)
+
+        const balance = document.createElement('div')
+        balance.className = 'receivable-balance'
+        const amount = document.createElement('strong')
+        amount.textContent = `${entry.outstanding} ${entry.幣別}`.trim()
+        const detail = document.createElement('span')
+        detail.textContent = entry.view_only
+          ? `${entry.日期} · 手動 · 僅供檢視`
+          : `${entry.日期} · ${entry.結清狀態}`
+        balance.appendChild(amount)
+        balance.appendChild(detail)
+
+        article.appendChild(summary)
+        article.appendChild(balance)
+
+        if (!entry.view_only) {
+          const settleButton = document.createElement('button')
+          settleButton.type = 'button'
+          settleButton.className = 'settle-button'
+          settleButton.dataset['settleTxnId'] = entry.txn_id
+          settleButton.textContent = '結清'
+          article.appendChild(settleButton)
+        }
+        section.appendChild(article)
+      }
+      receivablesList.appendChild(section)
+    }
+  }
+
+  async function loadOutstandingReceivables(): Promise<void> {
+    const request = ++receivablesRequest
+    refreshReceivables.disabled = true
+    receivablesStatus.textContent = '載入中…'
+    receivablesList.replaceChildren()
+
+    const groups = await listReceivables()
+    if (stopped || request !== receivablesRequest) return
+
+    refreshReceivables.disabled = false
+    if (groups === null) {
+      receivablesStatus.textContent = '無法載入未結項目，請再試一次'
+      return
+    }
+
+    receivableGroups = groups
+    receivablesStatus.textContent = groups.length === 0 ? '目前沒有未結項目' : ''
+    renderReceivables(groups)
   }
 
   async function loadRecentTransactions(): Promise<void> {
@@ -260,21 +475,234 @@ export function mountApp(
     }
 
     recentStatus.textContent = rows.length === 0 ? '目前沒有紀錄' : ''
+    recentTransactions = rows
     renderTransactions(rows)
   }
 
-  function showView(view: 'entry' | 'recent'): void {
+  function updateReversalInteraction(): void {
+    const controlsLocked = pendingReversal?.controlsLocked === true
+    reverseDate.disabled = controlsLocked
+    cancelReverse.disabled = controlsLocked
+    confirmReverse.disabled =
+      pendingReversal === null
+      || pendingReversal.submitting
+      || reverseDate.value === ''
+  }
+
+  function openReversal(transaction: LedgerTransaction): void {
+    if (pendingReversal?.submitting) return
+    pendingReversal = {
+      transaction,
+      operation: null,
+      submitting: false,
+      controlsLocked: false,
+    }
+    reverseTarget.textContent =
+      `${transaction.類型} · ${transaction.說明 || '未填說明'} · ${transaction.金額} ${transaction.幣別}`.trim()
+    reverseDate.value = today()
+    reverseStatus.textContent = ''
+    reverseConfirmation.hidden = false
+    updateReversalInteraction()
+  }
+
+  function closeReversal(): void {
+    if (pendingReversal?.submitting) return
+    pendingReversal = null
+    reverseConfirmation.hidden = true
+    reverseStatus.textContent = ''
+    updateReversalInteraction()
+  }
+
+  async function onConfirmReversal(): Promise<void> {
+    if (!pendingReversal || pendingReversal.submitting) return
+
+    const request = pendingReversal
+    if (request.operation === null) {
+      if (!reverseDate.value) {
+        reverseStatus.textContent = '請選擇沖銷日期'
+        return
+      }
+      request.operation = {
+        reversal: {
+          txn_id: request.transaction.txn_id,
+          date: reverseDate.value,
+        },
+        idempotencyKey: randomUUID(),
+      }
+    }
+
+    const operation = request.operation
+    request.submitting = true
+    request.controlsLocked = true
+    updateReversalInteraction()
+    reverseStatus.textContent = '沖銷中…'
+    const result = await reverseTransaction(
+      operation.reversal,
+      operation.idempotencyKey,
+    )
+    if (stopped) return
+
+    if (result.ok) {
+      if (pendingReversal === request) {
+        request.submitting = false
+        closeReversal()
+      }
+      showFlash('沖銷完成 ✓')
+      await loadRecentTransactions()
+      return
+    }
+    if (pendingReversal === request) {
+      request.submitting = false
+      if (result.kind !== 'network') {
+        request.operation = null
+        request.controlsLocked = false
+      }
+      updateReversalInteraction()
+      reverseStatus.textContent = result.message
+      if (result.kind === 'auth') showReauthPrompt()
+    }
+  }
+
+  function showView(view: 'entry' | 'recent' | 'outstanding'): void {
     const recent = view === 'recent'
-    entryView.hidden = recent
+    const outstanding = view === 'outstanding'
+    entryView.hidden = view !== 'entry'
     recentView.hidden = !recent
-    pageTitle.textContent = recent ? '最近紀錄' : '快速記帳'
+    outstandingView.hidden = !outstanding
+    pageTitle.textContent = recent
+      ? '最近紀錄'
+      : outstanding ? '未結項目' : '快速記帳'
     root.querySelectorAll<HTMLButtonElement>('#view-switch [data-view]')
       .forEach(element => {
         const selected = element.dataset['view'] === view
         element.classList.toggle('selected', selected)
         element.setAttribute('aria-pressed', String(selected))
-      })
+    })
     if (recent) void loadRecentTransactions()
+    if (outstanding) void loadOutstandingReceivables()
+  }
+
+  function renderSettlementAccounts(): void {
+    const selected = settleAccount.value
+      || options?.defaults.account
+      || ''
+    settleAccount.replaceChildren()
+    for (const account of options?.accounts ?? []) {
+      const option = document.createElement('option')
+      option.value = account.name
+      option.textContent = account.name
+      settleAccount.appendChild(option)
+    }
+    if (
+      selected
+      && [...settleAccount.options].some(option => option.value === selected)
+    ) {
+      settleAccount.value = selected
+    }
+    updateSettlementInteraction()
+  }
+
+  function updateSettlementInteraction(): void {
+    const submitting = pendingSettlement?.submitting === true
+    const controlsLocked = pendingSettlement?.controlsLocked === true
+    settleAmount.disabled = controlsLocked
+    settleAccount.disabled = controlsLocked
+    settleDate.disabled = controlsLocked
+    cancelSettle.disabled = controlsLocked
+    confirmSettle.disabled =
+      pendingSettlement === null
+      || submitting
+      || (
+        pendingSettlement.operation === null
+        && settleAccount.value === ''
+      )
+  }
+
+  function openSettlement(entry: ReceivableEntry): void {
+    if (pendingSettlement?.submitting) return
+    pendingSettlement = {
+      entry,
+      operation: null,
+      submitting: false,
+      controlsLocked: false,
+    }
+    renderSettlementAccounts()
+    settleTarget.textContent = `${entry.對象 || '未指定對象'} · ${entry.direction} · ${entry.說明}`
+    settleAmount.value = String(entry.outstanding)
+    settleAmount.max = String(entry.outstanding)
+    settleDate.value = today()
+    settleStatus.textContent = ''
+    settleConfirmation.hidden = false
+    updateSettlementInteraction()
+  }
+
+  function closeSettlement(): void {
+    if (pendingSettlement?.submitting) return
+    pendingSettlement = null
+    settleConfirmation.hidden = true
+    settleStatus.textContent = ''
+    updateSettlementInteraction()
+  }
+
+  async function onConfirmSettlement(): Promise<void> {
+    if (!pendingSettlement || pendingSettlement.submitting) return
+
+    const request = pendingSettlement
+    if (request.operation === null) {
+      const amount = Number(settleAmount.value)
+      if (
+        !Number.isFinite(amount)
+        || amount <= 0
+        || amount > request.entry.outstanding
+      ) {
+        settleStatus.textContent = '請輸入不超過未結餘額的正數'
+        return
+      }
+      if (!settleAccount.value || !settleDate.value) {
+        settleStatus.textContent = '請選擇帳戶與日期'
+        return
+      }
+      request.operation = {
+        settlement: {
+          txn_id: request.entry.txn_id,
+          account: settleAccount.value,
+          date: settleDate.value,
+          amount,
+        },
+        idempotencyKey: randomUUID(),
+      }
+    }
+
+    const operation = request.operation
+    request.submitting = true
+    request.controlsLocked = true
+    updateSettlementInteraction()
+    settleStatus.textContent = '結清中…'
+    const result = await settleReceivable(
+      operation.settlement,
+      operation.idempotencyKey,
+    )
+    if (stopped) return
+
+    if (result.ok) {
+      if (pendingSettlement === request) {
+        request.submitting = false
+        closeSettlement()
+      }
+      showFlash('結清完成 ✓')
+      await loadOutstandingReceivables()
+      return
+    }
+    if (pendingSettlement === request) {
+      request.submitting = false
+      if (result.kind !== 'network') {
+        request.operation = null
+        request.controlsLocked = false
+      }
+      updateSettlementInteraction()
+      settleStatus.textContent = result.message
+      if (result.kind === 'auth') showReauthPrompt()
+    }
   }
 
   function renderOptions(): void {
@@ -320,11 +748,22 @@ export function mountApp(
 
     root.querySelector<HTMLElement>('#category-section')!.hidden =
       state.type === '轉帳'
+      || (state.type === '支出' && state.iou === '應收')
     root.querySelector<HTMLElement>('#to-account-section')!.hidden =
       state.type !== '轉帳'
     root.querySelector<HTMLElement>('#payee-section')!.hidden =
       state.type === '轉帳'
+    iouToggle.hidden = state.type !== '支出'
+    iouToggle.querySelectorAll<HTMLButtonElement>('[data-iou]').forEach(element => {
+      const selected = element.dataset['iou'] === state.iou
+      element.classList.toggle('selected', selected)
+      element.setAttribute('aria-pressed', String(selected))
+    })
 
+    const payeeRequired = state.iou !== null
+    payeeRequirement.textContent = payeeRequired ? '必填' : '選填'
+    payeeInput.required = payeeRequired
+    payeeInput.setAttribute('aria-required', String(payeeRequired))
     payeeInput.value = state.payee
     descriptionInput.value = state.description
     dateInput.value = state.date
@@ -355,6 +794,7 @@ export function mountApp(
     }
     options = next
     state = State.applyOptionsDefaults(state, next.defaults)
+    renderSettlementAccounts()
     render()
   }
 
@@ -403,10 +843,42 @@ export function mountApp(
     const target = (event.target as HTMLElement)
       .closest<HTMLButtonElement>('[data-view]')
     if (!target) return
-    showView(target.dataset['view'] as 'entry' | 'recent')
+    showView(
+      target.dataset['view'] as 'entry' | 'recent' | 'outstanding',
+    )
   })
   refreshTransactions.addEventListener('click', () => {
     void loadRecentTransactions()
+  })
+  transactionList.addEventListener('click', event => {
+    const target = (event.target as HTMLElement)
+      .closest<HTMLButtonElement>('[data-reverse-txn-id]')
+    if (!target) return
+    const txnId = target.dataset['reverseTxnId']
+    const transaction = recentTransactions
+      .find(candidate => candidate.txn_id === txnId)
+    if (transaction) openReversal(transaction)
+  })
+  refreshReceivables.addEventListener('click', () => {
+    void loadOutstandingReceivables()
+  })
+  receivablesList.addEventListener('click', event => {
+    const target = (event.target as HTMLElement)
+      .closest<HTMLButtonElement>('[data-settle-txn-id]')
+    if (!target) return
+    const txnId = target.dataset['settleTxnId']
+    const entry = receivableGroups
+      .flatMap(group => group.entries)
+      .find(candidate => candidate.txn_id === txnId)
+    if (entry && !entry.view_only) openSettlement(entry)
+  })
+  cancelSettle.addEventListener('click', closeSettlement)
+  confirmSettle.addEventListener('click', () => {
+    void onConfirmSettlement()
+  })
+  cancelReverse.addEventListener('click', closeReversal)
+  confirmReverse.addEventListener('click', () => {
+    void onConfirmReversal()
   })
 
   root.querySelector('#type-toggle')!.addEventListener('click', event => {
@@ -437,6 +909,15 @@ export function mountApp(
     const target = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-category]')
     if (!target) return
     dispatch(State.selectCategory(state, target.dataset['category']!))
+  })
+
+  iouToggle.addEventListener('click', event => {
+    const target = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-iou]')
+    if (!target) return
+    dispatch(State.setIou(
+      state,
+      target.dataset['iou'] as '應收' | '應付',
+    ))
   })
 
   payeeSuggestions.addEventListener('click', event => {

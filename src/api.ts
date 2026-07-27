@@ -36,6 +36,36 @@ export type LedgerTransaction = {
   結清狀態: string
 }
 
+export type ReceivableEntry = {
+  txn_id: string
+  日期: string
+  金額: number
+  幣別: string
+  對象: string
+  說明: string
+  結清狀態: '未結' | '部分'
+  direction: '應收' | '應付'
+  outstanding: number
+  view_only: boolean
+}
+
+export type ReceivableGroup = {
+  對象: string
+  entries: ReceivableEntry[]
+}
+
+export type Settlement = {
+  txn_id: string
+  account: string
+  date: string
+  amount?: number
+}
+
+export type Reversal = {
+  txn_id: string
+  date: string
+}
+
 export type SubmitResult =
   | { ok: true; alreadyRecorded: boolean }
   | { ok: false; kind: 'network' | 'auth' | 'backend'; message: string }
@@ -159,6 +189,140 @@ export async function listTransactions(
     return Array.isArray(body) && body.every(isLedgerTransaction) ? body : null
   } catch {
     return null
+  }
+}
+
+function isReceivableEntry(value: unknown): value is ReceivableEntry {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as Record<string, unknown>
+  return (
+    typeof candidate.txn_id === 'string'
+    && typeof candidate.日期 === 'string'
+    && typeof candidate.金額 === 'number'
+    && Number.isFinite(candidate.金額)
+    && typeof candidate.幣別 === 'string'
+    && typeof candidate.對象 === 'string'
+    && typeof candidate.說明 === 'string'
+    && (candidate.結清狀態 === '未結' || candidate.結清狀態 === '部分')
+    && (candidate.direction === '應收' || candidate.direction === '應付')
+    && typeof candidate.outstanding === 'number'
+    && Number.isFinite(candidate.outstanding)
+    && typeof candidate.view_only === 'boolean'
+  )
+}
+
+function isReceivableGroup(value: unknown): value is ReceivableGroup {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as Record<string, unknown>
+  return (
+    typeof candidate.對象 === 'string'
+    && Array.isArray(candidate.entries)
+    && candidate.entries.every(isReceivableEntry)
+  )
+}
+
+export async function listReceivables(
+  fetchFn: typeof fetch = fetch,
+): Promise<ReceivableGroup[] | null> {
+  try {
+    const response = await post('/api/list_receivables', {}, fetchFn)
+    if (!response.ok) return null
+    const body: unknown = await response.json()
+    return Array.isArray(body) && body.every(isReceivableGroup) ? body : null
+  } catch {
+    return null
+  }
+}
+
+export async function settleReceivable(
+  settlement: Settlement,
+  idempotencyKey: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<SubmitResult> {
+  let response: Response
+  try {
+    response = await post(
+      '/api/settle',
+      { ...settlement, idempotencyKey },
+      fetchFn,
+    )
+  } catch (error) {
+    const timedOut = error instanceof DOMException && error.name === 'AbortError'
+    return {
+      ok: false,
+      kind: 'network',
+      message: timedOut ? '連線逾時，請再試一次' : '沒有網路連線，請再試一次',
+    }
+  }
+
+  if (response.status === 401) {
+    return { ok: false, kind: 'auth', message: '登入已過期' }
+  }
+
+  let body: { ok?: boolean; already?: boolean; error?: string }
+  try {
+    body = await response.json() as typeof body
+  } catch {
+    return {
+      ok: false,
+      kind: 'backend',
+      message: `伺服器錯誤 (${response.status})`,
+    }
+  }
+
+  if (body.ok === true || body.already === true) {
+    return { ok: true, alreadyRecorded: body.already === true }
+  }
+  return {
+    ok: false,
+    kind: 'backend',
+    message: body.error ?? `伺服器錯誤 (${response.status})`,
+  }
+}
+
+export async function reverseTransaction(
+  reversal: Reversal,
+  idempotencyKey: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<SubmitResult> {
+  let response: Response
+  try {
+    response = await post(
+      '/api/reverse_transaction',
+      { ...reversal, idempotencyKey },
+      fetchFn,
+    )
+  } catch (error) {
+    const timedOut = error instanceof DOMException && error.name === 'AbortError'
+    return {
+      ok: false,
+      kind: 'network',
+      message: timedOut ? '連線逾時，請再試一次' : '沒有網路連線，請再試一次',
+    }
+  }
+
+  if (response.status === 401) {
+    return { ok: false, kind: 'auth', message: '登入已過期' }
+  }
+
+  let body: { ok?: boolean; already?: boolean; error?: string }
+  try {
+    body = await response.json() as typeof body
+  } catch {
+    return {
+      ok: false,
+      kind: 'backend',
+      message: `伺服器錯誤 (${response.status})`,
+    }
+  }
+
+  if (body.ok === true || body.already === true) {
+    return { ok: true, alreadyRecorded: body.already === true }
+  }
+  return {
+    ok: false,
+    kind: 'backend',
+    message: body.error ?? `伺服器錯誤 (${response.status})`,
   }
 }
 

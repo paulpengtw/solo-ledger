@@ -133,7 +133,7 @@ h3 {
 }
 
 #view-switch {
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, 1fr);
 }
 
 #amount-section,
@@ -303,6 +303,10 @@ h3 {
   padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
 }
 
+.receivables-panel {
+  padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+}
+
 .recent-toolbar {
   display: flex;
   align-items: center;
@@ -335,7 +339,14 @@ h3 {
   font-size: 14px;
 }
 
-#transaction-list {
+#receivables-status {
+  min-height: 24px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+#transaction-list,
+#receivables-list {
   display: grid;
   gap: 10px;
 }
@@ -403,6 +414,173 @@ h3 {
   border-radius: 999px;
   background: var(--warning);
   color: var(--warning-ink);
+}
+
+.reverse-button {
+  width: 100%;
+  min-height: 44px;
+  margin-top: 12px;
+  border: 1px solid #dfe5e1;
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 750;
+}
+
+.receivable-group {
+  display: grid;
+  gap: 8px;
+}
+
+.receivable-group + .receivable-group {
+  margin-top: 16px;
+}
+
+.receivable-group > h3 {
+  margin: 0 4px;
+  color: var(--ink);
+  font-size: 17px;
+}
+
+.receivable-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 12px;
+  align-items: center;
+  padding: 15px;
+  border-radius: var(--radius-large);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.receivable-summary,
+.receivable-balance {
+  display: grid;
+  gap: 4px;
+}
+
+.receivable-direction {
+  width: max-content;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--warning);
+  color: var(--warning-ink);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.receivable-direction.應收 {
+  background: var(--accent);
+  color: var(--ink);
+}
+
+.receivable-description {
+  overflow: hidden;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.receivable-balance {
+  grid-column: 1;
+}
+
+.receivable-balance strong {
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.receivable-balance span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settle-button {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  min-width: 68px;
+  min-height: 48px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--ink);
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.settle-confirmation {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  display: grid;
+  align-items: end;
+  padding: 16px;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  background: rgb(23 52 45 / 45%);
+}
+
+.settle-card {
+  width: min(100%, 488px);
+  margin: 0 auto;
+  padding: 20px;
+  border-radius: var(--radius-large);
+  background: var(--surface);
+  box-shadow: 0 20px 50px rgb(23 52 45 / 28%);
+}
+
+#settle-target,
+#reverse-target {
+  margin-bottom: 8px;
+  font-weight: 750;
+}
+
+.irreversible-warning {
+  margin-bottom: 16px;
+  padding: 11px 13px;
+  border-radius: 12px;
+  background: var(--warning);
+  color: var(--warning-ink);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.settle-card select {
+  width: 100%;
+  min-height: 50px;
+  padding: 0 14px;
+  border: 1px solid #dfe5e1;
+  border-radius: 14px;
+  background: var(--background);
+  color: var(--ink);
+}
+
+#settle-status {
+  min-height: 22px;
+  margin-top: 10px;
+  color: var(--error);
+  font-size: 14px;
+}
+
+.settle-actions {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 8px;
+}
+
+.settle-actions button {
+  min-height: 52px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--background);
+  font-weight: 750;
+}
+
+.settle-actions #confirm-settle {
+  background: var(--ink);
+  color: var(--accent);
+}
+
+.settle-actions button:disabled {
+  opacity: 0.5;
 }
 
 .flash-overlay {
