@@ -16,6 +16,22 @@ var JOURNAL_HEADERS = [
   '建立時間',
 ];
 
+var LIST_TRANSACTION_HEADERS = [
+  'txn_id',
+  '日期',
+  '時間',
+  '類型',
+  '借方帳戶',
+  '貸方帳戶',
+  '金額',
+  '幣別',
+  '分類',
+  '對象',
+  '說明',
+  '結清狀態',
+];
+
+var MAX_LIST_TRANSACTIONS = 200;
 var MAX_SKEW_SECONDS = 300;
 var NONCE_CACHE_SECONDS = 600;
 var LOCK_WAIT_MILLISECONDS = 30000;
@@ -41,6 +57,12 @@ function route_(payload, nonce) {
 
   if (action === 'health') {
     return health_();
+  }
+  if (action === 'get_options') {
+    return getOptions_();
+  }
+  if (action === 'list_transactions') {
+    return listTransactions_(payload);
   }
   if (action === 'create_transaction') {
     return createTransaction_(payload, nonce);
@@ -140,6 +162,187 @@ function digestHex_(bytes) {
     hex += ('0' + unsignedByte.toString(16)).slice(-2);
   }
   return hex;
+}
+
+function getOptions_() {
+  var spreadsheet = SpreadsheetApp.openById(
+    requiredProp_('LEDGER_SPREADSHEET_ID'),
+  );
+  var accountSheet = requiredSheet_(spreadsheet, '會計科目');
+  var accountValues = accountSheet
+    .getRange(
+      1,
+      1,
+      accountSheet.getLastRow(),
+      accountSheet.getLastColumn(),
+    )
+    .getValues();
+  var accountColumns = resolveHeaders_(accountValues[0], [
+    '名稱',
+    '類型',
+    '子類型',
+    '啟用',
+    '排序',
+  ]);
+  var accounts = [];
+  var expenseCategories = [];
+  var incomeCategories = [];
+
+  for (var rowIndex = 1; rowIndex < accountValues.length; rowIndex += 1) {
+    var row = accountValues[rowIndex];
+    var name = String(row[accountColumns['名稱'] - 1] || '').trim();
+    var type = String(row[accountColumns['類型'] - 1] || '').trim();
+    if (!name || !isTrue_(row[accountColumns['啟用'] - 1])) {
+      continue;
+    }
+
+    var option = {
+      name: name,
+      type: type,
+      subtype: String(row[accountColumns['子類型'] - 1] || '').trim(),
+      sort: Number(row[accountColumns['排序'] - 1]),
+    };
+    if (type === '資產' || type === '負債') {
+      accounts.push(option);
+    } else if (type === '支出') {
+      expenseCategories.push(option);
+    } else if (type === '收入') {
+      incomeCategories.push(option);
+    }
+  }
+
+  accounts.sort(compareVocabularyOptions_);
+  expenseCategories.sort(compareVocabularyOptions_);
+  incomeCategories.sort(compareVocabularyOptions_);
+
+  var optionsSheet = requiredSheet_(spreadsheet, '選項清單');
+  var optionValues = optionsSheet
+    .getRange(
+      1,
+      1,
+      optionsSheet.getLastRow(),
+      optionsSheet.getLastColumn(),
+    )
+    .getDisplayValues();
+  var optionColumns = resolveHeaders_(optionValues[0], ['對象']);
+  var payees = [];
+  for (rowIndex = 1; rowIndex < optionValues.length; rowIndex += 1) {
+    var payee = String(optionValues[rowIndex][optionColumns['對象'] - 1] || '')
+      .trim();
+    if (payee) {
+      payees.push(payee);
+    }
+  }
+
+  return {
+    schema_version: schemaVersion_(spreadsheet),
+    accounts: accounts,
+    categories: {
+      支出: vocabularyOptionNames_(expenseCategories),
+      收入: vocabularyOptionNames_(incomeCategories),
+    },
+    payees: payees,
+    defaults: {
+      currency: readSetting_(spreadsheet, '預設幣別'),
+      account: readSetting_(spreadsheet, '預設帳戶'),
+    },
+  };
+}
+
+function compareVocabularyOptions_(left, right) {
+  if (left.sort !== right.sort) {
+    return left.sort - right.sort;
+  }
+  if (left.name < right.name) {
+    return -1;
+  }
+  if (left.name > right.name) {
+    return 1;
+  }
+  return 0;
+}
+
+function vocabularyOptionNames_(options) {
+  var names = [];
+  for (var index = 0; index < options.length; index += 1) {
+    names.push(options[index].name);
+  }
+  return names;
+}
+
+function listTransactions_(payload) {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('payload is required');
+  }
+  requireField_(payload, 'date_from');
+  requireField_(payload, 'date_to');
+
+  var spreadsheet = SpreadsheetApp.openById(
+    requiredProp_('LEDGER_SPREADSHEET_ID'),
+  );
+  var journal = requiredSheet_(spreadsheet, '日記帳');
+  var lastColumn = journal.getLastColumn();
+  var headerRow = journal
+    .getRange(1, 1, 1, lastColumn)
+    .getDisplayValues()[0];
+  var columns = resolveHeaders_(headerRow, LIST_TRANSACTION_HEADERS);
+  var lastRow = journal.getLastRow();
+  if (lastRow < 2) {
+    return [];
+  }
+
+  var displayRows = journal
+    .getRange(2, 1, lastRow - 1, lastColumn)
+    .getDisplayValues();
+  var matches = [];
+
+  for (var rowIndex = 0; rowIndex < displayRows.length; rowIndex += 1) {
+    var displayRow = displayRows[rowIndex];
+    var date = displayRow[columns['日期'] - 1];
+    if (date < payload.date_from || date > payload.date_to) {
+      continue;
+    }
+
+    var transaction = {};
+    for (
+      var headerIndex = 0;
+      headerIndex < LIST_TRANSACTION_HEADERS.length;
+      headerIndex += 1
+    ) {
+      var header = LIST_TRANSACTION_HEADERS[headerIndex];
+      transaction[header] = displayRow[columns[header] - 1];
+    }
+    matches.push({ transaction: transaction, sheetRow: rowIndex + 2 });
+  }
+
+  matches.sort(function (left, right) {
+    var leftDate = left.transaction['日期'];
+    var rightDate = right.transaction['日期'];
+    if (leftDate !== rightDate) {
+      return leftDate < rightDate ? 1 : -1;
+    }
+
+    var leftTime = left.transaction['時間'];
+    var rightTime = right.transaction['時間'];
+    if (leftTime === '' && rightTime !== '') {
+      return 1;
+    }
+    if (leftTime !== '' && rightTime === '') {
+      return -1;
+    }
+    if (leftTime !== rightTime) {
+      return leftTime < rightTime ? 1 : -1;
+    }
+
+    return right.sheetRow - left.sheetRow;
+  });
+
+  var result = [];
+  var resultCount = Math.min(matches.length, MAX_LIST_TRANSACTIONS);
+  for (var resultIndex = 0; resultIndex < resultCount; resultIndex += 1) {
+    result.push(matches[resultIndex].transaction);
+  }
+  return result;
 }
 
 function createTransaction_(payload, nonce) {
@@ -529,7 +732,8 @@ function setupSpreadsheet() {
   initializeBlankSheet_(balances, [['名稱', '類型', '餘額']]);
   initializeBlankSheet_(checks, [['檢查項目', '結果']]);
 
-  // Issue #6 fills formula rows under the 餘額 and 試算與檢查 headers.
+  installBalanceFormulas_(balances, accounts, journal.getMaxRows());
+  installCheckFormulas_(checks, accounts, journal.getMaxRows());
 
   var journalHeaderRow = journal
     .getRange(1, 1, 1, journal.getLastColumn())
@@ -587,6 +791,193 @@ function initializeBlankSheet_(sheet, rows) {
     return;
   }
   sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+function installBalanceFormulas_(sheet, accounts, journalMaxRows) {
+  if (sheet.getLastRow() !== 1 || sheet.getLastColumn() !== 3) {
+    return;
+  }
+
+  var accountCount = accounts.getLastRow() - 1;
+  if (accountCount < 1) {
+    return;
+  }
+
+  var accountTypes = accounts.getRange(2, 2, accountCount, 1).getValues();
+  var accountMaxRows = accounts.getMaxRows();
+  var accountHeaderRow = "'會計科目'!$1:$1";
+  var accountRows = "'會計科目'!$1:$" + accountMaxRows;
+  var amounts = journalColumnFormula_('金額', journalMaxRows);
+  var debitAccounts = journalColumnFormula_('借方帳戶', journalMaxRows);
+  var creditAccounts = journalColumnFormula_('貸方帳戶', journalMaxRows);
+  var rows = [];
+  var index;
+
+  for (index = 0; index < accountCount; index += 1) {
+    var sheetRow = index + 2;
+    var accountType = accountTypes[index][0];
+    var debitTotal =
+      'SUMIFS(' + amounts + ',' + debitAccounts + ',$A' + sheetRow + ')';
+    var creditTotal =
+      'SUMIFS(' + amounts + ',' + creditAccounts + ',$A' + sheetRow + ')';
+    var balanceFormula;
+
+    if (accountType === '資產' || accountType === '支出') {
+      balanceFormula =
+        '=IF(OR($B' +
+        sheetRow +
+        '="資產",$B' +
+        sheetRow +
+        '="支出"),' +
+        debitTotal +
+        '-' +
+        creditTotal +
+        ',' +
+        creditTotal +
+        '-' +
+        debitTotal +
+        ')';
+    } else {
+      balanceFormula =
+        '=IF(OR($B' +
+        sheetRow +
+        '="負債",$B' +
+        sheetRow +
+        '="收入",$B' +
+        sheetRow +
+        '="權益"),' +
+        creditTotal +
+        '-' +
+        debitTotal +
+        ',' +
+        debitTotal +
+        '-' +
+        creditTotal +
+        ')';
+    }
+
+    rows.push([
+      '=INDEX(' +
+        accountRows +
+        ',ROW(),MATCH("名稱",' +
+        accountHeaderRow +
+        ',0))',
+      '=INDEX(' +
+        accountRows +
+        ',ROW(),MATCH("類型",' +
+        accountHeaderRow +
+        ',0))',
+      balanceFormula,
+    ]);
+  }
+
+  sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+function installCheckFormulas_(sheet, accounts, journalMaxRows) {
+  if (sheet.getLastRow() !== 1 || sheet.getLastColumn() !== 2) {
+    return;
+  }
+
+  var accountNames =
+    "INDEX('會計科目'!$2:$" +
+    accounts.getMaxRows() +
+    ',0,MATCH("名稱",\'會計科目\'!$1:$1,0))';
+  var dates = journalColumnFormula_('日期', journalMaxRows);
+  var times = journalColumnFormula_('時間', journalMaxRows);
+  var types = journalColumnFormula_('類型', journalMaxRows);
+  var debitAccounts = journalColumnFormula_('借方帳戶', journalMaxRows);
+  var creditAccounts = journalColumnFormula_('貸方帳戶', journalMaxRows);
+  var amounts = journalColumnFormula_('金額', journalMaxRows);
+  var statuses = journalColumnFormula_('結清狀態', journalMaxRows);
+  var linkedTxnIds = journalColumnFormula_('沖銷txn_id', journalMaxRows);
+  var txnIds = journalColumnFormula_('txn_id', journalMaxRows);
+  var debitTotal = 'SUMIF(' + debitAccounts + ',"<>",' + amounts + ')';
+  var creditTotal = 'SUMIF(' + creditAccounts + ',"<>",' + amounts + ')';
+
+  var trialBalanceFormula =
+    '=LET(debitTotal,' +
+    debitTotal +
+    ',creditTotal,' +
+    creditTotal +
+    ',IF(debitTotal=creditTotal,"OK","異常：借方總額 "&debitTotal&"；貸方總額 "&creditTotal))';
+
+  var unknownAccountFormula =
+    '=LET(unknownCount,' +
+    'SUM(ARRAYFORMULA(IF(' +
+    debitAccounts +
+    '="",0,--(COUNTIF(' +
+    accountNames +
+    ',' +
+    debitAccounts +
+    ')=0))))+' +
+    'SUM(ARRAYFORMULA(IF(' +
+    creditAccounts +
+    '="",0,--(COUNTIF(' +
+    accountNames +
+    ',' +
+    creditAccounts +
+    ')=0)))),' +
+    'IF(unknownCount=0,"OK","異常："&unknownCount&" 個未知帳戶"))';
+
+  var statusFormula =
+    '=LET(statuses,' +
+    statuses +
+    ',txnIds,' +
+    txnIds +
+    ',amounts,' +
+    amounts +
+    ',mismatchCount,' +
+    'SUM(MAP(statuses,txnIds,amounts,LAMBDA(status,txnId,originalAmount,' +
+    'IF(status="",0,' +
+    'IF(status="已沖銷",' +
+    '--(COUNTIFS(' +
+    linkedTxnIds +
+    ',txnId,' +
+    types +
+    ',"沖銷")=0),' +
+    'LET(settledAmount,SUMIFS(' +
+    amounts +
+    ',' +
+    linkedTxnIds +
+    ',txnId,' +
+    types +
+    ',"轉帳"),' +
+    'outstanding,originalAmount-settledAmount,' +
+    'expectedStatus,IF(outstanding=0,"已結",IF(outstanding<originalAmount,"部分","未結")),' +
+    '--(status<>expectedStatus))))))),' +
+    'IF(mismatchCount=0,"OK","異常："&mismatchCount&" 筆結清狀態不一致"))';
+
+  var nonTextDateTimeFormula =
+    '=LET(nonTextCount,' +
+    'SUM(ARRAYFORMULA(IF(' +
+    dates +
+    '="",0,--NOT(ISTEXT(' +
+    dates +
+    ')))))+' +
+    'SUM(ARRAYFORMULA(IF(' +
+    times +
+    '="",0,--NOT(ISTEXT(' +
+    times +
+    '))))),' +
+    'IF(nonTextCount=0,"OK","異常："&nonTextCount&" 個日期/時間儲存格不是文字"))';
+
+  sheet.getRange(2, 1, 4, 2).setValues([
+    ['試算平衡', trialBalanceFormula],
+    ['未知帳戶', unknownAccountFormula],
+    ['結清狀態與衍生餘額', statusFormula],
+    ['非文字日期/時間', nonTextDateTimeFormula],
+  ]);
+}
+
+function journalColumnFormula_(header, journalMaxRows) {
+  return (
+    "INDEX('日記帳'!$2:$" +
+    journalMaxRows +
+    ',0,MATCH("' +
+    header +
+    '",\'日記帳\'!$1:$1,0))'
+  );
 }
 
 function expandPosting_(input) {

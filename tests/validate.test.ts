@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { isValidUuid, validateTransaction } from '../functions/lib/validate'
+import {
+  isValidUuid,
+  validateTransaction,
+  validateTransactionDateRange,
+} from '../functions/lib/validate'
 
 const valid = {
   type: '支出',
@@ -129,5 +133,37 @@ describe('isValidUuid', () => {
 
   it('rejects a non-UUID idempotency key', () => {
     expect(isValidUuid('not-a-uuid')).toBe(false)
+  })
+})
+
+describe('validateTransactionDateRange', () => {
+  it('accepts an inclusive real-calendar range', () => {
+    expect(validateTransactionDateRange({
+      date_from: '2026-07-01',
+      date_to: '2026-07-31',
+    })).toEqual({
+      ok: true,
+      date_from: '2026-07-01',
+      date_to: '2026-07-31',
+    })
+  })
+
+  it.each([
+    [{ date_from: '2026/07/01', date_to: '2026-07-31' }, 'invalid date_from'],
+    [{ date_from: '2026-02-30', date_to: '2026-07-31' }, 'invalid date_from'],
+    [{ date_from: '2026-07-01', date_to: 'July 31, 2026' }, 'invalid date_to'],
+    [{ date_from: '2026-07-01', date_to: '2026-02-30' }, 'invalid date_to'],
+  ])('rejects malformed or impossible range boundary %#', (input, error) => {
+    expect(validateTransactionDateRange(input)).toEqual({ ok: false, error })
+  })
+
+  it('names date_from later than date_to distinctly', () => {
+    expect(validateTransactionDateRange({
+      date_from: '2026-08-01',
+      date_to: '2026-07-31',
+    })).toEqual({
+      ok: false,
+      error: 'date_from later than date_to',
+    })
   })
 })

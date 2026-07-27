@@ -97,7 +97,7 @@ describe('handleAction', () => {
     const fetchFn = noFetch()
 
     const response = await handleAction(
-      'get_options',
+      'settle',
       req({}),
       env,
       deps(fetchFn),
@@ -216,6 +216,102 @@ describe('handleAction', () => {
 
     expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(response.status).toBe(207)
+    expect(await response.text()).toBe(upstreamBody)
+  })
+
+  it('uses a random nonce for list_transactions and forwards the upstream response verbatim', async () => {
+    const upstreamBody = '[{"txn_id":"","日期":"2026-07-27","金額":"000260.00"}]'
+    const fetchFn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const envelope = JSON.parse(String(init?.body)) as {
+        nonce: string
+        payload: string
+      }
+
+      expect(envelope.nonce).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      )
+      expect(envelope.nonce).not.toBe(KEY)
+      expect(decodePayload(envelope.payload)).toEqual({
+        action: 'list_transactions',
+        date_from: '2026-07-01',
+        date_to: '2026-07-31',
+      })
+      return new Response(upstreamBody, { status: 206 })
+    }) as unknown as typeof fetch
+
+    const response = await handleAction(
+      'list_transactions',
+      req({ date_from: '2026-07-01', date_to: '2026-07-31' }),
+      env,
+      deps(fetchFn),
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(response.status).toBe(206)
+    expect(await response.text()).toBe(upstreamBody)
+  })
+
+  it.each([
+    ['malformed date_from', { date_from: '2026/07/01', date_to: '2026-07-31' }, 'invalid date_from'],
+    ['impossible date_to', { date_from: '2026-07-01', date_to: '2026-02-30' }, 'invalid date_to'],
+  ])('rejects %s with 400 without contacting Apps Script', async (_label, body, error) => {
+    const fetchFn = noFetch()
+
+    const response = await handleAction(
+      'list_transactions',
+      req(body),
+      env,
+      deps(fetchFn),
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ ok: false, error })
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('rejects date_from later than date_to with a distinct 400 error', async () => {
+    const fetchFn = noFetch()
+
+    const response = await handleAction(
+      'list_transactions',
+      req({ date_from: '2026-08-01', date_to: '2026-07-31' }),
+      env,
+      deps(fetchFn),
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: 'date_from later than date_to',
+    })
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('uses a random nonce for get_options and forwards the upstream response verbatim', async () => {
+    const upstreamBody = '{"schema_version":"abcdef012345","accounts":[]}'
+    const fetchFn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const envelope = JSON.parse(String(init?.body)) as {
+        nonce: string
+        payload: string
+      }
+
+      expect(envelope.nonce).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      )
+      expect(envelope.nonce).not.toBe(KEY)
+      expect(decodePayload(envelope.payload)).toEqual({ action: 'get_options' })
+      return new Response(upstreamBody, { status: 203 })
+    }) as unknown as typeof fetch
+
+    const response = await handleAction(
+      'get_options',
+      req({}),
+      env,
+      deps(fetchFn),
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(response.status).toBe(203)
     expect(await response.text()).toBe(upstreamBody)
   })
 })
