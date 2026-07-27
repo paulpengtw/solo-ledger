@@ -6,9 +6,31 @@ Solo Ledger is a mobile PWA that sends structurally validated requests through a
 
 > **ONE-WAY DOOR:** The spreadsheet is the only datastore. There is no second database or event log from which a damaged or deleted journal can be rebuilt; preserve the book, its backups, and the HMAC secret accordingly.
 
+### Terminology
+
+Two distinct artifact types share some vocabulary — context determines which is meant.
+
+| Term | Meaning |
+| --- | --- |
+| **Apps Script deployment** | A versioned Apps Script artifact identified by its `/exec` URL. "Production" here means the live `/exec` endpoint that receives forwarded requests. |
+| **Pages deployment** | A single Cloudflare Pages upload identified by a hash prefix. "Production" here means the Pages production environment (as opposed to a preview deployment). |
+
+> **Disambiguate by context.** Both artifacts use the word "production". When the distinction matters, say "the Apps Script `/exec` endpoint" or "the Pages production environment" rather than just "production".
+
+The HMAC secret (`EXPENSE_API_SECRET`) lives in four distinct configuration homes with different names and purposes:
+
+| Home | Name | Purpose |
+| --- | --- | --- |
+| Apps Script Script Properties | `EXPENSE_API_SECRET` | Read at runtime by the Apps Script `/exec` endpoint |
+| Cloudflare Pages environment variable | `EXPENSE_API_SECRET` | Read at runtime by the Pages Function |
+| GitHub Actions secret | `EXPENSE_API_SECRET` | Used by CI to deploy (not read at runtime) |
+| Local `.env` | `EXPENSE_API_SECRET` | Local tooling only — **never read at runtime** |
+
+The `.env` file is never loaded by the deployed app; it exists solely for local development scripts.
+
 ## 2. Prerequisites
 
-- Node.js and npm. This repository does not pin a Node version.
+- Node.js 26 or newer (matches `engines.node` in `package.json`) and npm.
 - The repository dependencies installed with `npm install`.
 - The Apps Script CLI, `clasp`, authenticated to the Google account that will own the deployment.
 - A Google account that can create the spreadsheet, own the Apps Script deployment, send the audit email, and create/prune Drive backups.
