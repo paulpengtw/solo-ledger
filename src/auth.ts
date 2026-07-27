@@ -1,5 +1,9 @@
 type CheckResult = { ok: true; exp: number } | { ok: false }
 
+// 32-bit setTimeout ceiling: delays >= 2^31 ms get clamped to ~1 ms by browsers,
+// causing an immediate re-arm loop. Cap to 24 h (well below the ceiling).
+const MAX_DELAY_MS = 86_400_000
+
 export function startSessionGuard(deps: {
   check: () => Promise<CheckResult>
   onExpired: () => void
@@ -19,7 +23,10 @@ export function startSessionGuard(deps: {
       return
     }
     if (expiryTimer) clearTimeout(expiryTimer)
-    const milliseconds = Math.max(0, (result.exp - 60 - now()) * 1000)
+    const delaySeconds = result.exp - 60 - now()
+    // skip scheduling if exp is missing, non-finite, or already past — other triggers cover those cases
+    if (!Number.isFinite(delaySeconds) || delaySeconds <= 0) return
+    const milliseconds = Math.min(MAX_DELAY_MS, delaySeconds * 1000)
     expiryTimer = setTimeout(() => { void runCheck() }, milliseconds)
   }
 

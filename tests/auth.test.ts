@@ -36,4 +36,59 @@ describe('startSessionGuard', () => {
     expect(check).toHaveBeenCalledTimes(callsBeforeVisibility + 1)
     guard.stop()
   })
+
+  it('schedules exactly one check when the session expires a month out (32-bit setTimeout ceiling)', async () => {
+    const delays: number[] = []
+    const originalSetTimeout = globalThis.setTimeout
+
+    try {
+      globalThis.setTimeout = ((fn: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+        if (typeof delay === 'number') {
+          delays.push(delay)
+          const clamped = delay >= 2 ** 31 ? 1 : delay
+          return originalSetTimeout(fn, clamped, ...args)
+        }
+        return originalSetTimeout(fn, delay, ...args)
+      }) as unknown as typeof setTimeout
+
+      const nowSeconds = 1_753_600_000
+      const check = vi.fn(async () => ({
+        ok: true as const,
+        exp: nowSeconds + 30 * 24 * 3600,
+      }))
+      const guard = startSessionGuard({ check, onExpired: vi.fn(), now: () => nowSeconds })
+
+      await vi.advanceTimersByTimeAsync(0)
+
+      await vi.advanceTimersByTimeAsync(10_000)
+      await vi.advanceTimersByTimeAsync(10_000)
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      expect(check).toHaveBeenCalledTimes(1)
+      expect(delays.every(d => d < 2_147_483_647)).toBe(true)
+
+      guard.stop()
+    } finally {
+      globalThis.setTimeout = originalSetTimeout
+    }
+  })
+
+  it('does not self-repeat when exp is missing, non-finite, or already past', async () => {
+    const nowSeconds = 1_753_600_000
+    for (const value of [undefined as unknown as number, Number.NaN, nowSeconds - 100]) {
+      const check = vi.fn(async () => ({ ok: true as const, exp: value }))
+      const onExpired = vi.fn()
+      const guard = startSessionGuard({ check, onExpired, now: () => nowSeconds })
+
+      await vi.advanceTimersByTimeAsync(0)   // startup check = 1 call
+      await vi.advanceTimersByTimeAsync(10_000)
+      await vi.advanceTimersByTimeAsync(10_000)
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      expect(check, `exp=${String(value)}`).toHaveBeenCalledTimes(1)
+      expect(onExpired, `exp=${String(value)}`).not.toHaveBeenCalled()
+
+      guard.stop()
+    }
+  })
 })
