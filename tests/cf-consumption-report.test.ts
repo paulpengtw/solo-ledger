@@ -6,36 +6,36 @@ import { aggregateReport } from '../scripts/cf-consumption-report.mjs'
 const BASE_NOW = new Date('2026-07-27T03:30:00Z')
 
 // Main fixture: four hours spanning two UTC calendar days.
-//   Yesterday T23 : 30 total (30 × 200) — before today 00:00 UTC
-//   Today T00     : 120 total (80 × 200, 40 × 500)
-//   Today T01     : 40,000 total (all 200) — simulates a loop spike
-//   Today T02     : 55 total (50 × 200, 5 × 404)
+//   Yesterday T23 : 30 total (30 × success) — before today 00:00 UTC
+//   Today T00     : 120 total (80 × success, 40 × scriptThrewException)
+//   Today T01     : 40,000 total (all success) — simulates a loop spike
+//   Today T02     : 55 total (50 × success, 5 × exceededCpu)
 //
 // Rolling 24 h total  : 40,205
 // Today's total (UTC) : 40,175  (T00 + T01 + T02 only)
 const fixture = [
   {
-    dimensions: { datetimeHour: '2026-07-26T23:00:00Z', scriptName: 'solo-ledger', status: 200 },
+    dimensions: { datetimeHour: '2026-07-26T23:00:00Z', scriptName: 'solo-ledger', status: 'success' },
     sum: { requests: 30 },
   },
   {
-    dimensions: { datetimeHour: '2026-07-27T00:00:00Z', scriptName: 'solo-ledger', status: 200 },
+    dimensions: { datetimeHour: '2026-07-27T00:00:00Z', scriptName: 'solo-ledger', status: 'success' },
     sum: { requests: 80 },
   },
   {
-    dimensions: { datetimeHour: '2026-07-27T00:00:00Z', scriptName: 'solo-ledger', status: 500 },
+    dimensions: { datetimeHour: '2026-07-27T00:00:00Z', scriptName: 'solo-ledger', status: 'scriptThrewException' },
     sum: { requests: 40 },
   },
   {
-    dimensions: { datetimeHour: '2026-07-27T01:00:00Z', scriptName: 'solo-ledger', status: 200 },
+    dimensions: { datetimeHour: '2026-07-27T01:00:00Z', scriptName: 'solo-ledger', status: 'success' },
     sum: { requests: 40_000 },
   },
   {
-    dimensions: { datetimeHour: '2026-07-27T02:00:00Z', scriptName: 'solo-ledger', status: 200 },
+    dimensions: { datetimeHour: '2026-07-27T02:00:00Z', scriptName: 'solo-ledger', status: 'success' },
     sum: { requests: 50 },
   },
   {
-    dimensions: { datetimeHour: '2026-07-27T02:00:00Z', scriptName: 'solo-ledger', status: 404 },
+    dimensions: { datetimeHour: '2026-07-27T02:00:00Z', scriptName: 'solo-ledger', status: 'exceededCpu' },
     sum: { requests: 5 },
   },
 ]
@@ -45,18 +45,34 @@ const fixture = [
 // test would fail if the .sort() call were removed from aggregateReport.
 const outOfOrderFixture = [
   {
-    dimensions: { datetimeHour: '2026-07-27T02:00:00Z', scriptName: 'solo-ledger', status: 200 },
+    dimensions: { datetimeHour: '2026-07-27T02:00:00Z', scriptName: 'solo-ledger', status: 'success' },
     sum: { requests: 55 },
   },
   {
-    dimensions: { datetimeHour: '2026-07-27T00:00:00Z', scriptName: 'solo-ledger', status: 200 },
+    dimensions: { datetimeHour: '2026-07-27T00:00:00Z', scriptName: 'solo-ledger', status: 'success' },
     sum: { requests: 120 },
   },
   {
-    dimensions: { datetimeHour: '2026-07-27T01:00:00Z', scriptName: 'solo-ledger', status: 200 },
+    dimensions: { datetimeHour: '2026-07-27T01:00:00Z', scriptName: 'solo-ledger', status: 'success' },
     sum: { requests: 40_000 },
   },
 ]
+
+describe('module loading', () => {
+  it('imports when process.argv[1] is missing', async () => {
+    const originalArgv1 = process.argv[1]
+    const moduleUrl = new URL('../scripts/cf-consumption-report.mjs?noArgv=1', import.meta.url)
+
+    try {
+      process.argv[1] = undefined as unknown as string
+      const reportModule = await import(/* @vite-ignore */ moduleUrl.href)
+
+      expect(reportModule.aggregateReport).toBeTypeOf('function')
+    } finally {
+      process.argv[1] = originalArgv1 as string
+    }
+  })
+})
 
 describe('aggregateReport', () => {
   it('returns totalRequests = 40,205 (rolling 24 h including yesterday T23)', () => {
@@ -97,11 +113,61 @@ describe('aggregateReport', () => {
     expect(report.hourlyRows[3]?.requests).toBe(55)     // today T02
   })
 
-  it('aggregates status breakdown within each hour', () => {
+  it('aggregates outcome breakdown within each hour', () => {
     const report = aggregateReport(fixture, { now: BASE_NOW })
-    expect(report.hourlyRows[0]?.byStatus).toEqual({ '200': 30 })
-    expect(report.hourlyRows[1]?.byStatus).toEqual({ '200': 80, '500': 40 })
-    expect(report.hourlyRows[3]?.byStatus).toEqual({ '200': 50, '404': 5 })
+    expect(report.hourlyRows[0]?.byOutcome).toEqual({ success: 30 })
+    expect(report.hourlyRows[1]?.byOutcome).toEqual({ success: 80, scriptThrewException: 40 })
+    expect(report.hourlyRows[3]?.byOutcome).toEqual({ success: 50, exceededCpu: 5 })
+  })
+
+  it('orders outcome breakdown by request count descending', () => {
+    const groups = [
+      {
+        dimensions: { datetimeHour: '2026-07-27T05:00:00Z', scriptName: 'solo-ledger', status: 'scriptThrewException' },
+        sum: { requests: 4 },
+      },
+      {
+        dimensions: { datetimeHour: '2026-07-27T05:00:00Z', scriptName: 'solo-ledger', status: 'success' },
+        sum: { requests: 12 },
+      },
+      {
+        dimensions: { datetimeHour: '2026-07-27T05:00:00Z', scriptName: 'solo-ledger', status: 'exceededCpu' },
+        sum: { requests: 7 },
+      },
+    ]
+
+    const report = aggregateReport(groups)
+
+    expect(Object.keys(report.hourlyRows[0]!.byOutcome)).toEqual([
+      'success',
+      'exceededCpu',
+      'scriptThrewException',
+    ])
+  })
+
+  it('orders equal-count outcomes alphabetically', () => {
+    const groups = [
+      {
+        dimensions: { datetimeHour: '2026-07-27T05:00:00Z', scriptName: 'solo-ledger', status: 'success' },
+        sum: { requests: 10 },
+      },
+      {
+        dimensions: { datetimeHour: '2026-07-27T05:00:00Z', scriptName: 'solo-ledger', status: 'exceededMemory' },
+        sum: { requests: 15 },
+      },
+      {
+        dimensions: { datetimeHour: '2026-07-27T05:00:00Z', scriptName: 'solo-ledger', status: 'canceled' },
+        sum: { requests: 10 },
+      },
+    ]
+
+    const report = aggregateReport(groups)
+
+    expect(Object.keys(report.hourlyRows[0]!.byOutcome)).toEqual([
+      'exceededMemory',
+      'canceled',
+      'success',
+    ])
   })
 
   it('groups a missing status dimension under "unknown"', () => {
@@ -112,7 +178,7 @@ describe('aggregateReport', () => {
       },
     ]
     const report = aggregateReport(withMissingStatus)
-    expect(report.hourlyRows[0]?.byStatus).toEqual({ unknown: 7 })
+    expect(report.hourlyRows[0]?.byOutcome).toEqual({ unknown: 7 })
   })
 
   it('collects unique script names', () => {

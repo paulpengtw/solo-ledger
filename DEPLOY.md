@@ -371,7 +371,7 @@ scopes listed in `.env.example`; without it the request returns
 
 **What the report shows:**
 
-- An hourly table: UTC hour, request count, and HTTP status breakdown.
+- An hourly table: UTC hour, request count, and invocation outcome breakdown.
   The table covers the rolling last 24 hours and may span two UTC calendar days.
 - Two totals: rolling 24 h request count, and today-so-far count as a percentage
   of the 100,000 daily free-tier request cap. The cap resets at 00:00 UTC; the
@@ -395,7 +395,7 @@ a single-operator ledger.
 
 Because this project owns no Cloudflare zone, no per-URL-path dimension is
 available in the GraphQL Analytics API. The report groups by Pages Function
-(`scriptName`), HTTP status, and UTC hour — not by `/api/<action>`. The app has
+(`scriptName`), invocation outcome, and UTC hour — not by `/api/<action>`. The app has
 exactly one function serving `/api/[action]`, so an hourly spike in total
 requests IS the loop signal; true per-action breakdown would require the paid
 Cloudflare Logs product.

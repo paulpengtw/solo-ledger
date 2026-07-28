@@ -2,7 +2,7 @@ export interface GraphQLGroup {
   dimensions: {
     datetimeHour: string
     scriptName: string
-    status?: number
+    status?: string
   }
   sum: {
     requests: number
@@ -12,7 +12,7 @@ export interface GraphQLGroup {
 export interface HourlyRow {
   hour: string
   requests: number
-  byStatus: Record<string, number>
+  byOutcome: Record<string, number>
 }
 
 export interface ConsumptionReport {

@@ -12,7 +12,8 @@
  * CAVEAT (pages.dev-only project):
  *   Because this project owns no zone, no per-URL-path dimension is available in
  *   the GraphQL Analytics API. The report is per Pages Function (scriptName) by
- *   hour and HTTP status. The app has exactly one function handling /api/[action],
+ *   hour and invocation outcome (observed: success, scriptThrewException,
+ *   exceededCpu, exceededMemory, canceled, unknown). The app has exactly one function handling /api/[action],
  *   and auth-check is the only automatically-issued action, so an hourly spike in
  *   "total requests" IS the loop signal. True per-action breakdown would require
  *   the paid Cloudflare Logs product. Hourly buckets are UTC-aligned; the 100,000/day cap resets per UTC calendar day at 00:00 UTC. A rolling 24 h query window may therefore span two billing days — the cap percentage reflects today-so-far, not the full window.
@@ -25,31 +26,31 @@ const FREE_DAILY_CAP = 100_000
 /**
  * Aggregate raw GraphQL group records into a structured report.
  *
- * @param {Array<{dimensions: {datetimeHour: string, scriptName: string, status: number}, sum: {requests: number}}>} groups
+ * @param {Array<{dimensions: {datetimeHour: string, scriptName: string, status: string}, sum: {requests: number}}>} groups Cloudflare groups whose status dimension is an invocation outcome.
  * @param {{ cap?: number, now?: Date }} options
- * @returns {{ totalRequests: number, todayRequests: number, capPercent: number, hourlyRows: Array<{hour: string, requests: number, byStatus: Record<string, number>}>, scriptNames: string[] }}
+ * @returns {{ totalRequests: number, todayRequests: number, capPercent: number, hourlyRows: Array<{hour: string, requests: number, byOutcome: Record<string, number>}>, scriptNames: string[] }}
  */
 export function aggregateReport(groups, { cap = FREE_DAILY_CAP, now = new Date() } = {}) {
   // Bucket by hour
-  /** @type {Map<string, {requests: number, byStatus: Record<string, number>}>} */
+  /** @type {Map<string, {requests: number, byOutcome: Record<string, number>}>} */
   const byHour = new Map()
   const scriptNameSet = new Set()
 
   for (const group of groups) {
     const { datetimeHour, scriptName, status } = group.dimensions
     const requests = group.sum.requests
-    const statusKey = String(status ?? 'unknown')
+    const outcomeKey = String(status ?? 'unknown')
 
     scriptNameSet.add(scriptName)
 
     const existing = byHour.get(datetimeHour)
     if (existing) {
       existing.requests += requests
-      existing.byStatus[statusKey] = (existing.byStatus[statusKey] ?? 0) + requests
+      existing.byOutcome[outcomeKey] = (existing.byOutcome[outcomeKey] ?? 0) + requests
     } else {
       byHour.set(datetimeHour, {
         requests,
-        byStatus: { [statusKey]: requests },
+        byOutcome: { [outcomeKey]: requests },
       })
     }
   }
@@ -58,10 +59,16 @@ export function aggregateReport(groups, { cap = FREE_DAILY_CAP, now = new Date()
   const sortedHours = Array.from(byHour.keys()).sort()
   const hourlyRows = sortedHours.map(hour => {
     const bucket = byHour.get(hour)
+    const byOutcome = Object.fromEntries(
+      Object.entries(bucket.byOutcome)
+        .sort(([labelA, requestsA], [labelB, requestsB]) =>
+          requestsB - requestsA || labelA.localeCompare(labelB)
+        )
+    )
     return {
       hour,
       requests: bucket.requests,
-      byStatus: bucket.byStatus,
+      byOutcome,
     }
   })
 
@@ -200,18 +207,17 @@ async function main() {
     // Hourly table
     const headerHour = 'Hour (UTC)'.padEnd(18)
     const headerReq  = 'Requests'.padStart(10)
-    const headerStatus = '  Status breakdown'
-    console.log(`${headerHour}${headerReq}${headerStatus}`)
+    const headerOutcome = '  Outcome breakdown'
+    console.log(`${headerHour}${headerReq}${headerOutcome}`)
     console.log('-'.repeat(70))
 
     for (const row of report.hourlyRows) {
       const hourStr = row.hour.replace('T', ' ').slice(0, 16)
       const reqStr = String(row.requests).padStart(10)
-      const statusStr = Object.entries(row.byStatus)
-        .sort(([a], [b]) => Number(a) - Number(b))
-        .map(([s, n]) => `${s}:${n}`)
+      const outcomeStr = Object.entries(row.byOutcome)
+        .map(([outcome, requests]) => `${outcome}:${requests}`)
         .join(' ')
-      console.log(`${hourStr.padEnd(18)}${reqStr}  ${statusStr}`)
+      console.log(`${hourStr.padEnd(18)}${reqStr}  ${outcomeStr}`)
     }
     console.log('-'.repeat(70))
   }
@@ -245,6 +251,7 @@ async function main() {
 }
 
 // Run main() only when executed directly (not when imported as a module)
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+const entrypoint = process.argv[1]
+if (entrypoint && import.meta.url === pathToFileURL(entrypoint).href) {
   main()
 }
