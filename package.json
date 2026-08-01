@@ -10,10 +10,12 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
+    "test:sw": "npm run build && playwright test --config=sw-tests/playwright.config.ts",
     "pages:dev": "npm run build && wrangler pages dev dist"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260726.1",
+    "@playwright/test": "^1.62.1",
     "@types/node": "^26.1.1",
     "jsdom": "^29.1.1",
     "sharp": "^0.35.3",
