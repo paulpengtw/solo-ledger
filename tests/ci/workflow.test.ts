@@ -21,26 +21,29 @@ describe('.github/workflows/ci.yml', () => {
     expect(doc.on.push.branches).toEqual(['main'])
   })
 
-  it('runs npm ci, npm test, and npm run build on Node 26 in that order', () => {
-    const jobs = Object.values(doc.jobs) as any[]
-    const allSteps = jobs.flatMap((job: any) => job.steps as any[])
+  it('pins Node 26 and the exact command sequence of every job', () => {
+    for (const job of Object.values(doc.jobs) as any[]) {
+      const setupNodeStep = (job.steps as any[]).find(
+        (step: any) =>
+          typeof step.uses === 'string' &&
+          step.uses.startsWith('actions/setup-node@'),
+      )
+      expect(setupNodeStep).toBeDefined()
+      expect(setupNodeStep.with['node-version']).toBe('26')
+    }
 
-    const setupNodeStep = allSteps.find(
-      (step: any) =>
-        typeof step.uses === 'string' &&
-        step.uses.startsWith('actions/setup-node@'),
-    )
-    expect(setupNodeStep).toBeDefined()
-    expect(setupNodeStep.with['node-version']).toBe('26')
+    const runsOf = (name: string): string[] =>
+      (doc.jobs[name].steps as any[])
+        .filter((step: any) => typeof step.run === 'string')
+        .map((step: any) => (step.run as string).trim())
 
-    const runSteps = allSteps
-      .filter((step: any) => typeof step.run === 'string')
-      .map((step: any) => (step.run as string).trim())
-
-    expect(runSteps).toHaveLength(3)
-    expect(runSteps[0]).toBe('npm ci')
-    expect(runSteps[1]).toBe('npm test')
-    expect(runSteps[2]).toBe('npm run build')
+    expect(Object.keys(doc.jobs)).toEqual(['build', 'service-worker'])
+    expect(runsOf('build')).toEqual(['npm ci', 'npm test', 'npm run build'])
+    expect(runsOf('service-worker')).toEqual([
+      'npm ci',
+      'npx playwright install --with-deps chromium',
+      'npm run test:sw',
+    ])
   })
 
   it('cancels in-progress runs for pull requests but not for pushes to main', () => {
