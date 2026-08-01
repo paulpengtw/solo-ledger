@@ -351,6 +351,20 @@ Settlement rows are irreversible through the v1 API. In `日記帳`, identify th
 
 If `LEDGER_BACKUP_FOLDER_ID` is set, backups go to that folder. If it is unset, the function creates `Solo Ledger backups` without a name search, stores the new folder ID in that property, and uses it thereafter.
 
+### Service-worker harness
+
+`npm run test:sw` builds the app and drives the real service worker in headless
+Chromium: it serves `dist/` from a local origin, registers the worker, then
+asserts which requests reach the server, what CacheStorage holds, what a
+returning client receives after a simulated redeploy, and that an
+authenticated client still opens the app offline. It can also simulate an
+unauthenticated origin (Access-style redirect on every navigation), so
+session-expiry behaviour is testable without a real Cloudflare Access session.
+The command exits non-zero on failure and runs unattended in CI as the
+`service-worker` job beside the unit suite — a separate job because it needs a
+Chromium download (`npx playwright install --with-deps chromium`) that the
+unit tests don't.
+
 ### Cloudflare request consumption report
 
 `scripts/cf-consumption-report.mjs` prints a 24-hour view of Pages Function

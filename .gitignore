@@ -7,3 +7,5 @@ dist/
 !.env.example
 .clasprc.json
 .clasp.json
+test-results/
+playwright-report/
