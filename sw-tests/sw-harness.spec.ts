@@ -39,15 +39,45 @@ test('positive control: the counter registers two when one navigation causes two
   expect(server.requestsFor('/api/ping')).toBe(2)
 })
 
-test('the harness observes a navigation answered from cache without reaching the server', async ({ page }) => {
+test('a navigation consults the network even when the shell is cached', async ({ page }) => {
   await activateServiceWorker(page)
   server.clearLog()
 
   await page.reload()
 
-  // Deliberately provoked wrong behaviour (issue #40): the cached shell answers
-  // the navigation and the network is never consulted.
-  expect(server.requestsFor('/')).toBe(0)
+  expect(server.requestsFor('/')).toBe(1)
+})
+
+test('an expired session lands a navigation on the Access login, not the cached shell', async ({ page }) => {
+  await activateServiceWorker(page)
+  server.setAuthenticated(false)
+
+  await page.reload()
+
+  await expect(page).toHaveTitle('Access login')
+  expect(page.url()).toContain('/cdn-cgi/access/login')
+})
+
+test('requests to /cdn-cgi/ paths are never answered by the service worker', async ({ page }) => {
+  await activateServiceWorker(page)
+
+  await page.evaluate(() => fetch('/cdn-cgi/access/login/probe'))
+  await page.evaluate(() => fetch('/cdn-cgi/access/login/probe'))
+
+  expect(server.requestsFor('/cdn-cgi/access/login/probe')).toBe(2)
+
+  const cachedPaths = await page.evaluate(async () => {
+    const keys = await caches.keys()
+    const paths: string[] = []
+    for (const key of keys) {
+      const cache = await caches.open(key)
+      for (const entry of await cache.keys()) {
+        paths.push(new URL(entry.url).pathname)
+      }
+    }
+    return paths
+  })
+  expect(cachedPaths.filter(path => path.startsWith('/cdn-cgi/'))).toEqual([])
 })
 
 test('the harness can assert CacheStorage contents after activation', async ({ page }) => {
@@ -64,7 +94,7 @@ test('the harness can assert CacheStorage contents after activation', async ({ p
   expect(stored.paths).toContain('/')
 })
 
-test('the harness can deploy a new version to a client that still holds the old one cached', async ({ page, browser }) => {
+test('a returning client receives a newly deployed version', async ({ page, browser }) => {
   await activateServiceWorker(page)
 
   server.deploy('v2')
@@ -77,14 +107,10 @@ test('the harness can deploy a new version to a client that still holds the old 
     .toHaveAttribute('content', 'v2')
   await freshContext.close()
 
-  // Deliberately provoked wrong behaviour (issue #40): the returning client
-  // never receives v2 — not one reload late, never.
+  // The returning client receives the new version on its next reload.
   await page.reload()
   await expect(page.locator('meta[name="deploy-version"]'))
-    .toHaveAttribute('content', 'v1')
-  await page.reload()
-  await expect(page.locator('meta[name="deploy-version"]'))
-    .toHaveAttribute('content', 'v1')
+    .toHaveAttribute('content', 'v2')
 })
 
 test('the harness can simulate an unauthenticated origin without a real Access session', async ({ browser }) => {
@@ -110,4 +136,18 @@ test('offline instrument: an authenticated client still opens the app with no ne
 
   await expect(page).toHaveTitle('Solo Ledger')
   await expect(page.locator('#submit-btn')).toBeVisible()
+})
+
+test('the offline fallback shell tracks the newest deployed version', async ({ page, context }) => {
+  await activateServiceWorker(page)
+  await page.reload()
+
+  server.deploy('v2')
+  await page.reload()
+
+  await context.setOffline(true)
+  await page.reload()
+
+  await expect(page.locator('meta[name="deploy-version"]'))
+    .toHaveAttribute('content', 'v2')
 })
