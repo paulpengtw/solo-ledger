@@ -668,3 +668,80 @@ describe('visibility auth flow', () => {
     expect(document.querySelector('#reauth-prompt')).toBeNull()
   })
 })
+
+describe('expired session during a write', () => {
+  const AUTH_FAILURE = { ok: false, kind: 'auth', message: '登入已過期' }
+
+  it('a failed 記帳 reports the expired session and offers re-login, not a network error', async () => {
+    apiMocks.submitTransaction.mockResolvedValueOnce(AUTH_FAILURE)
+    mount()
+    fillExpense()
+
+    click('#submit-btn')
+
+    await vi.waitFor(() => {
+      expect(document.querySelector('#status-message')?.textContent)
+        .toContain('登入已過期')
+    })
+    expect(document.querySelector('#status-message')?.textContent)
+      .not.toContain('沒有網路連線')
+    expect(document.querySelector('#reauth-prompt')).not.toBeNull()
+    expect(document.querySelector('#reauth-btn')?.textContent).toBe('重新登入')
+  })
+
+  it('a failed 結清 reports the expired session and offers re-login', async () => {
+    apiMocks.settleReceivable.mockResolvedValueOnce(AUTH_FAILURE)
+    mount()
+    click('[data-view="outstanding"]')
+    await vi.waitFor(() => {
+      expect(document.querySelector('[data-settle-txn-id="receivable-open-001"]'))
+        .not.toBeNull()
+    })
+    click('[data-settle-txn-id="receivable-open-001"]')
+
+    click('#confirm-settle')
+
+    await vi.waitFor(() => {
+      expect(document.querySelector('#settle-status')?.textContent)
+        .toContain('登入已過期')
+    })
+    expect(document.querySelector('#reauth-prompt')).not.toBeNull()
+  })
+
+  it('a failed 沖銷 reports the expired session and offers re-login', async () => {
+    apiMocks.reverseTransaction.mockResolvedValueOnce(AUTH_FAILURE)
+    mount()
+    click('[data-view="recent"]')
+    await vi.waitFor(() => {
+      expect(document.querySelector('[data-reverse-txn-id="txn-recent"]'))
+        .not.toBeNull()
+    })
+    click('[data-reverse-txn-id="txn-recent"]')
+
+    click('#confirm-reverse')
+
+    await vi.waitFor(() => {
+      expect(document.querySelector('#reverse-status')?.textContent)
+        .toContain('登入已過期')
+    })
+    expect(document.querySelector('#reauth-prompt')).not.toBeNull()
+  })
+
+  it('a genuine offline failure keeps the network message and offers no re-login prompt', async () => {
+    apiMocks.submitTransaction.mockResolvedValueOnce({
+      ok: false,
+      kind: 'network',
+      message: '沒有網路連線，請再試一次',
+    })
+    mount()
+    fillExpense()
+
+    click('#submit-btn')
+
+    await vi.waitFor(() => {
+      expect(document.querySelector('#status-message')?.textContent)
+        .toContain('沒有網路連線')
+    })
+    expect(document.querySelector('#reauth-prompt')).toBeNull()
+  })
+})
