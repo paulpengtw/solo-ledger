@@ -100,6 +100,80 @@ describe('submitTransaction', () => {
   })
 })
 
+describe('expired-session classification', () => {
+  const opaqueRedirect = (): Response => ({
+    type: 'opaqueredirect',
+    status: 0,
+    ok: false,
+    json: async () => { throw new TypeError('opaque response has no body') },
+  }) as unknown as Response
+
+  it('sends every write in the programmatic shape Access answers with 401, never following redirects', async () => {
+    const fetchFn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>
+      expect(headers['x-requested-with']).toBe('XMLHttpRequest')
+      expect(init?.redirect).toBe('manual')
+      return jsonResponse(200, { ok: true, txn_id: KEY })
+    }) as unknown as typeof fetch
+
+    await expect(submitTransaction(TRANSACTION, KEY, fetchFn)).resolves.toEqual({
+      ok: true,
+      alreadyRecorded: false,
+    })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('classifies the unfollowed Access redirect on create_transaction as an expired session', async () => {
+    const fetchFn = (async () => opaqueRedirect()) as typeof fetch
+
+    await expect(submitTransaction(TRANSACTION, KEY, fetchFn)).resolves.toEqual({
+      ok: false,
+      kind: 'auth',
+      message: '登入已過期',
+    })
+  })
+
+  it('classifies the unfollowed Access redirect on settle as an expired session', async () => {
+    const fetchFn = (async () => opaqueRedirect()) as typeof fetch
+
+    await expect(ApiModule.settleReceivable({
+      txn_id: 'receivable-open-001',
+      account: '錢包',
+      date: '2026-07-27',
+      amount: 200,
+    }, KEY, fetchFn)).resolves.toEqual({
+      ok: false,
+      kind: 'auth',
+      message: '登入已過期',
+    })
+  })
+
+  it('classifies the unfollowed Access redirect on reverse_transaction as an expired session', async () => {
+    const fetchFn = (async () => opaqueRedirect()) as typeof fetch
+
+    await expect(ApiModule.reverseTransaction({
+      txn_id: 'txn-recent',
+      date: '2026-07-27',
+    }, KEY, fetchFn)).resolves.toEqual({
+      ok: false,
+      kind: 'auth',
+      message: '登入已過期',
+    })
+  })
+
+  it('keeps a genuine offline failure distinct: fetch rejection stays a network error', async () => {
+    const fetchFn = (async () => {
+      throw new TypeError('Failed to fetch')
+    }) as typeof fetch
+
+    await expect(submitTransaction(TRANSACTION, KEY, fetchFn)).resolves.toEqual({
+      ok: false,
+      kind: 'network',
+      message: '沒有網路連線，請再試一次',
+    })
+  })
+})
+
 describe('loadOptions', () => {
   it('returns localStorage cache synchronously then refreshes and updates it in the background', async () => {
     const storage = memoryStorage()

@@ -83,8 +83,13 @@ async function post(
   try {
     return await fetchFn(path, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        // Marks the call as programmatic so Cloudflare Access answers 401, not a 302.
+        'x-requested-with': 'XMLHttpRequest',
+      },
       body: JSON.stringify(body),
+      redirect: 'manual',
       signal: controller.signal,
     })
   } finally {
@@ -113,7 +118,7 @@ export async function submitTransaction(
     }
   }
 
-  if (response.status === 401) {
+  if (response.status === 401 || response.type === 'opaqueredirect') {
     return { ok: false, kind: 'auth', message: '登入已過期' }
   }
 
@@ -255,7 +260,7 @@ export async function settleReceivable(
     }
   }
 
-  if (response.status === 401) {
+  if (response.status === 401 || response.type === 'opaqueredirect') {
     return { ok: false, kind: 'auth', message: '登入已過期' }
   }
 
@@ -301,7 +306,7 @@ export async function reverseTransaction(
     }
   }
 
-  if (response.status === 401) {
+  if (response.status === 401 || response.type === 'opaqueredirect') {
     return { ok: false, kind: 'auth', message: '登入已過期' }
   }
 
