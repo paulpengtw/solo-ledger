@@ -135,7 +135,10 @@ test('offline instrument: an authenticated client still opens the app with no ne
   await page.reload()
 
   await expect(page).toHaveTitle('Solo Ledger')
-  await expect(page.locator('#submit-btn')).toBeVisible()
+  // The stepped flow opens on the amount step; 記帳 lives in the 確認 step's
+  // panel, display:none until that step activates — attached, never visible.
+  await expect(page.getByRole('heading', { name: '金額多少？' })).toBeVisible()
+  await expect(page.locator('#submit-btn')).toBeAttached()
 })
 
 test('the offline fallback shell tracks the newest deployed version', async ({ page, context }) => {
