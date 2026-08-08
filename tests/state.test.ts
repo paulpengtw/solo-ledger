@@ -3,8 +3,12 @@ import {
   beginSubmit,
   buildTransaction,
   canSubmit,
+  goBack,
+  goNext,
   initialState,
+  jumpTo,
   pressKey,
+  resetForNext,
   selectAccount,
   selectCategory,
   selectToAccount,
@@ -12,6 +16,7 @@ import {
   setIou,
   setPayee,
   setType,
+  stepSequence,
   submitFailed,
   type FormState,
 } from '../src/state'
@@ -54,6 +59,76 @@ describe('per-type field guards', () => {
       expect(state.iou).toBeNull()
     },
   )
+})
+
+describe('entry steps', () => {
+  it.each([
+    ['支出', ['amount', 'account', 'category', 'payee', 'details']],
+    ['收入', ['amount', 'account', 'category', 'payee', 'details']],
+    ['轉帳', ['amount', 'account', 'toAccount', 'details']],
+  ] as const)('derives the %s step sequence', (type, expected) => {
+    const state = setType(initialState('2026-07-27'), type)
+
+    expect(stepSequence(state)).toEqual(expected)
+  })
+
+  it('omits category for a 支出 with 應收', () => {
+    const state = setIou(initialState('2026-07-27'), '應收')
+
+    expect(stepSequence(state)).toEqual([
+      'amount',
+      'account',
+      'payee',
+      'details',
+    ])
+  })
+
+  it('clamps next and back navigation at both ends', () => {
+    const initial = initialState('2026-07-27')
+    const details = jumpTo(initial, 'details')
+
+    expect(goBack(initial)).toEqual(initial)
+    expect(goNext(details)).toEqual(details)
+    expect(goNext(jumpTo(initial, 'account')).step).toBe('category')
+    expect(goBack(jumpTo(initial, 'account')).step).toBe('amount')
+  })
+
+  it('preserves submission state while navigating', () => {
+    const state: FormState = {
+      ...jumpTo(initialState('2026-07-27'), 'account'),
+      status: 'error',
+      errorMessage: '連線失敗',
+      idempotencyKey: 'uuid-1',
+    }
+
+    expect(goNext(state)).toMatchObject({
+      step: 'category',
+      status: 'error',
+      errorMessage: '連線失敗',
+      idempotencyKey: 'uuid-1',
+    })
+  })
+
+  it('ignores a jump to a step outside the current sequence', () => {
+    const state = setType(initialState('2026-07-27'), '轉帳')
+
+    expect(jumpTo(state, 'category')).toEqual(state)
+  })
+
+  it('falls back to amount when changing type invalidates category', () => {
+    const state = jumpTo(initialState('2026-07-27'), 'category')
+
+    expect(setType(state, '轉帳').step).toBe('amount')
+  })
+
+  it('resets the next entry at the amount step', () => {
+    const state = jumpTo(
+      setType(initialState('2026-07-27'), '轉帳'),
+      'toAccount',
+    )
+
+    expect(resetForNext(state, '2026-07-28').step).toBe('amount')
+  })
 })
 
 describe('submit gating and payload construction', () => {

@@ -64,8 +64,10 @@ function input(selector: string, value: string): void {
 
 function fillExpense(description = '晚餐'): void {
   for (const key of ['2', '6', '0']) click(`#keypad [data-key="${key}"]`)
+  click('#next-amount')
   click('#account-picker [data-account="錢包"]')
   click('#category-grid [data-category="餐飲"]')
+  click('.step-panel[data-step="payee"] .step-next')
   input('#description-input', description)
 }
 
@@ -99,6 +101,114 @@ afterEach(() => {
 })
 
 describe('selection-first entry form', () => {
+  it('starts at amount, advances from account to category, and uses the journal strip', () => {
+    mount()
+
+    const panels = [...document.querySelectorAll<HTMLElement>('.step-panel')]
+    expect(document.querySelector<HTMLElement>('#entry-view')?.dataset['activeStep'])
+      .toBe('amount')
+    expect(panels.filter(panel => panel.getAttribute('aria-hidden') === 'false'))
+      .toHaveLength(1)
+    expect(document.querySelector<HTMLElement>('[data-step="amount"]')
+      ?.getAttribute('aria-hidden')).toBe('false')
+
+    for (const key of ['2', '6', '0']) click(`#keypad [data-key="${key}"]`)
+    click('#next-amount')
+    click('#account-picker [data-account="錢包"]')
+
+    expect(document.querySelector<HTMLElement>('#entry-view')?.dataset['activeStep'])
+      .toBe('category')
+
+    click('#journal-strip [data-strip-step="amount"]')
+
+    expect(document.querySelector<HTMLElement>('#entry-view')?.dataset['activeStep'])
+      .toBe('amount')
+  })
+
+  it('scrolls the active journal chip after a step change', () => {
+    const scrollIntoView = vi.fn()
+    const prototype = HTMLElement.prototype as unknown as Record<string, unknown>
+    const original = Object.getOwnPropertyDescriptor(prototype, 'scrollIntoView')
+    Object.defineProperty(prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    })
+
+    try {
+      mount()
+      for (const key of ['2', '6', '0']) click(`#keypad [data-key="${key}"]`)
+      click('#next-amount')
+      click('#account-picker [data-account="錢包"]')
+      click('#journal-strip [data-strip-step="amount"]')
+
+      expect(scrollIntoView).toHaveBeenCalledWith({
+        block: 'nearest',
+        inline: 'nearest',
+      })
+      expect(scrollIntoView).toHaveBeenCalledTimes(3)
+    } finally {
+      if (original) {
+        Object.defineProperty(prototype, 'scrollIntoView', original)
+      } else {
+        delete prototype['scrollIntoView']
+      }
+    }
+  })
+
+  it('step-guard class is added on step change and removed after 300ms', () => {
+    vi.useFakeTimers()
+    try {
+      mount()
+      click('#keypad [data-key="2"]')
+      click('#next-amount')
+
+      const entryView = document.getElementById('entry-view')!
+      expect(entryView.classList.contains('step-guard')).toBe(true)
+
+      vi.advanceTimersByTime(300)
+      expect(entryView.classList.contains('step-guard')).toBe(false)
+
+      unmount?.()
+      unmount = undefined
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keyboard-open class tracks visualViewport height', () => {
+    const viewport = new EventTarget() as EventTarget & { height: number }
+    viewport.height = window.innerHeight
+    const removeEventListener = vi.spyOn(viewport, 'removeEventListener')
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: viewport,
+    })
+
+    try {
+      mount()
+
+      const app = document.getElementById('app')!
+      expect(app.classList.contains('keyboard-open')).toBe(false)
+
+      viewport.height = Math.floor(window.innerHeight * 0.5)
+      viewport.dispatchEvent(new Event('resize'))
+      expect(app.classList.contains('keyboard-open')).toBe(true)
+
+      viewport.height = window.innerHeight
+      viewport.dispatchEvent(new Event('resize'))
+      expect(app.classList.contains('keyboard-open')).toBe(false)
+
+      unmount?.()
+      unmount = undefined
+      expect(removeEventListener).toHaveBeenCalledWith(
+        'resize',
+        expect.any(Function),
+      )
+    } finally {
+      delete (window as unknown as { visualViewport?: unknown }).visualViewport
+    }
+  })
+
   it('renders accounts grouped by 子類型, per-type categories, and tappable 對象 suggestions', () => {
     mount()
 
@@ -134,6 +244,7 @@ describe('selection-first entry form', () => {
   it('posts the exact transaction contract with a UUID idempotencyKey', async () => {
     mount()
     fillExpense()
+    click('#journal-strip [data-strip-step="payee"]')
     click('#payee-suggestions [data-payee="全聯"]')
 
     click('#submit-btn')
@@ -154,6 +265,7 @@ describe('selection-first entry form', () => {
   it('selects 代墊 應收 by hiding and clearing category and requiring 對象', async () => {
     mount()
     fillExpense()
+    click('#journal-strip [data-strip-step="payee"]')
 
     const toggle = document.querySelector<HTMLButtonElement>(
       '#iou-toggle [data-iou="應收"]',
@@ -168,6 +280,7 @@ describe('selection-first entry form', () => {
     expect(document.querySelector<HTMLButtonElement>('#submit-btn')?.disabled).toBe(true)
 
     input('#payee-input', '阿明')
+    click('.step-panel[data-step="payee"] .step-next')
     click('#submit-btn')
 
     await vi.waitFor(() => expect(apiMocks.submitTransaction).toHaveBeenCalledTimes(1))
@@ -186,6 +299,7 @@ describe('selection-first entry form', () => {
   it('selects 應付 while keeping category and requiring 對象', async () => {
     mount()
     fillExpense()
+    click('#journal-strip [data-strip-step="payee"]')
 
     const toggle = document.querySelector<HTMLButtonElement>(
       '#iou-toggle [data-iou="應付"]',
@@ -199,6 +313,7 @@ describe('selection-first entry form', () => {
     expect(document.querySelector<HTMLButtonElement>('#submit-btn')?.disabled).toBe(true)
 
     input('#payee-input', '阿明')
+    click('.step-panel[data-step="payee"] .step-next')
     click('#submit-btn')
 
     await vi.waitFor(() => expect(apiMocks.submitTransaction).toHaveBeenCalledTimes(1))
@@ -218,6 +333,7 @@ describe('selection-first entry form', () => {
   it('toggles iou off without clearing category or 對象', () => {
     mount()
     fillExpense()
+    click('#journal-strip [data-strip-step="payee"]')
     input('#payee-input', '阿明')
 
     const toggle = document.querySelector<HTMLButtonElement>(
@@ -253,12 +369,14 @@ describe('selection-first entry form', () => {
     await new Promise(resolve => setTimeout(resolve, 650))
 
     fillExpense('代墊午餐')
+    click('#journal-strip [data-strip-step="payee"]')
     const toggle = document.querySelector<HTMLButtonElement>(
       '#iou-toggle [data-iou="應收"]',
     )
     expect(toggle).not.toBeNull()
     toggle?.click()
     input('#payee-input', '阿明')
+    click('.step-panel[data-step="payee"] .step-next')
     click('#submit-btn')
     await vi.waitFor(() => expect(apiMocks.submitTransaction).toHaveBeenCalledTimes(2))
 

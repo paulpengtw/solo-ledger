@@ -94,6 +94,7 @@ export function mountApp(
   let options: LedgerOptions | null = null
   let sessionSchemaVersion: string | null = null
   let resetTimer: ReturnType<typeof setTimeout> | null = null
+  let guardTimer: ReturnType<typeof setTimeout> | null = null
   let recentRequest = 0
   let recentTransactions: LedgerTransaction[] = []
   let receivablesRequest = 0
@@ -117,86 +118,123 @@ export function mountApp(
     controlsLocked: boolean
   } | null = null
   let stopped = false
+  let previousStep: State.EntryStep | null = null
+  let handleVisualViewportResize: (() => void) | null = null
 
   // 說明 must stay required: speech-to-text gives every journal row a narrative.
   root.innerHTML = `
-    <header class="app-header">
-      <p class="eyebrow">SOLO LEDGER</p>
-      <h1 id="page-title">快速記帳</h1>
-    </header>
     <nav id="view-switch" class="segmented" aria-label="畫面">
       <button type="button" data-view="entry" class="selected" aria-pressed="true">記帳</button>
       <button type="button" data-view="recent" aria-pressed="false">最近紀錄</button>
       <button type="button" data-view="outstanding" aria-pressed="false">未結項目</button>
     </nav>
+    <nav id="journal-strip" aria-label="記帳進度"></nav>
     <main id="entry-view">
-    <div id="schema-banner" role="status" hidden>選項已更新，請確認目前選擇</div>
-    <div id="type-toggle" class="segmented" aria-label="類型">
-      <button type="button" data-type="支出">支出</button>
-      <button type="button" data-type="收入">收入</button>
-      <button type="button" data-type="轉帳">轉帳</button>
-    </div>
-    <section id="amount-section" aria-labelledby="amount-heading">
-      <div class="section-heading">
-        <h2 id="amount-heading">金額</h2>
-        <span id="currency-chip">TWD</span>
-      </div>
-      <output id="amount-display" aria-live="polite">0</output>
-      <div id="keypad" aria-label="金額鍵盤">
-        <button type="button" data-key="1">1</button>
-        <button type="button" data-key="2">2</button>
-        <button type="button" data-key="3">3</button>
-        <button type="button" data-key="4">4</button>
-        <button type="button" data-key="5">5</button>
-        <button type="button" data-key="6">6</button>
-        <button type="button" data-key="7">7</button>
-        <button type="button" data-key="8">8</button>
-        <button type="button" data-key="9">9</button>
-        <button type="button" data-key=".">.</button>
-        <button type="button" data-key="0">0</button>
-        <button type="button" data-key="⌫" aria-label="刪除一位">⌫</button>
-      </div>
-    </section>
-    <section class="form-section" aria-labelledby="account-heading">
-      <h2 id="account-heading">帳戶</h2>
-      <div id="account-picker" class="grouped-picker"></div>
-    </section>
-    <section id="to-account-section" class="form-section" aria-labelledby="to-account-heading" hidden>
-      <h2 id="to-account-heading">轉入帳戶</h2>
-      <div id="to-account-picker" class="grouped-picker"></div>
-    </section>
-    <section id="category-section" class="form-section" aria-labelledby="category-heading">
-      <h2 id="category-heading">分類</h2>
-      <div id="category-grid" class="option-grid"></div>
-    </section>
-    <section id="payee-section" class="form-section" aria-labelledby="payee-heading">
-      <h2 id="payee-heading">對象 <span id="payee-requirement">選填</span></h2>
-      <div id="iou-toggle" class="segmented" style="grid-template-columns: repeat(2, 1fr)"
-        aria-label="代墊或應付">
-        <button type="button" data-iou="應收" aria-pressed="false">代墊(應收)</button>
-        <button type="button" data-iou="應付" aria-pressed="false">應付</button>
-      </div>
-      <div id="payee-suggestions" class="option-grid compact"></div>
-      <label class="text-field">
-        <span>自訂對象</span>
-        <input id="payee-input" type="text" autocomplete="off" placeholder="輸入其他對象" />
-      </label>
-    </section>
-    <section class="form-section details">
-      <label class="text-field required">
-        <span>說明（必填）</span>
-        <input id="description-input" type="text" required aria-required="true"
-          enterkeyhint="done" placeholder="例如：晚餐，可使用語音輸入" />
-      </label>
-      <label class="text-field">
-        <span>日期</span>
-        <input id="date-input" type="date" />
-      </label>
-    </section>
-    <p id="status-message" role="alert"></p>
-    <div id="submit-bar">
-      <button id="submit-btn" type="button" disabled>記帳</button>
-    </div>
+      <div id="schema-banner" role="status" hidden>選項已更新，請確認目前選擇</div>
+      <section class="step-panel" data-step="amount" aria-labelledby="amount-heading">
+        <div class="step-content amount-step-content">
+          <div id="type-toggle" class="segmented" aria-label="類型">
+            <button type="button" data-type="支出">支出</button>
+            <button type="button" data-type="收入">收入</button>
+            <button type="button" data-type="轉帳">轉帳</button>
+          </div>
+          <section id="amount-section" aria-labelledby="amount-heading">
+            <div class="section-heading step-question-row">
+              <h2 id="amount-heading" class="step-question" tabindex="-1">金額多少？</h2>
+              <span id="currency-chip">TWD</span>
+            </div>
+            <output id="amount-display" aria-live="polite">0</output>
+            <div id="keypad" aria-label="金額鍵盤">
+              <button type="button" data-key="1">1</button>
+              <button type="button" data-key="2">2</button>
+              <button type="button" data-key="3">3</button>
+              <button type="button" data-key="4">4</button>
+              <button type="button" data-key="5">5</button>
+              <button type="button" data-key="6">6</button>
+              <button type="button" data-key="7">7</button>
+              <button type="button" data-key="8">8</button>
+              <button type="button" data-key="9">9</button>
+              <button type="button" data-key=".">.</button>
+              <button type="button" data-key="0">0</button>
+              <button type="button" data-key="⌫" aria-label="刪除一位">⌫</button>
+            </div>
+          </section>
+        </div>
+        <div class="step-action">
+          <button id="next-amount" type="button" class="step-next" disabled>下一步</button>
+        </div>
+      </section>
+      <section class="step-panel" data-step="account" aria-labelledby="account-heading">
+        <button type="button" class="step-back">‹ 上一步</button>
+        <h2 id="account-heading" class="step-question" tabindex="-1">從哪個帳戶？</h2>
+        <div class="step-content">
+          <section class="form-section" aria-labelledby="account-heading">
+            <div id="account-picker" class="grouped-picker"></div>
+          </section>
+        </div>
+      </section>
+      <section class="step-panel" data-step="toAccount" aria-labelledby="to-account-heading">
+        <button type="button" class="step-back">‹ 上一步</button>
+        <h2 id="to-account-heading" class="step-question" tabindex="-1">轉到哪個帳戶？</h2>
+        <div class="step-content">
+          <section id="to-account-section" class="form-section" aria-labelledby="to-account-heading" hidden>
+            <div id="to-account-picker" class="grouped-picker"></div>
+          </section>
+        </div>
+      </section>
+      <section class="step-panel" data-step="category" aria-labelledby="category-heading">
+        <button type="button" class="step-back">‹ 上一步</button>
+        <h2 id="category-heading" class="step-question" tabindex="-1">分類是什麼？</h2>
+        <div class="step-content">
+          <section id="category-section" class="form-section" aria-labelledby="category-heading">
+            <div id="category-grid" class="option-grid"></div>
+          </section>
+        </div>
+      </section>
+      <section class="step-panel" data-step="payee" aria-labelledby="payee-heading">
+        <button type="button" class="step-back">‹ 上一步</button>
+        <h2 id="payee-heading" class="step-question" tabindex="-1">
+          對象是誰？ <span id="payee-requirement">選填</span>
+        </h2>
+        <div class="step-content">
+          <section id="payee-section" class="form-section" aria-labelledby="payee-heading">
+            <div id="iou-toggle" class="segmented" style="grid-template-columns: repeat(2, 1fr)"
+              aria-label="代墊或應付">
+              <button type="button" data-iou="應收" aria-pressed="false">代墊(應收)</button>
+              <button type="button" data-iou="應付" aria-pressed="false">應付</button>
+            </div>
+            <div id="payee-suggestions" class="option-grid compact"></div>
+            <label class="text-field">
+              <span>自訂對象</span>
+              <input id="payee-input" type="text" autocomplete="off" placeholder="輸入其他對象" />
+            </label>
+          </section>
+        </div>
+        <div class="step-action">
+          <button type="button" class="step-next">下一步</button>
+        </div>
+      </section>
+      <section class="step-panel" data-step="details" aria-labelledby="details-heading">
+        <button type="button" class="step-back">‹ 上一步</button>
+        <h2 id="details-heading" class="step-question" tabindex="-1">說明這筆帳</h2>
+        <div class="step-content">
+          <section class="form-section details">
+            <label class="text-field required">
+              <span>說明（必填）</span>
+              <input id="description-input" type="text" required aria-required="true"
+                enterkeyhint="done" placeholder="例如：晚餐，可使用語音輸入" />
+            </label>
+            <label class="text-field">
+              <span>日期</span>
+              <input id="date-input" type="date" />
+            </label>
+          </section>
+          <p id="status-message" role="alert"></p>
+        </div>
+        <div id="submit-bar">
+          <button id="submit-btn" type="button" disabled>記帳</button>
+        </div>
+      </section>
     </main>
     <main id="recent-view" hidden>
       <section class="recent-panel" aria-labelledby="recent-heading">
@@ -274,7 +312,7 @@ export function mountApp(
     </aside>
   `
 
-  const pageTitle = root.querySelector<HTMLElement>('#page-title')!
+  const journalStrip = root.querySelector<HTMLElement>('#journal-strip')!
   const entryView = root.querySelector<HTMLElement>('#entry-view')!
   const recentView = root.querySelector<HTMLElement>('#recent-view')!
   const outstandingView = root.querySelector<HTMLElement>('#outstanding-view')!
@@ -319,6 +357,10 @@ export function mountApp(
   const payeeInput = root.querySelector<HTMLInputElement>('#payee-input')!
   const descriptionInput = root.querySelector<HTMLInputElement>('#description-input')!
   const dateInput = root.querySelector<HTMLInputElement>('#date-input')!
+  const nextAmountButton = root.querySelector<HTMLButtonElement>('#next-amount')!
+  const nextPayeeButton = root.querySelector<HTMLButtonElement>(
+    '.step-panel[data-step="payee"] .step-next',
+  )!
   const submitButton = root.querySelector<HTMLButtonElement>('#submit-btn')!
 
   function renderTransactions(rows: LedgerTransaction[]): void {
@@ -567,11 +609,9 @@ export function mountApp(
     const recent = view === 'recent'
     const outstanding = view === 'outstanding'
     entryView.hidden = view !== 'entry'
+    journalStrip.hidden = view !== 'entry'
     recentView.hidden = !recent
     outstandingView.hidden = !outstanding
-    pageTitle.textContent = recent
-      ? '最近紀錄'
-      : outstanding ? '未結項目' : '快速記帳'
     root.querySelectorAll<HTMLButtonElement>('#view-switch [data-view]')
       .forEach(element => {
         const selected = element.dataset['view'] === view
@@ -738,7 +778,78 @@ export function mountApp(
     }
   }
 
+  function journalChip(step: State.EntryStep): {
+    label: string
+    filled: boolean
+  } {
+    if (step === 'amount') {
+      const filled = state.amountText !== ''
+      return {
+        label: filled
+          ? `${state.type} ${state.amountText} ${state.currency}`
+          : `${state.type} 金額`,
+        filled,
+      }
+    }
+    if (step === 'account') {
+      return {
+        label: state.account || '帳戶',
+        filled: state.account !== null,
+      }
+    }
+    if (step === 'toAccount') {
+      return {
+        label: state.toAccount ? `→ ${state.toAccount}` : '轉入',
+        filled: state.toAccount !== null,
+      }
+    }
+    if (step === 'category') {
+      return {
+        label: state.category || '分類',
+        filled: state.category !== null,
+      }
+    }
+    if (step === 'payee') {
+      const payee = state.payee.trim()
+      return {
+        label: payee || '對象',
+        filled: payee !== '',
+      }
+    }
+    const description = state.description.trim()
+    return {
+      label: description.length > 8
+        ? `${description.slice(0, 8)}…`
+        : description || '說明',
+      filled: description !== '',
+    }
+  }
+
+  function renderJournalStrip(): void {
+    journalStrip.replaceChildren()
+    for (const step of State.stepSequence(state)) {
+      const chip = document.createElement('button')
+      const active = step === state.step
+      const { label, filled } = journalChip(step)
+      chip.type = 'button'
+      chip.dataset['stripStep'] = step
+      chip.className = filled ? 'filled' : 'pending'
+      chip.classList.toggle('active', active)
+      if (active) chip.setAttribute('aria-current', 'step')
+      chip.textContent = label
+      journalStrip.appendChild(chip)
+    }
+  }
+
   function render(): void {
+    const stepChanged = previousStep !== null && previousStep !== state.step
+    entryView.dataset['activeStep'] = state.step
+    entryView.querySelectorAll<HTMLElement>('.step-panel').forEach(panel => {
+      panel.setAttribute(
+        'aria-hidden',
+        String(panel.dataset['step'] !== state.step),
+      )
+    })
     root.querySelector<HTMLElement>('#amount-display')!.textContent =
       state.amountText || '0'
     root.querySelector<HTMLElement>('#currency-chip')!.textContent = state.currency
@@ -767,6 +878,9 @@ export function mountApp(
     payeeInput.value = state.payee
     descriptionInput.value = state.description
     dateInput.value = state.date
+    nextAmountButton.disabled = State.amountValue(state) <= 0
+    nextPayeeButton.disabled =
+      state.iou !== null && state.payee.trim() === ''
     submitButton.disabled = !State.canSubmit(state)
     submitButton.textContent = state.status === 'error'
       ? '再試一次'
@@ -774,6 +888,26 @@ export function mountApp(
     root.querySelector<HTMLElement>('#status-message')!.textContent =
       state.errorMessage ?? ''
     renderOptions()
+    renderJournalStrip()
+    if (stepChanged) {
+      const question = entryView.querySelector<HTMLElement>(
+        `.step-panel[data-step="${state.step}"] .step-question`,
+      )
+      question?.focus({ preventScroll: true })
+      entryView.classList.add('step-guard')
+      if (guardTimer) clearTimeout(guardTimer)
+      guardTimer = setTimeout(() => {
+        if (!stopped) entryView.classList.remove('step-guard')
+      }, 300)
+      const activeChip = journalStrip.querySelector<HTMLButtonElement>('.active')
+      if (activeChip && typeof activeChip.scrollIntoView === 'function') {
+        activeChip.scrollIntoView({
+          block: 'nearest',
+          inline: 'nearest',
+        })
+      }
+    }
+    previousStep = state.step
   }
 
   function dispatch(next: State.FormState): void {
@@ -827,6 +961,8 @@ export function mountApp(
     const prompt = document.createElement('div')
     prompt.id = 'reauth-prompt'
     prompt.className = 'reauth-prompt'
+    const row = document.createElement('div')
+    row.className = 'reauth-row'
     const message = document.createElement('span')
     message.textContent = '登入已過期'
     const reload = document.createElement('button')
@@ -834,9 +970,11 @@ export function mountApp(
     reload.type = 'button'
     reload.textContent = '重新登入'
     reload.addEventListener('click', () => location.reload())
-    prompt.appendChild(message)
-    prompt.appendChild(reload)
-    document.body.appendChild(prompt)
+    row.appendChild(message)
+    row.appendChild(reload)
+    prompt.appendChild(row)
+    const domRoot = root as unknown as ParentNode
+    domRoot.prepend(prompt)
   }
 
   root.querySelector('#view-switch')!.addEventListener('click', event => {
@@ -846,6 +984,25 @@ export function mountApp(
     showView(
       target.dataset['view'] as 'entry' | 'recent' | 'outstanding',
     )
+  })
+  journalStrip.addEventListener('click', event => {
+    const target = (event.target as HTMLElement)
+      .closest<HTMLButtonElement>('[data-strip-step]')
+    if (!target) return
+    dispatch(State.jumpTo(
+      state,
+      target.dataset['stripStep'] as State.EntryStep,
+    ))
+  })
+  root.querySelectorAll<HTMLButtonElement>('.step-back').forEach(button => {
+    button.addEventListener('click', () => {
+      dispatch(State.goBack(state))
+    })
+  })
+  root.querySelectorAll<HTMLButtonElement>('.step-next').forEach(button => {
+    button.addEventListener('click', () => {
+      dispatch(State.goNext(state))
+    })
   })
   refreshTransactions.addEventListener('click', () => {
     void loadRecentTransactions()
@@ -897,18 +1054,21 @@ export function mountApp(
     const target = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-account]')
     if (!target) return
     dispatch(State.selectAccount(state, target.dataset['account']!))
+    dispatch(State.goNext(state))
   })
 
   toAccountPicker.addEventListener('click', event => {
     const target = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-account]')
     if (!target) return
     dispatch(State.selectToAccount(state, target.dataset['account']!))
+    dispatch(State.goNext(state))
   })
 
   categoryGrid.addEventListener('click', event => {
     const target = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-category]')
     if (!target) return
     dispatch(State.selectCategory(state, target.dataset['category']!))
+    dispatch(State.goNext(state))
   })
 
   iouToggle.addEventListener('click', event => {
@@ -924,6 +1084,7 @@ export function mountApp(
     const target = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-payee]')
     if (!target) return
     dispatch(State.setPayee(state, target.dataset['payee']!))
+    dispatch(State.goNext(state))
   })
 
   payeeInput.addEventListener('input', () => {
@@ -952,12 +1113,34 @@ export function mountApp(
     if (document.visibilityState === 'visible') sessionGuard.onVisible()
   }
   document.addEventListener('visibilitychange', onVisibilityChange)
+  if (typeof window !== 'undefined' && window.visualViewport) {
+    handleVisualViewportResize = () => {
+      if (window.visualViewport!.height < window.innerHeight * 0.75) {
+        root.classList.add('keyboard-open')
+      } else {
+        root.classList.remove('keyboard-open')
+      }
+    }
+    window.visualViewport.addEventListener('resize', handleVisualViewportResize)
+    handleVisualViewportResize()
+  }
 
   return () => {
     stopped = true
     sessionGuard.stop()
     document.removeEventListener('visibilitychange', onVisibilityChange)
+    if (
+      typeof window !== 'undefined'
+      && window.visualViewport
+      && handleVisualViewportResize
+    ) {
+      window.visualViewport.removeEventListener(
+        'resize',
+        handleVisualViewportResize,
+      )
+    }
     if (resetTimer) clearTimeout(resetTimer)
+    if (guardTimer) clearTimeout(guardTimer)
     document.querySelector('#reauth-prompt')?.remove()
   }
 }

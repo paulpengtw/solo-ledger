@@ -1,5 +1,13 @@
 export type TransactionType = '支出' | '收入' | '轉帳'
 
+export type EntryStep =
+  | 'amount'
+  | 'account'
+  | 'toAccount'
+  | 'category'
+  | 'payee'
+  | 'details'
+
 export type Transaction = {
   type: TransactionType
   amount: number
@@ -16,6 +24,7 @@ export type Transaction = {
 
 export type FormState = {
   type: TransactionType
+  step: EntryStep
   amountText: string
   currency: string
   date: string
@@ -33,6 +42,7 @@ export type FormState = {
 export function initialState(date: string): FormState {
   return {
     type: '支出',
+    step: 'amount',
     amountText: '',
     currency: 'TWD',
     date,
@@ -48,6 +58,35 @@ export function initialState(date: string): FormState {
   }
 }
 
+export function stepSequence(state: FormState): EntryStep[] {
+  if (state.type === '轉帳') {
+    return ['amount', 'account', 'toAccount', 'details']
+  }
+  if (state.type === '支出' && state.iou === '應收') {
+    return ['amount', 'account', 'payee', 'details']
+  }
+  return ['amount', 'account', 'category', 'payee', 'details']
+}
+
+export function goNext(state: FormState): FormState {
+  const sequence = stepSequence(state)
+  const index = sequence.indexOf(state.step)
+  if (index < 0 || index >= sequence.length - 1) return state
+  return { ...state, step: sequence[index + 1]! }
+}
+
+export function goBack(state: FormState): FormState {
+  const sequence = stepSequence(state)
+  const index = sequence.indexOf(state.step)
+  if (index <= 0) return state
+  return { ...state, step: sequence[index - 1]! }
+}
+
+export function jumpTo(state: FormState, step: EntryStep): FormState {
+  if (!stepSequence(state).includes(step) || state.step === step) return state
+  return { ...state, step }
+}
+
 function edited(state: FormState, changes: Partial<FormState>): FormState {
   return {
     ...state,
@@ -59,20 +98,29 @@ function edited(state: FormState, changes: Partial<FormState>): FormState {
 }
 
 export function setType(state: FormState, type: TransactionType): FormState {
-  if (state.type === type) return state
+  if (state.type === type) {
+    return stepSequence(state).includes(state.step)
+      ? state
+      : { ...state, step: 'amount' }
+  }
+  let next: FormState
   if (type === '轉帳') {
-    return edited(state, {
+    next = edited(state, {
       type,
       category: null,
       payee: '',
       iou: null,
     })
+  } else {
+    next = edited(state, {
+      type,
+      toAccount: null,
+      iou: null,
+    })
   }
-  return edited(state, {
-    type,
-    toAccount: null,
-    iou: null,
-  })
+  return stepSequence(next).includes(next.step)
+    ? next
+    : { ...next, step: 'amount' }
 }
 
 export function pressKey(state: FormState, key: string): FormState {
