@@ -28,6 +28,10 @@ The HMAC secret (`EXPENSE_API_SECRET`) lives in four distinct configuration home
 
 The `.env` file is never loaded by the deployed app; it exists solely for local development scripts.
 
+### Apps Script CI deploy
+
+Pushes to `main` that touch `apps-script/**` trigger `.github/workflows/deploy-apps-script.yml`, which runs `clasp push` and repoints the production `/exec` deployment at the new version. It authenticates with the GitHub Actions secret `CLASPRC_JSON`, holding the full JSON content of a `clasp login` credentials file (`~/.clasprc.json`, clasp 3.x format). Rotate it by re-running `clasp login` locally and re-uploading the file. The manual `clasp push` flow in section 3 remains valid for first-time setup and emergencies.
+
 ## 2. Prerequisites
 
 - Node.js 26 or newer (matches `engines.node` in `package.json`) and npm.

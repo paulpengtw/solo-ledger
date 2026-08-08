@@ -1,0 +1,40 @@
+name: Deploy Apps Script
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps-script/**'
+      - '.github/workflows/deploy-apps-script.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SCRIPT_ID: 1s0PmQ5YoBkw1WgkoMlWmZQW4JR1w5eA6VLB6P8B9C6cqez3rCsl5qfgj
+      DEPLOYMENT_ID: AKfycbw2fSloAC_xk6jXrdqmSUDxERJhjK1_FlMjMoa2RpXgbn4vgKkQDysgYQSPs2KEu81PKg
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '26'
+      - name: Write clasp credentials
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          umask 077
+          printf '%s' "$CLASPRC_JSON" > ~/.clasprc.json
+      - name: Write .clasp.json
+        run: printf '{"scriptId":"%s","rootDir":"apps-script"}' "$SCRIPT_ID" > .clasp.json
+      - name: Push source to script project
+        run: npx clasp@3.3.0 push -f
+      - name: Update the /exec deployment
+        run: npx clasp@3.3.0 deploy -i "$DEPLOYMENT_ID" -d "${{ github.sha }}"
