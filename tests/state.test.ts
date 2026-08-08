@@ -5,9 +5,11 @@ import {
   canSubmit,
   goBack,
   goNext,
+  jumpFromConfirm,
   initialState,
   jumpTo,
   pressKey,
+  postingLegs,
   resetForNext,
   selectAccount,
   selectCategory,
@@ -63,9 +65,9 @@ describe('per-type field guards', () => {
 
 describe('entry steps', () => {
   it.each([
-    ['支出', ['amount', 'account', 'category', 'payee', 'details']],
-    ['收入', ['amount', 'account', 'category', 'payee', 'details']],
-    ['轉帳', ['amount', 'account', 'toAccount', 'details']],
+    ['支出', ['amount', 'account', 'category', 'payee', 'details', 'confirm']],
+    ['收入', ['amount', 'account', 'category', 'payee', 'details', 'confirm']],
+    ['轉帳', ['amount', 'account', 'toAccount', 'details', 'confirm']],
   ] as const)('derives the %s step sequence', (type, expected) => {
     const state = setType(initialState('2026-07-27'), type)
 
@@ -80,15 +82,16 @@ describe('entry steps', () => {
       'account',
       'payee',
       'details',
+      'confirm',
     ])
   })
 
   it('clamps next and back navigation at both ends', () => {
     const initial = initialState('2026-07-27')
-    const details = jumpTo(initial, 'details')
+    const confirm = jumpTo(initial, 'confirm')
 
     expect(goBack(initial)).toEqual(initial)
-    expect(goNext(details)).toEqual(details)
+    expect(goNext(confirm)).toEqual(confirm)
     expect(goNext(jumpTo(initial, 'account')).step).toBe('category')
     expect(goBack(jumpTo(initial, 'account')).step).toBe('amount')
   })
@@ -127,7 +130,61 @@ describe('entry steps', () => {
       'toAccount',
     )
 
-    expect(resetForNext(state, '2026-07-28').step).toBe('amount')
+    const reset = resetForNext(state, '2026-07-28')
+    expect(reset.step).toBe('amount')
+    expect(reset.returnToConfirm).toBe(false)
+  })
+
+  it('returns to confirm after a valid edit and keeps the flag through invalid edits', () => {
+    const confirm = jumpTo(filledExpense(), 'confirm')
+    const editing = jumpFromConfirm(confirm, 'category')
+
+    expect(editing).toMatchObject({
+      step: 'category',
+      returnToConfirm: true,
+    })
+    expect(goNext(editing)).toMatchObject({
+      step: 'confirm',
+      returnToConfirm: false,
+    })
+
+    const invalid = setDescription(editing, '   ')
+    expect(goNext(invalid)).toMatchObject({
+      step: 'payee',
+      returnToConfirm: true,
+    })
+    expect(goBack(invalid).returnToConfirm).toBe(true)
+  })
+})
+
+describe('posting legs', () => {
+  it('maps each transaction type and IOU mode to debit and credit legs', () => {
+    const expense = filledExpense()
+    const income = setType(expense, '收入')
+    const transfer = selectToAccount(setType(expense, '轉帳'), '台新銀行')
+    const receivable = setPayee(setIou(expense, '應收'), '阿明')
+    const payable = setPayee(setIou(expense, '應付'), '阿明')
+
+    expect(postingLegs(expense)).toEqual({
+      debit: '餐飲',
+      credit: '錢包',
+    })
+    expect(postingLegs(income)).toEqual({
+      debit: '錢包',
+      credit: '餐飲',
+    })
+    expect(postingLegs(transfer)).toEqual({
+      debit: '台新銀行',
+      credit: '錢包',
+    })
+    expect(postingLegs(receivable)).toEqual({
+      debit: '應收帳款',
+      credit: '錢包',
+    })
+    expect(postingLegs(payable)).toEqual({
+      debit: '餐飲',
+      credit: '應付帳款',
+    })
   })
 })
 

@@ -229,8 +229,18 @@ export function mountApp(
               <input id="date-input" type="date" />
             </label>
           </section>
-          <p id="status-message" role="alert"></p>
         </div>
+        <div class="step-action">
+          <button type="button" class="step-next" disabled>下一步</button>
+        </div>
+      </section>
+      <section class="step-panel" data-step="confirm" aria-labelledby="confirm-heading">
+        <button type="button" class="step-back">‹ 上一步</button>
+        <h2 id="confirm-heading" class="step-question" tabindex="-1">確認這筆分錄</h2>
+        <div class="step-content">
+          <div id="confirm-card"></div>
+        </div>
+        <p id="status-message" role="alert"></p>
         <div id="submit-bar">
           <button id="submit-btn" type="button" disabled>記帳</button>
         </div>
@@ -358,9 +368,13 @@ export function mountApp(
   const descriptionInput = root.querySelector<HTMLInputElement>('#description-input')!
   const dateInput = root.querySelector<HTMLInputElement>('#date-input')!
   const nextAmountButton = root.querySelector<HTMLButtonElement>('#next-amount')!
+  const nextDetailsButton = root.querySelector<HTMLButtonElement>(
+    '.step-panel[data-step="details"] .step-next',
+  )!
   const nextPayeeButton = root.querySelector<HTMLButtonElement>(
     '.step-panel[data-step="payee"] .step-next',
   )!
+  const confirmCard = root.querySelector<HTMLElement>('#confirm-card')!
   const submitButton = root.querySelector<HTMLButtonElement>('#submit-btn')!
 
   function renderTransactions(rows: LedgerTransaction[]): void {
@@ -778,6 +792,79 @@ export function mountApp(
     }
   }
 
+  function renderConfirm(current: State.FormState): void {
+    confirmCard.replaceChildren()
+
+    const row = (
+      step: State.EntryStep,
+      children: Node[],
+    ): HTMLButtonElement => {
+      const element = document.createElement('button')
+      element.type = 'button'
+      element.className = 'confirm-row'
+      element.dataset['editStep'] = step
+      for (const child of children) element.appendChild(child)
+      return element
+    }
+
+    const typePill = document.createElement('span')
+    typePill.className = 'type-pill'
+    typePill.textContent = current.type
+    const amount = document.createElement('strong')
+    amount.className = 'confirm-amount'
+    amount.textContent = `${current.amountText || '0'} ${current.currency}`
+    const amountChevron = document.createElement('span')
+    amountChevron.className = 'confirm-chevron'
+    amountChevron.textContent = '›'
+    confirmCard.appendChild(row('amount', [typePill, amount, amountChevron]))
+
+    const legs = State.postingLegs(current)
+    const debitStep: State.EntryStep = current.type === '轉帳'
+      ? 'toAccount'
+      : current.type === '支出' && current.iou === '應收'
+        ? 'payee'
+        : 'category'
+    const creditStep: State.EntryStep = current.type === '支出'
+      && current.iou === '應付'
+      ? 'payee'
+      : 'account'
+    const appendLeg = (
+      label: string,
+      step: State.EntryStep,
+      value: string | null,
+    ): void => {
+      const badge = document.createElement('span')
+      badge.className = 'leg-badge'
+      badge.textContent = label
+      const name = document.createElement('span')
+      name.className = 'confirm-leg-value'
+      name.textContent = value ?? '未指定'
+      confirmCard.appendChild(row(step, [badge, name]))
+    }
+    appendLeg('借', debitStep, legs.debit)
+    appendLeg('貸', creditStep, legs.credit)
+
+    confirmCard.appendChild(document.createElement('hr'))
+
+    const appendMeta = (
+      label: string,
+      value: string,
+      step: State.EntryStep,
+    ): void => {
+      const metaLabel = document.createElement('span')
+      metaLabel.className = 'confirm-meta-label'
+      metaLabel.textContent = label
+      const metaValue = document.createElement('span')
+      metaValue.className = 'confirm-meta-value'
+      metaValue.textContent = value
+      confirmCard.appendChild(row(step, [metaLabel, metaValue]))
+    }
+    appendMeta('說明', current.description.trim() || '未填寫', 'details')
+    appendMeta('日期', current.date, 'details')
+    const payee = current.payee.trim()
+    if (payee) appendMeta('對象', payee, 'payee')
+  }
+
   function journalChip(step: State.EntryStep): {
     label: string
     filled: boolean
@@ -828,8 +915,9 @@ export function mountApp(
   function renderJournalStrip(): void {
     journalStrip.replaceChildren()
     for (const step of State.stepSequence(state)) {
+      if (step === 'confirm') continue
       const chip = document.createElement('button')
-      const active = step === state.step
+      const active = state.step !== 'confirm' && step === state.step
       const { label, filled } = journalChip(step)
       chip.type = 'button'
       chip.dataset['stripStep'] = step
@@ -879,6 +967,7 @@ export function mountApp(
     descriptionInput.value = state.description
     dateInput.value = state.date
     nextAmountButton.disabled = State.amountValue(state) <= 0
+    nextDetailsButton.disabled = !State.canSubmit(state)
     nextPayeeButton.disabled =
       state.iou !== null && state.payee.trim() === ''
     submitButton.disabled = !State.canSubmit(state)
@@ -888,6 +977,7 @@ export function mountApp(
     root.querySelector<HTMLElement>('#status-message')!.textContent =
       state.errorMessage ?? ''
     renderOptions()
+    if (state.step === 'confirm') renderConfirm(state)
     renderJournalStrip()
     if (stepChanged) {
       const question = entryView.querySelector<HTMLElement>(
@@ -1085,6 +1175,16 @@ export function mountApp(
     if (!target) return
     dispatch(State.setPayee(state, target.dataset['payee']!))
     dispatch(State.goNext(state))
+  })
+
+  confirmCard.addEventListener('click', event => {
+    const target = (event.target as HTMLElement)
+      .closest<HTMLButtonElement>('.confirm-row[data-edit-step]')
+    if (!target) return
+    dispatch(State.jumpFromConfirm(
+      state,
+      target.dataset['editStep'] as State.EntryStep,
+    ))
   })
 
   payeeInput.addEventListener('input', () => {

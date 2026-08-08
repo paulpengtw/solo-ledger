@@ -647,7 +647,8 @@ h3 {
 #entry-view[data-active-step="toAccount"] .step-panel[data-step="toAccount"],
 #entry-view[data-active-step="category"] .step-panel[data-step="category"],
 #entry-view[data-active-step="payee"] .step-panel[data-step="payee"],
-#entry-view[data-active-step="details"] .step-panel[data-step="details"] {
+#entry-view[data-active-step="details"] .step-panel[data-step="details"],
+#entry-view[data-active-step="confirm"] .step-panel[data-step="confirm"] {
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -699,7 +700,8 @@ h3 {
 #app.keyboard-open .step-panel[data-step="category"] .step-content > .form-section,
 #app.keyboard-open .step-panel[data-step="payee"] #payee-section,
 #app.keyboard-open .step-panel[data-step="details"] .form-section,
-#app.keyboard-open .step-panel[data-step="amount"] #type-toggle {
+#app.keyboard-open .step-panel[data-step="amount"] #type-toggle,
+#app.keyboard-open .step-panel[data-step="confirm"] #confirm-card {
   margin-top: 0;
 }
 
@@ -757,6 +759,80 @@ h3 {
   margin: 0;
   padding: 10px 0 calc(12px + env(safe-area-inset-bottom, 0px));
   background: none;
+}
+
+#confirm-card {
+  margin-top: auto;
+  padding: 6px 16px;
+  border-radius: var(--radius-large);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.confirm-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 48px;
+  gap: 10px;
+  padding: 8px 2px;
+  border: 0;
+  border-bottom: 1px solid #eef0ec;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.confirm-row:last-of-type {
+  border-bottom: 0;
+}
+
+#confirm-card hr {
+  margin: 4px 0;
+  border: 0;
+  border-top: 1px solid #eef0ec;
+}
+
+.type-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.leg-badge {
+  padding: 3px 7px;
+  border-radius: 7px;
+  background: var(--ink);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.confirm-amount {
+  margin-left: auto;
+  font-size: clamp(30px, 9vw, 40px);
+  font-variant-numeric: tabular-nums;
+  font-weight: 850;
+}
+
+.confirm-chevron {
+  color: var(--muted);
+  font-size: 24px;
+  line-height: 1;
+}
+
+.confirm-meta-label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.confirm-meta-value {
+  margin-left: auto;
+  font-weight: 600;
 }
 
 #journal-strip {

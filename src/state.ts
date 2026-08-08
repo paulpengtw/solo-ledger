@@ -7,6 +7,7 @@ export type EntryStep =
   | 'category'
   | 'payee'
   | 'details'
+  | 'confirm'
 
 export type Transaction = {
   type: TransactionType
@@ -25,6 +26,7 @@ export type Transaction = {
 export type FormState = {
   type: TransactionType
   step: EntryStep
+  returnToConfirm: boolean
   amountText: string
   currency: string
   date: string
@@ -43,6 +45,7 @@ export function initialState(date: string): FormState {
   return {
     type: '支出',
     step: 'amount',
+    returnToConfirm: false,
     amountText: '',
     currency: 'TWD',
     date,
@@ -60,19 +63,29 @@ export function initialState(date: string): FormState {
 
 export function stepSequence(state: FormState): EntryStep[] {
   if (state.type === '轉帳') {
-    return ['amount', 'account', 'toAccount', 'details']
+    return ['amount', 'account', 'toAccount', 'details', 'confirm']
   }
   if (state.type === '支出' && state.iou === '應收') {
-    return ['amount', 'account', 'payee', 'details']
+    return ['amount', 'account', 'payee', 'details', 'confirm']
   }
-  return ['amount', 'account', 'category', 'payee', 'details']
+  return ['amount', 'account', 'category', 'payee', 'details', 'confirm']
 }
 
 export function goNext(state: FormState): FormState {
   const sequence = stepSequence(state)
   const index = sequence.indexOf(state.step)
+  if (state.returnToConfirm && canSubmit(state)) {
+    return { ...state, step: 'confirm', returnToConfirm: false }
+  }
   if (index < 0 || index >= sequence.length - 1) return state
-  return { ...state, step: sequence[index + 1]! }
+  const step = sequence[index + 1]!
+  return {
+    ...state,
+    step,
+    returnToConfirm: state.returnToConfirm
+      ? true
+      : step === 'confirm' ? false : state.returnToConfirm,
+  }
 }
 
 export function goBack(state: FormState): FormState {
@@ -85,6 +98,17 @@ export function goBack(state: FormState): FormState {
 export function jumpTo(state: FormState, step: EntryStep): FormState {
   if (!stepSequence(state).includes(step) || state.step === step) return state
   return { ...state, step }
+}
+
+export function jumpFromConfirm(
+  state: FormState,
+  step: EntryStep,
+): FormState {
+  if (state.step !== 'confirm') return state
+  return {
+    ...jumpTo(state, step),
+    returnToConfirm: true,
+  }
 }
 
 function edited(state: FormState, changes: Partial<FormState>): FormState {
@@ -203,6 +227,25 @@ export function canSubmit(state: FormState): boolean {
   if (state.type === '轉帳') return state.toAccount !== null
   if (state.type === '支出' && state.iou === '應收') return true
   return state.category !== null
+}
+
+export function postingLegs(state: FormState): {
+  debit: string | null
+  credit: string | null
+} {
+  if (state.type === '支出') {
+    if (state.iou === '應收') {
+      return { debit: '應收帳款', credit: state.account }
+    }
+    if (state.iou === '應付') {
+      return { debit: state.category, credit: '應付帳款' }
+    }
+    return { debit: state.category, credit: state.account }
+  }
+  if (state.type === '收入') {
+    return { debit: state.account, credit: state.category }
+  }
+  return { debit: state.toAccount, credit: state.account }
 }
 
 export function buildTransaction(state: FormState): Transaction {

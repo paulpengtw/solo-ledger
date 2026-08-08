@@ -69,6 +69,7 @@ function fillExpense(description = '晚餐'): void {
   click('#category-grid [data-category="餐飲"]')
   click('.step-panel[data-step="payee"] .step-next')
   input('#description-input', description)
+  click('.step-panel[data-step="details"] .step-next')
 }
 
 beforeEach(() => {
@@ -123,6 +124,56 @@ describe('selection-first entry form', () => {
 
     expect(document.querySelector<HTMLElement>('#entry-view')?.dataset['activeStep'])
       .toBe('amount')
+  })
+
+  it('confirm step shows legs and amount for expense', () => {
+    mount()
+    fillExpense()
+
+    const card = document.querySelector<HTMLElement>('#confirm-card')!
+    expect(document.querySelector<HTMLElement>('#entry-view')?.dataset['activeStep'])
+      .toBe('confirm')
+    expect(card.textContent).toContain('借')
+    expect(card.textContent).toContain('貸')
+    expect(card.textContent).toContain('餐飲')
+    expect(card.textContent).toContain('錢包')
+    expect(card.textContent).toContain('260')
+  })
+
+  it('confirm step shows legs for transfer', () => {
+    mount()
+    click('#type-toggle [data-type="轉帳"]')
+    for (const key of ['2', '6', '0']) click(`#keypad [data-key="${key}"]`)
+    click('#next-amount')
+    click('#account-picker [data-account="錢包"]')
+    click('#to-account-picker [data-account="台新銀行"]')
+    input('#description-input', '轉帳')
+    click('.step-panel[data-step="details"] .step-next')
+
+    const card = document.querySelector<HTMLElement>('#confirm-card')!
+    expect(document.querySelector<HTMLElement>('#entry-view')?.dataset['activeStep'])
+      .toBe('confirm')
+    expect(card.textContent).toContain('台新銀行')
+    expect(card.textContent).toContain('錢包')
+  })
+
+  it('tapping debit leg jumps to category; editing returns to confirm; payload updated', async () => {
+    mount()
+    fillExpense()
+
+    click('#confirm-card .confirm-row[data-edit-step="category"]')
+    expect(document.querySelector<HTMLElement>('#entry-view')?.dataset['activeStep'])
+      .toBe('category')
+
+    click('#category-grid [data-category="交通"]')
+    expect(document.querySelector<HTMLElement>('#entry-view')?.dataset['activeStep'])
+      .toBe('confirm')
+
+    click('#submit-btn')
+    await vi.waitFor(() => expect(apiMocks.submitTransaction).toHaveBeenCalledTimes(1))
+    expect(apiMocks.submitTransaction).toHaveBeenCalledWith(expect.objectContaining({
+      category: '交通',
+    }), '3b241101-e2bb-4255-8caf-4136c566a962')
   })
 
   it('scrolls the active journal chip after a step change', () => {
