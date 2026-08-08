@@ -16,7 +16,7 @@ import {
   selectToAccount,
   setDescription,
   setIou,
-  setPayee,
+  setCounterparty,
   setType,
   stepSequence,
   submitFailed,
@@ -33,13 +33,13 @@ function filledExpense(): FormState {
 }
 
 describe('per-type field guards', () => {
-  it('clears a stale category and payee when 支出 changes to 轉帳', () => {
-    let state = setPayee(filledExpense(), '全聯')
+  it('clears a stale category and counterparty when 支出 changes to 轉帳', () => {
+    let state = setCounterparty(filledExpense(), '全聯')
 
     state = setType(state, '轉帳')
 
     expect(state.category).toBeNull()
-    expect(state.payee).toBe('')
+    expect(state.counterparty).toBe('')
   })
 
   it('clears a stale toAccount when 轉帳 changes to 支出', () => {
@@ -65,8 +65,8 @@ describe('per-type field guards', () => {
 
 describe('entry steps', () => {
   it.each([
-    ['支出', ['amount', 'account', 'category', 'payee', 'details', 'confirm']],
-    ['收入', ['amount', 'account', 'category', 'payee', 'details', 'confirm']],
+    ['支出', ['amount', 'account', 'category', 'counterparty', 'details', 'confirm']],
+    ['收入', ['amount', 'account', 'category', 'counterparty', 'details', 'confirm']],
     ['轉帳', ['amount', 'account', 'toAccount', 'details', 'confirm']],
   ] as const)('derives the %s step sequence', (type, expected) => {
     const state = setType(initialState('2026-07-27'), type)
@@ -80,7 +80,7 @@ describe('entry steps', () => {
     expect(stepSequence(state)).toEqual([
       'amount',
       'account',
-      'payee',
+      'counterparty',
       'details',
       'confirm',
     ])
@@ -150,7 +150,7 @@ describe('entry steps', () => {
 
     const invalid = setDescription(editing, '   ')
     expect(goNext(invalid)).toMatchObject({
-      step: 'payee',
+      step: 'counterparty',
       returnToConfirm: true,
     })
     expect(goBack(invalid).returnToConfirm).toBe(true)
@@ -162,8 +162,8 @@ describe('posting legs', () => {
     const expense = filledExpense()
     const income = setType(expense, '收入')
     const transfer = selectToAccount(setType(expense, '轉帳'), '台新銀行')
-    const receivable = setPayee(setIou(expense, '應收'), '阿明')
-    const payable = setPayee(setIou(expense, '應付'), '阿明')
+    const receivable = setCounterparty(setIou(expense, '應收'), '阿明')
+    const payable = setCounterparty(setIou(expense, '應付'), '阿明')
 
     expect(postingLegs(expense)).toEqual({
       debit: '餐飲',
@@ -195,7 +195,7 @@ describe('submit gating and payload construction', () => {
   })
 
   it('builds an expense transaction with a numeric amount and no rejected toAccount', () => {
-    const transaction = buildTransaction(setPayee(filledExpense(), '全聯'))
+    const transaction = buildTransaction(setCounterparty(filledExpense(), '全聯'))
 
     expect(transaction).toEqual({
       type: '支出',
@@ -212,7 +212,7 @@ describe('submit gating and payload construction', () => {
     expect(transaction).not.toHaveProperty('toAccount')
   })
 
-  it('builds a transfer transaction without rejected category or payee fields', () => {
+  it('builds a transfer transaction without rejected category or counterparty fields', () => {
     let state = setType(filledExpense(), '轉帳')
     state = selectToAccount(state, '台新銀行')
 
@@ -231,14 +231,14 @@ describe('submit gating and payload construction', () => {
     expect(transaction).not.toHaveProperty('payee')
   })
 
-  it('selects iou 應收 by clearing category and requiring payee', () => {
+  it('selects iou 應收 by clearing category and requiring counterparty', () => {
     let state = setIou(filledExpense(), '應收')
 
     expect(state.category).toBeNull()
     expect(state.iou).toBe('應收')
     expect(canSubmit(state)).toBe(false)
 
-    state = setPayee(state, '阿明')
+    state = setCounterparty(state, '阿明')
 
     expect(canSubmit(state)).toBe(true)
     expect(buildTransaction(state)).toEqual({
@@ -253,26 +253,26 @@ describe('submit gating and payload construction', () => {
     })
   })
 
-  it('selects iou 應付 by preserving and requiring category and payee', () => {
+  it('selects iou 應付 by preserving and requiring category and counterparty', () => {
     let state = setIou(filledExpense(), '應付')
 
     expect(state.category).toBe('餐飲')
     expect(canSubmit(state)).toBe(false)
 
-    state = setPayee(state, '阿明')
+    state = setCounterparty(state, '阿明')
     expect(canSubmit(state)).toBe(true)
     expect(canSubmit({ ...state, category: null })).toBe(false)
   })
 
-  it('toggles iou off without clearing category or payee still used by a normal expense', () => {
-    let state = setPayee(filledExpense(), '阿明')
+  it('toggles iou off without clearing category or counterparty still used by a normal expense', () => {
+    let state = setCounterparty(filledExpense(), '阿明')
     state = setIou(state, '應付')
 
     state = setIou(state, '應付')
 
     expect(state.iou).toBeNull()
     expect(state.category).toBe('餐飲')
-    expect(state.payee).toBe('阿明')
+    expect(state.counterparty).toBe('阿明')
   })
 })
 

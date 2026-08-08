@@ -1,3 +1,5 @@
+import type { Transaction } from './api'
+
 export type TransactionType = '支出' | '收入' | '轉帳'
 
 export type EntryStep =
@@ -5,23 +7,9 @@ export type EntryStep =
   | 'account'
   | 'toAccount'
   | 'category'
-  | 'payee'
+  | 'counterparty'
   | 'details'
   | 'confirm'
-
-export type Transaction = {
-  type: TransactionType
-  amount: number
-  date: string
-  description: string
-  time?: string
-  account?: string
-  toAccount?: string
-  category?: string
-  payee?: string
-  currency?: string
-  iou?: '應收' | '應付'
-}
 
 export type FormState = {
   type: TransactionType
@@ -33,7 +21,7 @@ export type FormState = {
   account: string | null
   toAccount: string | null
   category: string | null
-  payee: string
+  counterparty: string
   iou: '應收' | '應付' | null
   description: string
   status: 'idle' | 'submitting' | 'success' | 'error'
@@ -52,7 +40,7 @@ export function initialState(date: string): FormState {
     account: null,
     toAccount: null,
     category: null,
-    payee: '',
+    counterparty: '',
     iou: null,
     description: '',
     status: 'idle',
@@ -66,9 +54,9 @@ export function stepSequence(state: FormState): EntryStep[] {
     return ['amount', 'account', 'toAccount', 'details', 'confirm']
   }
   if (state.type === '支出' && state.iou === '應收') {
-    return ['amount', 'account', 'payee', 'details', 'confirm']
+    return ['amount', 'account', 'counterparty', 'details', 'confirm']
   }
-  return ['amount', 'account', 'category', 'payee', 'details', 'confirm']
+  return ['amount', 'account', 'category', 'counterparty', 'details', 'confirm']
 }
 
 export function goNext(state: FormState): FormState {
@@ -132,7 +120,7 @@ export function setType(state: FormState, type: TransactionType): FormState {
     next = edited(state, {
       type,
       category: null,
-      payee: '',
+      counterparty: '',
       iou: null,
     })
   } else {
@@ -175,8 +163,10 @@ export const selectToAccount = (state: FormState, toAccount: string): FormState 
 export const selectCategory = (state: FormState, category: string): FormState =>
   edited(state, { category })
 
-export const setPayee = (state: FormState, payee: string): FormState =>
-  edited(state, { payee })
+export const setCounterparty = (
+  state: FormState,
+  counterparty: string,
+): FormState => edited(state, { counterparty })
 
 export function setIou(
   state: FormState,
@@ -223,7 +213,7 @@ export function canSubmit(state: FormState): boolean {
   ) {
     return false
   }
-  if (state.iou !== null && state.payee.trim() === '') return false
+  if (state.iou !== null && state.counterparty.trim() === '') return false
   if (state.type === '轉帳') return state.toAccount !== null
   if (state.type === '支出' && state.iou === '應收') return true
   return state.category !== null
@@ -264,8 +254,8 @@ export function buildTransaction(state: FormState): Transaction {
     if (!(state.type === '支出' && state.iou === '應收')) {
       transaction.category = state.category ?? undefined
     }
-    const payee = state.payee.trim()
-    if (payee) transaction.payee = payee
+    const counterparty = state.counterparty.trim()
+    if (counterparty) transaction.payee = counterparty
     if (state.type === '支出' && state.iou !== null) {
       transaction.iou = state.iou
     }

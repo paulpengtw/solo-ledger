@@ -28,9 +28,9 @@ any account. A row's 分類 column names the nominal leg, blank when neither
 leg is nominal.
 _Avoid_: tag, label
 
-**對象 (Counterparty)**:
+**交易對象 (Counterparty)**:
 The person or merchant a row relates to; free text, suggested from 選項清單.
-_Avoid_: vendor
+_Avoid_: 對象 (legacy header spelling), vendor, payee.
 
 **來源 (Source)**:
 Which writer produced a journal row: `pwa`, `手動` (hand-entered), `移轉`
@@ -49,7 +49,7 @@ instead of a category; the money is owed back, not spent.
 
 **應收帳款 / 應付帳款 (Receivable / Payable)**:
 The single aggregate accounts for money owed to / owed by the user;
-per-counterparty detail lives in each row's 對象.
+per-counterparty detail lives in each row's 交易對象.
 
 **Settlement (settle)**:
 A 轉帳 row that pays down an open 應收/應付 row, linked to it via

@@ -19,7 +19,7 @@ const journalHeaders = [
   '金額',
   '幣別',
   '分類',
-  '對象',
+  '交易對象',
   '說明',
   '結清狀態',
   '沖銷txn_id',
@@ -67,7 +67,7 @@ describe('reverse_transaction', () => {
       金額: 260,
       幣別: 'JPY',
       分類: '餐飲',
-      對象: '',
+      交易對象: '',
       說明: '',
       結清狀態: '',
       沖銷txn_id: 'expense-001',
@@ -289,7 +289,7 @@ function ordinaryExpense(
     金額: 260,
     幣別: 'TWD',
     分類: '餐飲',
-    對象: '全聯',
+    交易對象: '全聯',
     說明: '晚餐',
     結清狀態: '',
     沖銷txn_id: '',
@@ -308,7 +308,7 @@ function ordinaryIncome(txnId: string): JournalRow {
     貸方帳戶: '薪資收入',
     金額: 50000,
     分類: '薪資收入',
-    對象: '',
+    交易對象: '',
     說明: '薪資',
   }
 }
@@ -321,7 +321,7 @@ function ordinaryTransfer(txnId: string): JournalRow {
     貸方帳戶: '現金',
     金額: 1000,
     分類: '',
-    對象: '',
+    交易對象: '',
     說明: '存款',
   }
 }
@@ -331,7 +331,7 @@ function receivable(txnId: string, status: string): JournalRow {
     ...ordinaryExpense(txnId),
     借方帳戶: '應收帳款',
     分類: '',
-    對象: '阿明',
+    交易對象: '阿明',
     說明: '代墊',
     結清狀態: status,
   }
@@ -362,7 +362,7 @@ function reversal(txnId: string, originalTxnId: string): JournalRow {
     類型: '沖銷',
     借方帳戶: '現金',
     貸方帳戶: '餐飲',
-    對象: '',
+    交易對象: '',
     說明: '',
     沖銷txn_id: originalTxnId,
   }
@@ -384,13 +384,13 @@ async function postReverse(
 
 async function postListReceivables(
   harness: FakeGasHarness,
-): Promise<Array<{ 對象: string; entries: Array<Record<string, unknown>> }>> {
+): Promise<Array<{ 交易對象: string; entries: Array<Record<string, unknown>> }>> {
   return await post(
     harness,
     { action: 'list_receivables' },
     `list-receivables-${crypto.randomUUID()}`,
   ) as unknown as Array<{
-    對象: string
+    交易對象: string
     entries: Array<Record<string, unknown>>
   }>
 }

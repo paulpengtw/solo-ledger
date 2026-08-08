@@ -14,7 +14,7 @@ const expectedJournalHeaders = [
   '金額',
   '幣別',
   '分類',
-  '對象',
+  '交易對象',
   '說明',
   '結清狀態',
   '沖銷txn_id',
@@ -230,6 +230,34 @@ describe('setupSpreadsheet', () => {
     expect(tableRows(requiredSheet(harness, '試算與檢查'))).toEqual(firstCheckRows)
   })
 
+  it('extends balance formulas when setup reruns after a hand-added account', () => {
+    harness.setupSpreadsheet()
+    const accounts = requiredSheet(harness, '會計科目')
+    const balances = requiredSheet(harness, '餘額')
+    const firstBalanceFormula = balances.getRange(2, 3).getValues()[0]![0]
+    const accountRow = accounts.getLastRow() + 1
+
+    accounts.getRange(accountRow, 1, 1, 5).setValues([
+      ['信用合作社', '資產', '銀行', true, 999],
+    ])
+
+    expect(balances.getLastRow()).toBe(accountRow - 1)
+
+    harness.setupSpreadsheet()
+
+    expect(balances.getLastRow()).toBe(accountRow)
+    expect(balances.getRange(accountRow, 1).getValues()[0]![0]).toContain(
+      "INDEX('會計科目'!$1:$1000,ROW(),MATCH(\"名稱\"",
+    )
+    expect(balances.getRange(accountRow, 2).getValues()[0]![0]).toContain(
+      "INDEX('會計科目'!$1:$1000,ROW(),MATCH(\"類型\"",
+    )
+    expect(balances.getRange(accountRow, 3).getValues()[0]![0]).toContain(
+      `$A${accountRow}`,
+    )
+    expect(balances.getRange(2, 3).getValues()[0]![0]).toBe(firstBalanceFormula)
+  })
+
   it('does not clobber user-entered accounts, option values, settings, or formula-tab cells', () => {
     harness.setupSpreadsheet()
     const accounts = requiredSheet(harness, '會計科目')
@@ -267,7 +295,7 @@ describe('setupSpreadsheet', () => {
       金額: 6,
       幣別: 7,
       分類: 8,
-      對象: 9,
+      交易對象: 9,
       說明: 10,
       結清狀態: 11,
       沖銷txn_id: 12,

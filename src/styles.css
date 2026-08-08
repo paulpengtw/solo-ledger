@@ -646,7 +646,7 @@ h3 {
 #entry-view[data-active-step="account"] .step-panel[data-step="account"],
 #entry-view[data-active-step="toAccount"] .step-panel[data-step="toAccount"],
 #entry-view[data-active-step="category"] .step-panel[data-step="category"],
-#entry-view[data-active-step="payee"] .step-panel[data-step="payee"],
+#entry-view[data-active-step="counterparty"] .step-panel[data-step="counterparty"],
 #entry-view[data-active-step="details"] .step-panel[data-step="details"],
 #entry-view[data-active-step="confirm"] .step-panel[data-step="confirm"] {
   display: flex;
@@ -689,7 +689,7 @@ h3 {
 .step-panel[data-step="account"] .step-content > .form-section,
 .step-panel[data-step="toAccount"] .step-content > .form-section,
 .step-panel[data-step="category"] .step-content > .form-section,
-.step-panel[data-step="payee"] #payee-section,
+.step-panel[data-step="counterparty"] #counterparty-section,
 .step-panel[data-step="details"] .form-section,
 .step-panel[data-step="amount"] #type-toggle {
   margin-top: auto;
@@ -698,7 +698,7 @@ h3 {
 #app.keyboard-open .step-panel[data-step="account"] .step-content > .form-section,
 #app.keyboard-open .step-panel[data-step="toAccount"] .step-content > .form-section,
 #app.keyboard-open .step-panel[data-step="category"] .step-content > .form-section,
-#app.keyboard-open .step-panel[data-step="payee"] #payee-section,
+#app.keyboard-open .step-panel[data-step="counterparty"] #counterparty-section,
 #app.keyboard-open .step-panel[data-step="details"] .form-section,
 #app.keyboard-open .step-panel[data-step="amount"] #type-toggle,
 #app.keyboard-open .step-panel[data-step="confirm"] #confirm-card {

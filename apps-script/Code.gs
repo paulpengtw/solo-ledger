@@ -7,7 +7,7 @@ var JOURNAL_HEADERS = [
   '金額',
   '幣別',
   '分類',
-  '對象',
+  '交易對象',
   '說明',
   '結清狀態',
   '沖銷txn_id',
@@ -26,7 +26,7 @@ var LIST_TRANSACTION_HEADERS = [
   '金額',
   '幣別',
   '分類',
-  '對象',
+  '交易對象',
   '說明',
   '結清狀態',
 ];
@@ -35,6 +35,7 @@ var MAX_LIST_TRANSACTIONS = 200;
 var MAX_SKEW_SECONDS = 300;
 var NONCE_CACHE_SECONDS = 600;
 var LOCK_WAIT_MILLISECONDS = 30000;
+var BALANCE_FORMULA_SCHEMA_PROPERTY = 'BALANCE_FORMULA_SCHEMA_VERSION';
 var SCHEMA_SHEET_NAMES = ['會計科目', '選項清單', '設定'];
 var SPREADSHEET_ID_TAIL_LENGTH = 8;
 var BACKUP_FOLDER_PROPERTY = 'LEDGER_BACKUP_FOLDER_ID';
@@ -131,6 +132,8 @@ function verifyEnvelope_(envelope) {
 function health_() {
   var spreadsheetId = requiredProp_('LEDGER_SPREADSHEET_ID');
   var spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+  var schemaVersion = schemaVersion_(spreadsheet);
+  ensureBalanceFormulas_(spreadsheet, schemaVersion);
   var tailLength = Math.min(
     SPREADSHEET_ID_TAIL_LENGTH,
     Math.max(1, spreadsheetId.length - 1),
@@ -139,7 +142,7 @@ function health_() {
   return {
     ok: true,
     now: new Date().toISOString(),
-    schema_version: schemaVersion_(spreadsheet),
+    schema_version: schemaVersion,
     spreadsheet_id_tail: spreadsheetId.slice(-tailLength),
   };
 }
@@ -183,6 +186,8 @@ function getOptions_() {
   var spreadsheet = SpreadsheetApp.openById(
     requiredProp_('LEDGER_SPREADSHEET_ID'),
   );
+  var schemaVersion = schemaVersion_(spreadsheet);
+  ensureBalanceFormulas_(spreadsheet, schemaVersion);
   var accountSheet = requiredSheet_(spreadsheet, '會計科目');
   var accountValues = accountSheet
     .getRange(
@@ -239,10 +244,10 @@ function getOptions_() {
       optionsSheet.getLastColumn(),
     )
     .getDisplayValues();
-  var optionColumns = resolveHeaders_(optionValues[0], ['對象']);
+  var optionColumns = resolveHeaders_(optionValues[0], ['交易對象']);
   var payees = [];
   for (rowIndex = 1; rowIndex < optionValues.length; rowIndex += 1) {
-    var payee = String(optionValues[rowIndex][optionColumns['對象'] - 1] || '')
+    var payee = String(optionValues[rowIndex][optionColumns['交易對象'] - 1] || '')
       .trim();
     if (payee) {
       payees.push(payee);
@@ -250,7 +255,7 @@ function getOptions_() {
   }
 
   return {
-    schema_version: schemaVersion_(spreadsheet),
+    schema_version: schemaVersion,
     accounts: accounts,
     categories: {
       支出: vocabularyOptionNames_(expenseCategories),
@@ -380,10 +385,10 @@ function listReceivables_() {
       continue;
     }
 
-    var counterparty = record.values['對象'];
+    var counterparty = record.values['交易對象'];
     var group = groupsByCounterparty[counterparty];
     if (!group) {
-      group = { '對象': counterparty, entries: [] };
+      group = { '交易對象': counterparty, entries: [] };
       groupsByCounterparty[counterparty] = group;
       groups.push(group);
     }
@@ -395,7 +400,7 @@ function listReceivables_() {
       '日期': record.values['日期'],
       '金額': record.amount,
       '幣別': record.values['幣別'],
-      '對象': counterparty,
+      '交易對象': counterparty,
       '說明': record.values['說明'],
       '結清狀態': status,
       direction: receivableDirection_(record.values),
@@ -1738,7 +1743,7 @@ function closeAndOpenBooks(oldSpreadsheetId) {
         txnId: Utilities.getUuid(),
         now: migrationNow,
       });
-      carriedPosting['對象'] = item.record.values['對象'];
+      carriedPosting['交易對象'] = item.record.values['交易對象'];
       carriedPosting['說明'] = '承前-' + item.record.values['說明'];
       carriedPosting['結清狀態'] = '未結';
       validatePostingVocabulary_(carriedPosting, targetVocabulary);
@@ -1897,7 +1902,7 @@ function setupSpreadsheet() {
     ['交通', '支出', '日常', true, 210],
     ['薪資收入', '收入', '薪資', true, 300],
   ]);
-  initializeBlankSheet_(options, [['對象']]);
+  initializeBlankSheet_(options, [['交易對象']]);
   initializeBlankSheet_(settings, [
     ['設定項目', '值'],
     ['預設幣別', 'TWD'],
@@ -1968,16 +1973,25 @@ function initializeBlankSheet_(sheet, rows) {
 }
 
 function installBalanceFormulas_(sheet, accounts, journalMaxRows) {
-  if (sheet.getLastRow() !== 1 || sheet.getLastColumn() !== 3) {
+  if (sheet.getLastRow() < 1 || sheet.getLastColumn() !== 3) {
+    return;
+  }
+
+  var headers = sheet.getRange(1, 1, 1, 3).getValues()[0];
+  if (headers[0] !== '名稱' || headers[1] !== '類型' || headers[2] !== '餘額') {
     return;
   }
 
   var accountCount = accounts.getLastRow() - 1;
-  if (accountCount < 1) {
+  var existingBalanceCount = Math.max(0, sheet.getLastRow() - 1);
+  if (accountCount <= existingBalanceCount) {
     return;
   }
 
-  var accountTypes = accounts.getRange(2, 2, accountCount, 1).getValues();
+  var missingCount = accountCount - existingBalanceCount;
+  var accountTypes = accounts
+    .getRange(existingBalanceCount + 2, 2, missingCount, 1)
+    .getValues();
   var accountMaxRows = accounts.getMaxRows();
   var accountHeaderRow = "'會計科目'!$1:$1";
   var accountRows = "'會計科目'!$1:$" + accountMaxRows;
@@ -1987,9 +2001,9 @@ function installBalanceFormulas_(sheet, accounts, journalMaxRows) {
   var rows = [];
   var index;
 
-  for (index = 0; index < accountCount; index += 1) {
+  for (index = existingBalanceCount; index < accountCount; index += 1) {
     var sheetRow = index + 2;
-    var accountType = accountTypes[index][0];
+    var accountType = accountTypes[index - existingBalanceCount][0];
     var debitTotal =
       'SUMIFS(' + amounts + ',' + debitAccounts + ',$A' + sheetRow + ')';
     var creditTotal =
@@ -2045,7 +2059,30 @@ function installBalanceFormulas_(sheet, accounts, journalMaxRows) {
     ]);
   }
 
-  sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
+  sheet
+    .getRange(existingBalanceCount + 2, 1, rows.length, rows[0].length)
+    .setValues(rows);
+}
+
+function ensureBalanceFormulas_(spreadsheet, schemaVersion) {
+  var properties = PropertiesService.getScriptProperties();
+  var lastSynchronizedVersion = properties.getProperty(
+    BALANCE_FORMULA_SCHEMA_PROPERTY,
+  );
+  var accounts = requiredSheet_(spreadsheet, '會計科目');
+  var balances = requiredSheet_(spreadsheet, '餘額');
+  var journal = requiredSheet_(spreadsheet, '日記帳');
+  var accountCount = Math.max(0, accounts.getLastRow() - 1);
+  var balanceCount = Math.max(0, balances.getLastRow() - 1);
+
+  if (
+    lastSynchronizedVersion !== schemaVersion ||
+    balanceCount < accountCount
+  ) {
+    installBalanceFormulas_(balances, accounts, journal.getMaxRows());
+  }
+
+  properties.setProperty(BALANCE_FORMULA_SCHEMA_PROPERTY, schemaVersion);
 }
 
 function installCheckFormulas_(sheet, accounts, journalMaxRows) {
@@ -2408,7 +2445,7 @@ function postingRow_(fields) {
     '金額': fields.amount,
     '幣別': blank_(fields.currency),
     '分類': blank_(fields.category),
-    '對象': blank_(fields.payee),
+    '交易對象': blank_(fields.payee),
     '說明': blank_(fields.description),
     '結清狀態': blank_(fields.settlementStatus),
     '沖銷txn_id': blank_(fields.reversalTxnId),

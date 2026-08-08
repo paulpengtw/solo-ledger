@@ -95,11 +95,11 @@ describe('validateTransaction', () => {
   })
 
   it.each(['應收', '應付'] as const)(
-    'rejects iou %s when payee is missing',
+    'rejects iou %s when counterparty wire field is missing',
     iou => {
-      const { payee: _payee, ...withoutPayee } = valid
+      const { payee: _wirePayee, ...withoutCounterparty } = valid
 
-      expect(validateTransaction({ ...withoutPayee, iou })).toEqual({
+      expect(validateTransaction({ ...withoutCounterparty, iou })).toEqual({
         ok: false,
         error: 'missing payee',
       })

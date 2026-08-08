@@ -8,7 +8,7 @@ import {
   settleReceivable,
   submitTransaction,
   type AccountOption,
-  type LedgerOptions,
+  type CounterpartyOptions,
   type LedgerTransaction,
   type ReceivableEntry,
   type ReceivableGroup,
@@ -91,7 +91,7 @@ export function mountApp(
   const today = dependencies.today ?? localDate
   const randomUUID = dependencies.randomUUID ?? (() => crypto.randomUUID())
   let state = State.initialState(today())
-  let options: LedgerOptions | null = null
+  let options: CounterpartyOptions | null = null
   let sessionSchemaVersion: string | null = null
   let resetTimer: ReturnType<typeof setTimeout> | null = null
   let guardTimer: ReturnType<typeof setTimeout> | null = null
@@ -191,22 +191,22 @@ export function mountApp(
           </section>
         </div>
       </section>
-      <section class="step-panel" data-step="payee" aria-labelledby="payee-heading">
+      <section class="step-panel" data-step="counterparty" aria-labelledby="counterparty-heading">
         <button type="button" class="step-back">‹ 上一步</button>
-        <h2 id="payee-heading" class="step-question" tabindex="-1">
-          對象是誰？ <span id="payee-requirement">選填</span>
+        <h2 id="counterparty-heading" class="step-question" tabindex="-1">
+          交易對象是誰？ <span id="counterparty-requirement">選填</span>
         </h2>
         <div class="step-content">
-          <section id="payee-section" class="form-section" aria-labelledby="payee-heading">
+          <section id="counterparty-section" class="form-section" aria-labelledby="counterparty-heading">
             <div id="iou-toggle" class="segmented" style="grid-template-columns: repeat(2, 1fr)"
               aria-label="代墊或應付">
               <button type="button" data-iou="應收" aria-pressed="false">代墊(應收)</button>
               <button type="button" data-iou="應付" aria-pressed="false">應付</button>
             </div>
-            <div id="payee-suggestions" class="option-grid compact"></div>
+            <div id="counterparty-suggestions" class="option-grid compact"></div>
             <label class="text-field">
-              <span>自訂對象</span>
-              <input id="payee-input" type="text" autocomplete="off" placeholder="輸入其他對象" />
+              <span>自訂交易對象</span>
+              <input id="counterparty-input" type="text" autocomplete="off" placeholder="輸入其他交易對象" />
             </label>
           </section>
         </div>
@@ -362,17 +362,17 @@ export function mountApp(
   const toAccountPicker = root.querySelector<HTMLElement>('#to-account-picker')!
   const categoryGrid = root.querySelector<HTMLElement>('#category-grid')!
   const iouToggle = root.querySelector<HTMLElement>('#iou-toggle')!
-  const payeeSuggestions = root.querySelector<HTMLElement>('#payee-suggestions')!
-  const payeeRequirement = root.querySelector<HTMLElement>('#payee-requirement')!
-  const payeeInput = root.querySelector<HTMLInputElement>('#payee-input')!
+  const counterpartySuggestions = root.querySelector<HTMLElement>('#counterparty-suggestions')!
+  const counterpartyRequirement = root.querySelector<HTMLElement>('#counterparty-requirement')!
+  const counterpartyInput = root.querySelector<HTMLInputElement>('#counterparty-input')!
   const descriptionInput = root.querySelector<HTMLInputElement>('#description-input')!
   const dateInput = root.querySelector<HTMLInputElement>('#date-input')!
   const nextAmountButton = root.querySelector<HTMLButtonElement>('#next-amount')!
   const nextDetailsButton = root.querySelector<HTMLButtonElement>(
     '.step-panel[data-step="details"] .step-next',
   )!
-  const nextPayeeButton = root.querySelector<HTMLButtonElement>(
-    '.step-panel[data-step="payee"] .step-next',
+  const nextCounterpartyButton = root.querySelector<HTMLButtonElement>(
+    '.step-panel[data-step="counterparty"] .step-next',
   )!
   const confirmCard = root.querySelector<HTMLElement>('#confirm-card')!
   const submitButton = root.querySelector<HTMLButtonElement>('#submit-btn')!
@@ -412,7 +412,7 @@ export function mountApp(
       const details = document.createElement('div')
       details.className = 'transaction-details'
       const context = document.createElement('span')
-      context.textContent = [row.分類, row.對象].filter(Boolean).join(' · ')
+      context.textContent = [row.分類, row.交易對象].filter(Boolean).join(' · ')
       const status = document.createElement('span')
       status.className = 'transaction-status'
       status.textContent = row.結清狀態
@@ -444,10 +444,10 @@ export function mountApp(
     for (const group of groups) {
       const section = document.createElement('section')
       section.className = 'receivable-group'
-      section.dataset['counterparty'] = group.對象
+      section.dataset['counterparty'] = group.交易對象
 
       const heading = document.createElement('h3')
-      heading.textContent = group.對象 || '未指定對象'
+      heading.textContent = group.交易對象 || '未指定交易對象'
       section.appendChild(heading)
 
       for (const entry of group.entries) {
@@ -681,7 +681,7 @@ export function mountApp(
       controlsLocked: false,
     }
     renderSettlementAccounts()
-    settleTarget.textContent = `${entry.對象 || '未指定對象'} · ${entry.direction} · ${entry.說明}`
+    settleTarget.textContent = `${entry.交易對象 || '未指定交易對象'} · ${entry.direction} · ${entry.說明}`
     settleAmount.value = String(entry.outstanding)
     settleAmount.max = String(entry.outstanding)
     settleDate.value = today()
@@ -779,14 +779,14 @@ export function mountApp(
       }
     }
 
-    payeeSuggestions.replaceChildren()
+    counterpartySuggestions.replaceChildren()
     if (options && state.type !== '轉帳') {
-      for (const payee of options.payees) {
-        payeeSuggestions.appendChild(button(
-          payee,
-          'payee',
-          payee,
-          state.payee === payee,
+      for (const counterparty of options.counterparties) {
+        counterpartySuggestions.appendChild(button(
+          counterparty,
+          'counterparty',
+          counterparty,
+          state.counterparty === counterparty,
         ))
       }
     }
@@ -822,11 +822,11 @@ export function mountApp(
     const debitStep: State.EntryStep = current.type === '轉帳'
       ? 'toAccount'
       : current.type === '支出' && current.iou === '應收'
-        ? 'payee'
+        ? 'counterparty'
         : 'category'
     const creditStep: State.EntryStep = current.type === '支出'
       && current.iou === '應付'
-      ? 'payee'
+      ? 'counterparty'
       : 'account'
     const appendLeg = (
       label: string,
@@ -861,8 +861,8 @@ export function mountApp(
     }
     appendMeta('說明', current.description.trim() || '未填寫', 'details')
     appendMeta('日期', current.date, 'details')
-    const payee = current.payee.trim()
-    if (payee) appendMeta('對象', payee, 'payee')
+    const counterparty = current.counterparty.trim()
+    if (counterparty) appendMeta('交易對象', counterparty, 'counterparty')
   }
 
   function journalChip(step: State.EntryStep): {
@@ -896,11 +896,11 @@ export function mountApp(
         filled: state.category !== null,
       }
     }
-    if (step === 'payee') {
-      const payee = state.payee.trim()
+    if (step === 'counterparty') {
+      const counterparty = state.counterparty.trim()
       return {
-        label: payee || '對象',
-        filled: payee !== '',
+        label: counterparty || '交易對象',
+        filled: counterparty !== '',
       }
     }
     const description = state.description.trim()
@@ -950,7 +950,7 @@ export function mountApp(
       || (state.type === '支出' && state.iou === '應收')
     root.querySelector<HTMLElement>('#to-account-section')!.hidden =
       state.type !== '轉帳'
-    root.querySelector<HTMLElement>('#payee-section')!.hidden =
+    root.querySelector<HTMLElement>('#counterparty-section')!.hidden =
       state.type === '轉帳'
     iouToggle.hidden = state.type !== '支出'
     iouToggle.querySelectorAll<HTMLButtonElement>('[data-iou]').forEach(element => {
@@ -959,17 +959,17 @@ export function mountApp(
       element.setAttribute('aria-pressed', String(selected))
     })
 
-    const payeeRequired = state.iou !== null
-    payeeRequirement.textContent = payeeRequired ? '必填' : '選填'
-    payeeInput.required = payeeRequired
-    payeeInput.setAttribute('aria-required', String(payeeRequired))
-    payeeInput.value = state.payee
+    const counterpartyRequired = state.iou !== null
+    counterpartyRequirement.textContent = counterpartyRequired ? '必填' : '選填'
+    counterpartyInput.required = counterpartyRequired
+    counterpartyInput.setAttribute('aria-required', String(counterpartyRequired))
+    counterpartyInput.value = state.counterparty
     descriptionInput.value = state.description
     dateInput.value = state.date
     nextAmountButton.disabled = State.amountValue(state) <= 0
     nextDetailsButton.disabled = !State.canSubmit(state)
-    nextPayeeButton.disabled =
-      state.iou !== null && state.payee.trim() === ''
+    nextCounterpartyButton.disabled =
+      state.iou !== null && state.counterparty.trim() === ''
     submitButton.disabled = !State.canSubmit(state)
     submitButton.textContent = state.status === 'error'
       ? '再試一次'
@@ -1005,7 +1005,7 @@ export function mountApp(
     render()
   }
 
-  function applyOptions(next: LedgerOptions): void {
+  function applyOptions(next: CounterpartyOptions): void {
     if (
       sessionSchemaVersion !== null
       && next.schema_version !== sessionSchemaVersion
@@ -1170,10 +1170,10 @@ export function mountApp(
     ))
   })
 
-  payeeSuggestions.addEventListener('click', event => {
-    const target = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-payee]')
+  counterpartySuggestions.addEventListener('click', event => {
+    const target = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-counterparty]')
     if (!target) return
-    dispatch(State.setPayee(state, target.dataset['payee']!))
+    dispatch(State.setCounterparty(state, target.dataset['counterparty']!))
     dispatch(State.goNext(state))
   })
 
@@ -1187,8 +1187,8 @@ export function mountApp(
     ))
   })
 
-  payeeInput.addEventListener('input', () => {
-    dispatch(State.setPayee(state, payeeInput.value))
+  counterpartyInput.addEventListener('input', () => {
+    dispatch(State.setCounterparty(state, counterpartyInput.value))
   })
   descriptionInput.addEventListener('input', () => {
     dispatch(State.setDescription(state, descriptionInput.value))

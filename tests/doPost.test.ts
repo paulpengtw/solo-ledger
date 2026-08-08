@@ -20,7 +20,7 @@ const journalHeaders = [
   '金額',
   '幣別',
   '分類',
-  '對象',
+  '交易對象',
   '說明',
   '結清狀態',
   '沖銷txn_id',
@@ -39,7 +39,7 @@ const listTransactionFields = [
   '金額',
   '幣別',
   '分類',
-  '對象',
+  '交易對象',
   '說明',
   '結清狀態',
 ]
@@ -82,6 +82,55 @@ describe('doPost', () => {
     const changed = await post(harness, { action: 'health' }, 'health-schema-003')
 
     expect(changed.schema_version).not.toBe(first.schema_version)
+  })
+
+  it('repairs balance formulas after a hand-added account changes the schema', async () => {
+    const accounts = requiredSheet(harness, '會計科目')
+    const balances = requiredSheet(harness, '餘額')
+    const initialBalanceRows = balances
+      .getRange(1, 1, balances.getLastRow(), balances.getLastColumn())
+      .getValues()
+    const accountRow = accounts.getLastRow() + 1
+
+    accounts.getRange(accountRow, 1, 1, 5).setValues([
+      ['信用合作社', '資產', '銀行', true, 999],
+    ])
+
+    expect(
+      balances
+        .getRange(1, 1, balances.getLastRow(), balances.getLastColumn())
+        .getValues(),
+    ).toEqual(initialBalanceRows)
+
+    const health = await post(harness, { action: 'health' }, 'health-balance-repair-001')
+
+    expect(health.ok).toBe(true)
+    expect(balances.getLastRow()).toBe(accountRow)
+    expect(balances.getRange(accountRow, 1).getValues()[0]![0]).toContain(
+      "INDEX('會計科目'!$1:$1000,ROW(),MATCH(\"名稱\"",
+    )
+    expect(balances.getRange(accountRow, 2).getValues()[0]![0]).toContain(
+      "INDEX('會計科目'!$1:$1000,ROW(),MATCH(\"類型\"",
+    )
+    expect(balances.getRange(accountRow, 3).getValues()[0]![0]).toContain(
+      `$A${accountRow}`,
+    )
+
+    const repairedBalanceRows = balances
+      .getRange(1, 1, balances.getLastRow(), balances.getLastColumn())
+      .getValues()
+    const repeatedHealth = await post(
+      harness,
+      { action: 'health' },
+      'health-balance-repair-002',
+    )
+
+    expect(repeatedHealth.schema_version).toBe(health.schema_version)
+    expect(
+      balances
+        .getRange(1, 1, balances.getLastRow(), balances.getLastColumn())
+        .getValues(),
+    ).toEqual(repairedBalanceRows)
   })
 
   it('returns sorted enabled form options with the same schema_version as health', async () => {
@@ -340,7 +389,7 @@ describe('doPost', () => {
         金額: 260,
         幣別: 'TWD',
         分類: '餐飲',
-        對象: '路易莎',
+        交易對象: '路易莎',
         說明: '午餐',
         結清狀態: '',
         沖銷txn_id: '',
@@ -374,7 +423,7 @@ describe('doPost', () => {
         金額: 260,
         幣別: 'TWD',
         分類: '',
-        對象: '阿明',
+        交易對象: '阿明',
         說明: '代買午餐',
         結清狀態: '未結',
         沖銷txn_id: '',
@@ -408,7 +457,7 @@ describe('doPost', () => {
         金額: 260,
         幣別: 'TWD',
         分類: '餐飲',
-        對象: '阿明',
+        交易對象: '阿明',
         說明: '朋友先付午餐',
         結清狀態: '未結',
         沖銷txn_id: '',
@@ -744,7 +793,7 @@ function appendJournalRows(
       金額: '100',
       幣別: 'TWD',
       分類: '餐飲',
-      對象: '',
+      交易對象: '',
       說明: '',
       結清狀態: '',
       沖銷txn_id: '',

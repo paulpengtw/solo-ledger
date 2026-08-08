@@ -67,7 +67,7 @@ function fillExpense(description = '晚餐'): void {
   click('#next-amount')
   click('#account-picker [data-account="錢包"]')
   click('#category-grid [data-category="餐飲"]')
-  click('.step-panel[data-step="payee"] .step-next')
+  click('.step-panel[data-step="counterparty"] .step-next')
   input('#description-input', description)
   click('.step-panel[data-step="details"] .step-next')
 }
@@ -260,7 +260,7 @@ describe('selection-first entry form', () => {
     }
   })
 
-  it('renders accounts grouped by 子類型, per-type categories, and tappable 對象 suggestions', () => {
+  it('renders accounts grouped by 子類型, per-type categories, and tappable 交易對象 suggestions', () => {
     mount()
 
     expect(document.querySelector('[data-subtype="現金"]')?.textContent).toContain('錢包')
@@ -268,7 +268,7 @@ describe('selection-first entry form', () => {
     expect(document.querySelector('[data-subtype="信用卡"]')?.textContent).toContain('國泰卡')
     expect(document.querySelector('#category-grid')?.textContent).toContain('餐飲')
     expect(document.querySelector('#category-grid')?.textContent).not.toContain('薪資')
-    expect(document.querySelector('#payee-suggestions')?.textContent).toContain('全聯')
+    expect(document.querySelector('#counterparty-suggestions')?.textContent).toContain('全聯')
     expect(document.querySelector<HTMLElement>('#iou-toggle')?.hidden).toBe(false)
 
     click('#type-toggle [data-type="收入"]')
@@ -295,8 +295,8 @@ describe('selection-first entry form', () => {
   it('posts the exact transaction contract with a UUID idempotencyKey', async () => {
     mount()
     fillExpense()
-    click('#journal-strip [data-strip-step="payee"]')
-    click('#payee-suggestions [data-payee="全聯"]')
+    click('#journal-strip [data-strip-step="counterparty"]')
+    click('#counterparty-suggestions [data-counterparty="全聯"]')
 
     click('#submit-btn')
 
@@ -313,10 +313,10 @@ describe('selection-first entry form', () => {
     }, '3b241101-e2bb-4255-8caf-4136c566a962')
   })
 
-  it('selects 代墊 應收 by hiding and clearing category and requiring 對象', async () => {
+  it('selects 代墊 應收 by hiding and clearing category and requiring 交易對象', async () => {
     mount()
     fillExpense()
-    click('#journal-strip [data-strip-step="payee"]')
+    click('#journal-strip [data-strip-step="counterparty"]')
 
     const toggle = document.querySelector<HTMLButtonElement>(
       '#iou-toggle [data-iou="應收"]',
@@ -326,12 +326,12 @@ describe('selection-first entry form', () => {
 
     expect(document.querySelector<HTMLElement>('#category-section')?.hidden).toBe(true)
     expect(document.querySelector('#category-grid .selected')).toBeNull()
-    expect(document.querySelector('#payee-heading')?.textContent).toContain('必填')
-    expect(document.querySelector<HTMLInputElement>('#payee-input')?.required).toBe(true)
+    expect(document.querySelector('#counterparty-heading')?.textContent).toContain('必填')
+    expect(document.querySelector<HTMLInputElement>('#counterparty-input')?.required).toBe(true)
     expect(document.querySelector<HTMLButtonElement>('#submit-btn')?.disabled).toBe(true)
 
-    input('#payee-input', '阿明')
-    click('.step-panel[data-step="payee"] .step-next')
+    input('#counterparty-input', '阿明')
+    click('.step-panel[data-step="counterparty"] .step-next')
     click('#submit-btn')
 
     await vi.waitFor(() => expect(apiMocks.submitTransaction).toHaveBeenCalledTimes(1))
@@ -347,10 +347,10 @@ describe('selection-first entry form', () => {
     }, '3b241101-e2bb-4255-8caf-4136c566a962')
   })
 
-  it('selects 應付 while keeping category and requiring 對象', async () => {
+  it('selects 應付 while keeping category and requiring 交易對象', async () => {
     mount()
     fillExpense()
-    click('#journal-strip [data-strip-step="payee"]')
+    click('#journal-strip [data-strip-step="counterparty"]')
 
     const toggle = document.querySelector<HTMLButtonElement>(
       '#iou-toggle [data-iou="應付"]',
@@ -360,11 +360,11 @@ describe('selection-first entry form', () => {
 
     expect(document.querySelector<HTMLElement>('#category-section')?.hidden).toBe(false)
     expect(document.querySelector('#category-grid .selected')?.textContent).toBe('餐飲')
-    expect(document.querySelector<HTMLInputElement>('#payee-input')?.required).toBe(true)
+    expect(document.querySelector<HTMLInputElement>('#counterparty-input')?.required).toBe(true)
     expect(document.querySelector<HTMLButtonElement>('#submit-btn')?.disabled).toBe(true)
 
-    input('#payee-input', '阿明')
-    click('.step-panel[data-step="payee"] .step-next')
+    input('#counterparty-input', '阿明')
+    click('.step-panel[data-step="counterparty"] .step-next')
     click('#submit-btn')
 
     await vi.waitFor(() => expect(apiMocks.submitTransaction).toHaveBeenCalledTimes(1))
@@ -381,11 +381,11 @@ describe('selection-first entry form', () => {
     }, '3b241101-e2bb-4255-8caf-4136c566a962')
   })
 
-  it('toggles iou off without clearing category or 對象', () => {
+  it('toggles iou off without clearing category or 交易對象', () => {
     mount()
     fillExpense()
-    click('#journal-strip [data-strip-step="payee"]')
-    input('#payee-input', '阿明')
+    click('#journal-strip [data-strip-step="counterparty"]')
+    input('#counterparty-input', '阿明')
 
     const toggle = document.querySelector<HTMLButtonElement>(
       '#iou-toggle [data-iou="應付"]',
@@ -396,8 +396,8 @@ describe('selection-first entry form', () => {
 
     expect(document.querySelector<HTMLElement>('#category-section')?.hidden).toBe(false)
     expect(document.querySelector('#category-grid .selected')?.textContent).toBe('餐飲')
-    expect(document.querySelector<HTMLInputElement>('#payee-input')?.value).toBe('阿明')
-    expect(document.querySelector<HTMLInputElement>('#payee-input')?.required).toBe(false)
+    expect(document.querySelector<HTMLInputElement>('#counterparty-input')?.value).toBe('阿明')
+    expect(document.querySelector<HTMLInputElement>('#counterparty-input')?.required).toBe(false)
     expect(document.querySelector<HTMLButtonElement>('#submit-btn')?.disabled).toBe(false)
   })
 
@@ -420,14 +420,14 @@ describe('selection-first entry form', () => {
     await new Promise(resolve => setTimeout(resolve, 650))
 
     fillExpense('代墊午餐')
-    click('#journal-strip [data-strip-step="payee"]')
+    click('#journal-strip [data-strip-step="counterparty"]')
     const toggle = document.querySelector<HTMLButtonElement>(
       '#iou-toggle [data-iou="應收"]',
     )
     expect(toggle).not.toBeNull()
     toggle?.click()
-    input('#payee-input', '阿明')
-    click('.step-panel[data-step="payee"] .step-next')
+    input('#counterparty-input', '阿明')
+    click('.step-panel[data-step="counterparty"] .step-next')
     click('#submit-btn')
     await vi.waitFor(() => expect(apiMocks.submitTransaction).toHaveBeenCalledTimes(2))
 
@@ -595,7 +595,7 @@ describe('recent entries view', () => {
 })
 
 describe('outstanding items view', () => {
-  it('groups 應收 and 應付 entries by 對象', async () => {
+  it('groups 應收 and 應付 entries by 交易對象', async () => {
     mount()
 
     click('[data-view="outstanding"]')

@@ -19,7 +19,7 @@ const journalHeaders = [
   '金額',
   '幣別',
   '分類',
-  '對象',
+  '交易對象',
   '說明',
   '結清狀態',
   '沖銷txn_id',
@@ -68,7 +68,7 @@ describe('settle', () => {
       金額: 200,
       幣別: 'TWD',
       分類: '',
-      對象: '',
+      交易對象: '',
       說明: '',
       結清狀態: '',
       沖銷txn_id: 'receivable-001',
@@ -103,7 +103,7 @@ describe('settle', () => {
       金額: 300,
       幣別: 'TWD',
       分類: '',
-      對象: '',
+      交易對象: '',
       說明: '',
       結清狀態: '',
       沖銷txn_id: 'payable-001',
@@ -143,7 +143,7 @@ describe('settle', () => {
     expect(journalRows(harness)[0]?.結清狀態).toBe('部分')
     expect(await postListReceivables(harness)).toEqual([
       {
-        對象: '阿明',
+        交易對象: '阿明',
         entries: [
           expect.objectContaining({
             txn_id: 'two-step-001',
@@ -399,7 +399,7 @@ describe('list_receivables', () => {
     vi.useRealTimers()
   })
 
-  it('groups open rows by 對象 and derives outstanding, including view-only hand rows', async () => {
+  it('groups open rows by 交易對象 and derives outstanding, including view-only hand rows', async () => {
     appendJournalRows(harness, [
       {
         ...receivable('open-receivable-001', 500),
@@ -409,7 +409,7 @@ describe('list_receivables', () => {
       settlement('partial-b-001', 'open-receivable-001', 50),
       {
         ...payable('partial-payable-001', 720),
-        對象: '小美',
+        交易對象: '小美',
         說明: '朋友先付晚餐',
         結清狀態: '部分',
       },
@@ -434,14 +434,14 @@ describe('list_receivables', () => {
 
     expect(response).toEqual([
       {
-        對象: '阿明',
+        交易對象: '阿明',
         entries: [
           {
             txn_id: 'open-receivable-001',
             日期: '2026-07-26',
             金額: 500,
             幣別: 'TWD',
-            對象: '阿明',
+            交易對象: '阿明',
             說明: '代買車票',
             結清狀態: '未結',
             direction: '應收',
@@ -453,7 +453,7 @@ describe('list_receivables', () => {
             日期: '2026-07-25',
             金額: 80,
             幣別: 'TWD',
-            對象: '阿明',
+            交易對象: '阿明',
             說明: '手動代墊',
             結清狀態: '未結',
             direction: '應收',
@@ -463,14 +463,14 @@ describe('list_receivables', () => {
         ],
       },
       {
-        對象: '小美',
+        交易對象: '小美',
         entries: [
           {
             txn_id: 'partial-payable-001',
             日期: '2026-07-26',
             金額: 720,
             幣別: 'TWD',
-            對象: '小美',
+            交易對象: '小美',
             說明: '朋友先付晚餐',
             結清狀態: '部分',
             direction: '應付',
@@ -498,7 +498,7 @@ function receivable(txnId: string, amount: number): JournalRow {
     金額: amount,
     幣別: 'TWD',
     分類: '',
-    對象: '阿明',
+    交易對象: '阿明',
     說明: '代墊',
     結清狀態: '未結',
     沖銷txn_id: '',
@@ -518,7 +518,7 @@ function payable(txnId: string, amount: number): JournalRow {
     金額: amount,
     幣別: 'TWD',
     分類: '餐飲',
-    對象: '阿明',
+    交易對象: '阿明',
     說明: '朋友先付',
     結清狀態: '未結',
     沖銷txn_id: '',
@@ -538,7 +538,7 @@ function settlement(txnId: string, originalTxnId: string, amount: number): Journ
     金額: amount,
     幣別: 'TWD',
     分類: '',
-    對象: '',
+    交易對象: '',
     說明: '',
     結清狀態: '',
     沖銷txn_id: originalTxnId,
@@ -565,13 +565,13 @@ async function postSettle(
 
 async function postListReceivables(
   harness: FakeGasHarness,
-): Promise<Array<{ 對象: string; entries: Array<Record<string, unknown>> }>> {
+): Promise<Array<{ 交易對象: string; entries: Array<Record<string, unknown>> }>> {
   return await post(
     harness,
     { action: 'list_receivables' },
     `list-receivables-${crypto.randomUUID()}`,
   ) as unknown as Array<{
-    對象: string
+    交易對象: string
     entries: Array<Record<string, unknown>>
   }>
 }

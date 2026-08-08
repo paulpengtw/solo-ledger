@@ -14,7 +14,7 @@ export type PostingRow = {
   金額: number
   幣別: string
   分類: string
-  對象: string
+  交易對象: string
   說明: string
   結清狀態: string
   沖銷txn_id: string

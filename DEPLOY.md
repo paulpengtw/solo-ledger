@@ -282,9 +282,9 @@ npm run build
    Expected:
 
    - Exactly six tabs: `日記帳`, `會計科目`, `選項清單`, `設定`, `餘額`, `試算與檢查`.
-   - The `日記帳` header row contains exactly these 15 required headers, in bootstrap order: `日期`, `時間`, `類型`, `借方帳戶`, `貸方帳戶`, `金額`, `幣別`, `分類`, `對象`, `說明`, `結清狀態`, `沖銷txn_id`, `txn_id`, `來源`, `建立時間`.
+   - The `日記帳` header row contains exactly these 15 required headers, in bootstrap order: `日期`, `時間`, `類型`, `借方帳戶`, `貸方帳戶`, `金額`, `幣別`, `分類`, `交易對象`, `說明`, `結清狀態`, `沖銷txn_id`, `txn_id`, `來源`, `建立時間`.
    - `會計科目` contains the seeded rows `期初餘額`, `應收帳款`, `應付帳款`, `調整支出`, `調整收入`, `現金`, `銀行`, `悠遊卡`, `餐飲`, `交通`, and `薪資收入`, with their code-defined types.
-   - `設定` contains `預設幣別=TWD` and `預設帳戶=現金`; `選項清單` begins with the `對象` header.
+   - `設定` contains `預設幣別=TWD` and `預設帳戶=現金`; `選項清單` begins with the `交易對象` header.
    - `日期`, `時間`, and `建立時間` columns are formatted as plain text (`@`), and the two account columns have advisory validation sourced from `會計科目`.
    - `餘額` and `試算與檢查` contain formulas; `日記帳` contains none.
 
@@ -419,7 +419,7 @@ Cloudflare Logs product.
 Edit these tabs directly:
 
 - `會計科目`: real accounts and income/expense categories, including name, type, subtype, enabled flag, and sort order.
-- `選項清單`: suggested `對象` values.
+- `選項清單`: suggested `交易對象` values.
 - `設定`: `預設幣別` and `預設帳戶`.
 
 `schema_version` is recalculated from the displayed used-range values of those three tabs. A change is returned by both `health` and `get_options`; if it changes mid-session, the PWA displays a soft warning banner and remains usable.
@@ -458,7 +458,8 @@ Run `check_consistency` without repair and require `clean: true`. Then call `hea
 
 - **`bad signature`**: `EXPENSE_API_SECRET` differs between Cloudflare and Apps Script, including encoding or whitespace. Replace one side with a byte-identical copy and redeploy Pages after changing its environment.
 - **`request timestamp outside allowed window`**: the envelope timestamp differs from Apps Script time by more than `MAX_SKEW_SECONDS=300`. Correct the sending system's clock and sign a fresh envelope; this is a distinct error from `bad signature`.
-- **`missing required header: <name>`**: restore the exact reported header spelling. The 15 journal names are `日期`, `時間`, `類型`, `借方帳戶`, `貸方帳戶`, `金額`, `幣別`, `分類`, `對象`, `說明`, `結清狀態`, `沖銷txn_id`, `txn_id`, `來源`, and `建立時間`; for example, `missing required header: txn_id` means the exact `txn_id` cell is absent or renamed.
+- **Counterparty header migration**: existing deployed spreadsheets must have the `日記帳` header cell `對象` and the `選項清單` header cell `對象` hand-renamed to `交易對象` before setup validation. Otherwise setup validation reports `missing required header: 交易對象`.
+- **`missing required header: <name>`**: restore the exact reported header spelling. The 15 journal names are `日期`, `時間`, `類型`, `借方帳戶`, `貸方帳戶`, `金額`, `幣別`, `分類`, `交易對象`, `說明`, `結清狀態`, `沖銷txn_id`, `txn_id`, `來源`, and `建立時間`; for example, `missing required header: txn_id` means the exact `txn_id` cell is absent or renamed.
 - **`unknown or disabled account: <name>`** (or category): vocabulary lives in `會計科目`, not code. Correct the journal value or add/enable the exact account/category there; do not patch a TypeScript option list.
 - **302 to the Access login, or 401 from `/api/*`**: both mean the request was not authenticated, and Access chooses between them by request headers — a browser-style request is redirected with `302`, one identifying as XHR is rejected with `401`. First confirm the email is the sole allowed Access policy member and complete the one-time-PIN login. If login succeeded, verify `CF_ACCESS_AUD` and `CF_ACCESS_TEAM_DOMAIN`, then redeploy after any environment change; behind Access, the Pages Function independently rejects a missing, expired, wrong-audience, or unverifiable `CF_Authorization` cookie with `{ok:false,error:"unauthorized"}`.
 - **`over-settlement: amount <amount> exceeds outstanding <outstanding>`**: do not retry the same amount. Refresh the outstanding list and settle no more than the remaining amount.

@@ -11,6 +11,8 @@ import {
   RECEIVABLE_GROUPS,
   RECENT_TRANSACTIONS,
   REFRESHED_OPTIONS,
+  WIRE_CACHED_OPTIONS,
+  WIRE_REFRESHED_OPTIONS,
 } from './pwa-fixtures'
 
 const KEY = '3b241101-e2bb-4255-8caf-4136c566a962'
@@ -177,11 +179,11 @@ describe('expired-session classification', () => {
 describe('loadOptions', () => {
   it('returns localStorage cache synchronously then refreshes and updates it in the background', async () => {
     const storage = memoryStorage()
-    storage.setItem(OPTIONS_CACHE_KEY, JSON.stringify(CACHED_OPTIONS))
+    storage.setItem(OPTIONS_CACHE_KEY, JSON.stringify(WIRE_CACHED_OPTIONS))
     const onRefresh = vi.fn()
     const fetchFn = (async (url: RequestInfo | URL) => {
       expect(String(url)).toBe('/api/get_options')
-      return jsonResponse(200, REFRESHED_OPTIONS)
+      return jsonResponse(200, WIRE_REFRESHED_OPTIONS)
     }) as typeof fetch
 
     const loaded = loadOptions({ storage, fetchFn, onRefresh })
@@ -191,7 +193,7 @@ describe('loadOptions', () => {
 
     await expect(loaded.refresh).resolves.toEqual(REFRESHED_OPTIONS)
     expect(onRefresh).toHaveBeenCalledWith(REFRESHED_OPTIONS)
-    expect(JSON.parse(storage.getItem(OPTIONS_CACHE_KEY)!)).toEqual(REFRESHED_OPTIONS)
+    expect(JSON.parse(storage.getItem(OPTIONS_CACHE_KEY)!)).toEqual(WIRE_REFRESHED_OPTIONS)
   })
 })
 

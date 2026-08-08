@@ -1,4 +1,16 @@
-import type { Transaction } from './state'
+export type Transaction = {
+  type: '支出' | '收入' | '轉帳'
+  amount: number
+  date: string
+  description: string
+  time?: string
+  account?: string
+  toAccount?: string
+  category?: string
+  payee?: string
+  currency?: string
+  iou?: '應收' | '應付'
+}
 
 export type AccountOption = {
   name: string
@@ -21,6 +33,10 @@ export type LedgerOptions = {
   }
 }
 
+export type CounterpartyOptions = Omit<LedgerOptions, 'payees'> & {
+  counterparties: string[]
+}
+
 export type LedgerTransaction = {
   txn_id: string
   日期: string
@@ -31,7 +47,7 @@ export type LedgerTransaction = {
   金額: string
   幣別: string
   分類: string
-  對象: string
+  交易對象: string
   說明: string
   結清狀態: string
 }
@@ -41,7 +57,7 @@ export type ReceivableEntry = {
   日期: string
   金額: number
   幣別: string
-  對象: string
+  交易對象: string
   說明: string
   結清狀態: '未結' | '部分'
   direction: '應收' | '應付'
@@ -50,7 +66,7 @@ export type ReceivableEntry = {
 }
 
 export type ReceivableGroup = {
-  對象: string
+  交易對象: string
   entries: ReceivableEntry[]
 }
 
@@ -172,7 +188,7 @@ function isLedgerTransaction(value: unknown): value is LedgerTransaction {
     && typeof candidate.金額 === 'string'
     && typeof candidate.幣別 === 'string'
     && typeof candidate.分類 === 'string'
-    && typeof candidate.對象 === 'string'
+    && typeof candidate.交易對象 === 'string'
     && typeof candidate.說明 === 'string'
     && typeof candidate.結清狀態 === 'string'
   )
@@ -206,7 +222,7 @@ function isReceivableEntry(value: unknown): value is ReceivableEntry {
     && typeof candidate.金額 === 'number'
     && Number.isFinite(candidate.金額)
     && typeof candidate.幣別 === 'string'
-    && typeof candidate.對象 === 'string'
+    && typeof candidate.交易對象 === 'string'
     && typeof candidate.說明 === 'string'
     && (candidate.結清狀態 === '未結' || candidate.結清狀態 === '部分')
     && (candidate.direction === '應收' || candidate.direction === '應付')
@@ -220,7 +236,7 @@ function isReceivableGroup(value: unknown): value is ReceivableGroup {
   if (typeof value !== 'object' || value === null) return false
   const candidate = value as Record<string, unknown>
   return (
-    typeof candidate.對象 === 'string'
+    typeof candidate.交易對象 === 'string'
     && Array.isArray(candidate.entries)
     && candidate.entries.every(isReceivableEntry)
   )
@@ -376,13 +392,18 @@ export async function fetchOptions(
   }
 }
 
-function readCachedOptions(storage: Storage | undefined): LedgerOptions | null {
+function toCounterpartyOptions(options: LedgerOptions): CounterpartyOptions {
+  const { payees: counterparties, ...rest } = options
+  return { ...rest, counterparties }
+}
+
+function readCachedOptions(storage: Storage | undefined): CounterpartyOptions | null {
   if (!storage) return null
   try {
     const raw = storage.getItem(OPTIONS_CACHE_KEY)
     if (!raw) return null
     const parsed: unknown = JSON.parse(raw)
-    return isLedgerOptions(parsed) ? parsed : null
+    return isLedgerOptions(parsed) ? toCounterpartyOptions(parsed) : null
   } catch {
     return null
   }
@@ -391,22 +412,23 @@ function readCachedOptions(storage: Storage | undefined): LedgerOptions | null {
 export function loadOptions(deps: {
   storage?: Storage
   fetchFn?: typeof fetch
-  onRefresh?: (options: LedgerOptions) => void
+  onRefresh?: (options: CounterpartyOptions) => void
 } = {}): {
-  cached: LedgerOptions | null
-  refresh: Promise<LedgerOptions | null>
+  cached: CounterpartyOptions | null
+  refresh: Promise<CounterpartyOptions | null>
 } {
   const storage = deps.storage ?? (
     typeof localStorage === 'undefined' ? undefined : localStorage
   )
   const cached = readCachedOptions(storage)
-  const refresh = fetchOptions(deps.fetchFn).then(options => {
-    if (!options) return null
+  const refresh = fetchOptions(deps.fetchFn).then(wireOptions => {
+    if (!wireOptions) return null
     try {
-      storage?.setItem(OPTIONS_CACHE_KEY, JSON.stringify(options))
+      storage?.setItem(OPTIONS_CACHE_KEY, JSON.stringify(wireOptions))
     } catch {
       // Private browsing or a full quota must not block entry.
     }
+    const options = toCounterpartyOptions(wireOptions)
     deps.onRefresh?.(options)
     return options
   })

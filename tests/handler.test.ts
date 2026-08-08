@@ -273,7 +273,7 @@ describe('handleAction', () => {
   })
 
   it('uses a random nonce for list_receivables and forwards the upstream response verbatim', async () => {
-    const upstreamBody = '[{"對象":"阿明","entries":[]}]'
+    const upstreamBody = '[{"交易對象":"阿明","entries":[]}]'
     const fetchFn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       const envelope = JSON.parse(String(init?.body)) as {
         nonce: string

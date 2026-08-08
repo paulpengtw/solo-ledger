@@ -9,7 +9,7 @@ export const CACHED_OPTIONS = {
     支出: ['餐飲', '交通'],
     收入: ['薪資', '利息'],
   },
-  payees: ['全聯', '小明'],
+  counterparties: ['全聯', '小明'],
   defaults: {
     currency: 'TWD',
     account: '錢包',
@@ -26,12 +26,20 @@ export const REFRESHED_OPTIONS = {
     支出: [...CACHED_OPTIONS.categories.支出, '醫療'],
     收入: [...CACHED_OPTIONS.categories.收入],
   },
-  payees: [...CACHED_OPTIONS.payees, '家樂福'],
+  counterparties: [...CACHED_OPTIONS.counterparties, '家樂福'],
   defaults: {
     currency: 'TWD',
     account: '台新銀行',
   },
 } as const
+
+function wireOptions<T extends { counterparties: readonly string[] }>(options: T) {
+  const { counterparties: payees, ...rest } = options
+  return { ...rest, payees }
+}
+
+export const WIRE_CACHED_OPTIONS = wireOptions(CACHED_OPTIONS)
+export const WIRE_REFRESHED_OPTIONS = wireOptions(REFRESHED_OPTIONS)
 
 export const RECENT_TRANSACTIONS = [
   {
@@ -44,7 +52,7 @@ export const RECENT_TRANSACTIONS = [
     金額: '260.00',
     幣別: 'TWD',
     分類: '餐飲',
-    對象: '全聯',
+    交易對象: '全聯',
     說明: '晚餐',
     結清狀態: '未結',
   },
@@ -58,7 +66,7 @@ export const RECENT_TRANSACTIONS = [
     金額: '50000',
     幣別: 'TWD',
     分類: '薪資',
-    對象: '',
+    交易對象: '',
     說明: '手動補登',
     結清狀態: '',
   },
@@ -66,14 +74,14 @@ export const RECENT_TRANSACTIONS = [
 
 export const RECEIVABLE_GROUPS = [
   {
-    對象: '阿明',
+    交易對象: '阿明',
     entries: [
       {
         txn_id: 'receivable-open-001',
         日期: '2026-07-26',
         金額: 500,
         幣別: 'TWD',
-        對象: '阿明',
+        交易對象: '阿明',
         說明: '代買車票',
         結清狀態: '部分',
         direction: '應收',
@@ -85,7 +93,7 @@ export const RECEIVABLE_GROUPS = [
         日期: '2026-07-25',
         金額: 80,
         幣別: 'TWD',
-        對象: '阿明',
+        交易對象: '阿明',
         說明: '手動代墊',
         結清狀態: '未結',
         direction: '應收',
@@ -95,14 +103,14 @@ export const RECEIVABLE_GROUPS = [
     ],
   },
   {
-    對象: '小美',
+    交易對象: '小美',
     entries: [
       {
         txn_id: 'payable-open-001',
         日期: '2026-07-24',
         金額: 720,
         幣別: 'TWD',
-        對象: '小美',
+        交易對象: '小美',
         說明: '朋友先付晚餐',
         結清狀態: '未結',
         direction: '應付',
