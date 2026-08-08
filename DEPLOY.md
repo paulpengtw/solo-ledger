@@ -17,13 +17,12 @@ Two distinct artifact types share some vocabulary — context determines which i
 
 > **Disambiguate by context.** Both artifacts use the word "production". When the distinction matters, say "the Apps Script `/exec` endpoint" or "the Pages production environment" rather than just "production".
 
-The HMAC secret (`EXPENSE_API_SECRET`) lives in four distinct configuration homes with different names and purposes:
+The HMAC secret (`EXPENSE_API_SECRET`) lives in three distinct configuration homes with different names and purposes:
 
 | Home | Name | Purpose |
 | --- | --- | --- |
 | Apps Script Script Properties | `EXPENSE_API_SECRET` | Read at runtime by the Apps Script `/exec` endpoint |
 | Cloudflare Pages environment variable | `EXPENSE_API_SECRET` | Read at runtime by the Pages Function |
-| GitHub Actions secret | `EXPENSE_API_SECRET` | Used by CI to deploy (not read at runtime) |
 | Local `.env` | `EXPENSE_API_SECRET` | Local tooling only — **never read at runtime** |
 
 The `.env` file is never loaded by the deployed app; it exists solely for local development scripts.
