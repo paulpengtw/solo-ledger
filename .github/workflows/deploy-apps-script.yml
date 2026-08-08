@@ -35,6 +35,6 @@ jobs:
       - name: Write .clasp.json
         run: printf '{"scriptId":"%s","rootDir":"apps-script"}' "$SCRIPT_ID" > .clasp.json
       - name: Push source to script project
-        run: npx clasp@3.3.0 push -f
+        run: npx --yes @google/clasp@3.3.0 push -f
       - name: Update the /exec deployment
-        run: npx clasp@3.3.0 deploy -i "$DEPLOYMENT_ID" -d "${{ github.sha }}"
+        run: npx --yes @google/clasp@3.3.0 deploy -i "$DEPLOYMENT_ID" -d "${{ github.sha }}"
