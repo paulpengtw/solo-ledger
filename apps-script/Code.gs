@@ -41,6 +41,7 @@ var BACKUP_FOLDER_PROPERTY = 'LEDGER_BACKUP_FOLDER_ID';
 var BACKUP_FOLDER_NAME = 'Solo Ledger backups';
 var BACKUP_RETENTION_COUNT = 12;
 var ACCOUNT_STABLE_ID_HEADER = 'stable_id';
+var ACCOUNT_ALIASES_HEADER = 'aliases';
 var OBSERVATION_SHEET_NAME = '來源觀察';
 var OBSERVATION_HEADERS = ['observation_id', 'source_reference', 'content_digest'];
 var OBSERVATION_ID_HEADER = OBSERVATION_HEADERS[0];
@@ -56,20 +57,82 @@ function stableIdentitySchemaAvailable_() {
   }
   try {
     var spreadsheet = SpreadsheetApp.openById(spreadsheetId);
-    var accounts = spreadsheet.getSheetByName('會計科目');
-    var journal = spreadsheet.getSheetByName('日記帳');
-    var observations = spreadsheet.getSheetByName(OBSERVATION_SHEET_NAME);
-    return Boolean(
-      accounts && journal && observations &&
-      sheetHasHeaders_(accounts, [
-        '名稱', '類型', '子類型', '啟用', '排序', ACCOUNT_STABLE_ID_HEADER,
-      ]) &&
-      sheetHasHeaders_(journal, JOURNAL_HEADERS) &&
-      sheetHasHeaders_(observations, OBSERVATION_HEADERS)
-    );
+    if (!stableIdentityMetadataSchemaPresent_(spreadsheet)) {
+      return false;
+    }
+    return !persistedStableIdentityDuplicate_(spreadsheet);
   } catch (error) {
     return false;
   }
+}
+
+function stableIdentityMetadataSchemaPresent_(spreadsheet) {
+  var accounts = spreadsheet.getSheetByName('會計科目');
+  var journal = spreadsheet.getSheetByName('日記帳');
+  var observations = spreadsheet.getSheetByName(OBSERVATION_SHEET_NAME);
+  if (!accounts || !journal || !observations ||
+      !sheetHasHeaders_(accounts, [
+        '名稱', '類型', '子類型', '啟用', '排序', ACCOUNT_STABLE_ID_HEADER,
+      ]) || !sheetHasHeaders_(journal, JOURNAL_HEADERS) ||
+      !sheetHasHeaders_(observations, OBSERVATION_HEADERS)) {
+    return false;
+  }
+  try {
+    resolveHeaders_(
+      accounts.getRange(1, 1, 1, accounts.getLastColumn()).getDisplayValues()[0],
+      ['名稱', '類型', '子類型', '啟用', '排序', ACCOUNT_STABLE_ID_HEADER],
+    );
+    resolveHeaders_(
+      journal.getRange(1, 1, 1, journal.getLastColumn()).getDisplayValues()[0],
+      JOURNAL_HEADERS,
+    );
+    resolveHeaders_(
+      observations.getRange(1, 1, 1, observations.getLastColumn()).getDisplayValues()[0],
+      OBSERVATION_HEADERS,
+    );
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function persistedStableIdentityDuplicate_(spreadsheet) {
+  var seen = Object.create(null);
+  var sheets = [
+    { sheet: spreadsheet.getSheetByName('會計科目'), header: ACCOUNT_STABLE_ID_HEADER },
+    { sheet: spreadsheet.getSheetByName('日記帳'), header: 'txn_id' },
+    { sheet: spreadsheet.getSheetByName(OBSERVATION_SHEET_NAME), header: OBSERVATION_ID_HEADER },
+  ];
+  for (var sheetIndex = 0; sheetIndex < sheets.length; sheetIndex += 1) {
+    var item = sheets[sheetIndex];
+    if (!item.sheet || item.sheet.getLastColumn() === 0) {
+      continue;
+    }
+    var headers = item.sheet.getRange(1, 1, 1, item.sheet.getLastColumn())
+      .getDisplayValues()[0];
+    var column = headers.map(function (header) {
+      return String(header || '').trim();
+    }).indexOf(item.header);
+    if (column === -1) {
+      continue;
+    }
+    var lastRow = item.sheet.getLastRow();
+    if (lastRow < 2) {
+      continue;
+    }
+    var values = item.sheet.getRange(2, column + 1, lastRow - 1, 1).getDisplayValues();
+    for (var rowIndex = 0; rowIndex < values.length; rowIndex += 1) {
+      var identity = String(values[rowIndex][0] || '').trim();
+      if (!identity) {
+        continue;
+      }
+      if (seen[identity]) {
+        return identity;
+      }
+      seen[identity] = true;
+    }
+  }
+  return null;
 }
 
 function sheetHasHeaders_(sheet, requiredHeaders) {
@@ -384,6 +447,9 @@ function snapshot_(payload) {
     requiredProp_('LEDGER_SPREADSHEET_ID'),
   );
   var source = readSnapshotSource_(spreadsheet);
+  if (payload.scope === 'observations' && !source.observationSchemaAvailable) {
+    return identityUnavailable_('stable-identity-schema-unavailable');
+  }
   var revision = snapshotRevision_(source);
   if (
     payload.snapshotRevision !== undefined &&
@@ -395,6 +461,10 @@ function snapshot_(payload) {
       expected: String(payload.snapshotRevision),
       actual: revision,
     };
+  }
+  var duplicateId = duplicateStableIdentity_(source, payload.scope);
+  if (duplicateId) {
+    return identityUnavailable_('stable-identity-duplicate-id');
   }
   var records = snapshotRecordsForScope_(source, payload.scope, revision);
   var offset = snapshotCursorOffset_(payload.cursor);
@@ -418,12 +488,8 @@ function lookup_(payload) {
   if (!payload || typeof payload !== 'object') {
     throw new Error('payload is required');
   }
-  if (
-    payload.scope !== 'accounts' &&
-    payload.scope !== 'events' &&
-    payload.scope !== 'observations'
-  ) {
-    throw new Error('lookup scope must be accounts, events, or observations');
+  if (payload.scope !== undefined) {
+    throw new Error('lookup scope is not supported');
   }
   if (!Array.isArray(payload.ids)) {
     throw new Error('lookup ids must be an array');
@@ -447,6 +513,9 @@ function lookup_(payload) {
     requiredProp_('LEDGER_SPREADSHEET_ID'),
   );
   var source = readSnapshotSource_(spreadsheet);
+  if (!source.observationSchemaAvailable) {
+    return identityUnavailable_('stable-identity-schema-unavailable');
+  }
   var revision = snapshotRevision_(source);
   var expected = String(payload.snapshotRevision);
   if (expected !== revision) {
@@ -458,21 +527,30 @@ function lookup_(payload) {
     };
   }
 
-  var records = snapshotRecordsForScope_(source, payload.scope, revision);
+  var duplicateId = duplicateStableIdentity_(source);
+  if (duplicateId) {
+    return identityUnavailable_('stable-identity-duplicate-id');
+  }
+  var recordsByScope = {
+    accounts: snapshotAccountRecords_(source, revision),
+    events: snapshotEventRecords_(source),
+    observations: snapshotObservationRecords_(source),
+  };
   var found = [];
   var missing = [];
   var unidentified = [];
   for (idIndex = 0; idIndex < ids.length; idIndex += 1) {
     id = ids[idIndex];
-    var record = lookupRecordForId_(records, id, payload.scope);
-    if (record === null) {
+    var match = lookupRecordAcrossScopes_(recordsByScope, id);
+    if (match.kind === 'missing') {
       missing.push(id);
       continue;
     }
-    found.push(record);
-    if (record.identity && record.identity.kind === 'unidentified') {
+    if (match.kind === 'unidentified') {
       unidentified.push(id);
+      continue;
     }
+    found.push(match.record);
   }
 
   return {
@@ -485,26 +563,48 @@ function lookup_(payload) {
   };
 }
 
+function identityUnavailable_(reason) {
+  return {
+    kind: 'unavailable',
+    book: 'personal',
+    reason: reason,
+  };
+}
+
 function snapshotRecordsForScope_(source, scope, revision) {
   if (scope === 'accounts') return snapshotAccountRecords_(source, revision);
   if (scope === 'events') return snapshotEventRecords_(source);
   return snapshotObservationRecords_(source);
 }
 
-function lookupRecordForId_(records, id, scope) {
-  for (var index = 0; index < records.length; index += 1) {
-    var record = records[index];
-    if (scope === 'accounts') {
-      if (record.id === id || record.legacyId === id) {
-        return record;
+function lookupRecordAcrossScopes_(recordsByScope, id) {
+  var identified = [];
+  var unidentified = [];
+  var scopes = ['accounts', 'events', 'observations'];
+  for (var scopeIndex = 0; scopeIndex < scopes.length; scopeIndex += 1) {
+    var scope = scopes[scopeIndex];
+    var records = recordsByScope[scope];
+    for (var index = 0; index < records.length; index += 1) {
+      var record = records[index];
+      if (record.identity && record.identity.kind === 'identified' && record.id === id) {
+        identified.push(record);
+      } else if (scope === 'accounts' &&
+          record.identity && record.identity.kind === 'unidentified' &&
+          record.legacyId === id) {
+        unidentified.push(record);
       }
-      continue;
-    }
-    if (record.id === id) {
-      return record;
     }
   }
-  return null;
+  if (identified.length === 1 && unidentified.length === 0) {
+    return { kind: 'identified', record: identified[0] };
+  }
+  if (identified.length > 0 || unidentified.length > 1) {
+    return { kind: 'missing' };
+  }
+  if (unidentified.length === 1) {
+    return { kind: 'unidentified' };
+  }
+  return { kind: 'missing' };
 }
 
 function identityRepairReference_(scope, row) {
@@ -556,7 +656,10 @@ function adoptIdentity_(payload) {
   lock.waitLock(LOCK_WAIT_MILLISECONDS);
   try {
     requireFinancialOpen_(payload);
-    if (!stableIdentitySchemaAvailable_()) {
+    var metadataSpreadsheet = SpreadsheetApp.openById(
+      requiredProp_('LEDGER_SPREADSHEET_ID'),
+    );
+    if (!stableIdentityMetadataSchemaPresent_(metadataSpreadsheet)) {
       throw new Error('stable identity metadata schema is unavailable');
     }
     var properties = PropertiesService.getScriptProperties();
@@ -584,10 +687,24 @@ function adoptIdentity_(payload) {
       }
     }
 
-    var spreadsheet = SpreadsheetApp.openById(
-      requiredProp_('LEDGER_SPREADSHEET_ID'),
-    );
+    var spreadsheet = metadataSpreadsheet;
     var source = readSnapshotSource_(spreadsheet);
+    if (!source.observationSchemaAvailable) {
+      return identityConflict_(
+        operationId,
+        'stable-identity-schema-unavailable',
+        'stable identity metadata schema is unavailable',
+      );
+    }
+    var duplicateId = duplicateStableIdentity_(source);
+    if (duplicateId) {
+      return identityConflict_(
+        operationId,
+        'duplicate-stable-id',
+        'persisted stable identity is duplicated',
+        { stableId: duplicateId },
+      );
+    }
     var actualRevision = snapshotRevision_(source);
     var revisionChanged = actualRevision !== expectedRevision;
     if (revisionChanged && !previous) {
@@ -601,6 +718,13 @@ function adoptIdentity_(payload) {
     var target = resolveIdentityRepairTarget_(source, reference);
     if (target.error) {
       return identityConflict_(operationId, target.error, target.detail);
+    }
+    if (target.scope === 'observations' && !observationEvidenceValid_(target.row)) {
+      return identityConflict_(
+        operationId,
+        'invalid-observation-evidence',
+        'observation source reference and content digest are required',
+      );
     }
     if (target.contentDigest !== reference.contentDigest) {
       return identityConflict_(
@@ -641,7 +765,7 @@ function adoptIdentity_(payload) {
         'repair target already has a stable identity',
       );
     }
-    if (identityExists_(source, target.scope, stableId)) {
+    if (identityExists_(source, stableId)) {
       return identityConflict_(
         operationId,
         'duplicate-stable-id',
@@ -752,14 +876,42 @@ function resolveIdentityRepairTarget_(source, reference) {
   };
 }
 
-function identityExists_(source, scope, stableId) {
-  var rows = identityRowsForScope_(source, scope);
-  for (var index = 0; index < rows.length; index += 1) {
-    if (identityValueForScope_(scope, rows[index]) === stableId) {
-      return true;
+function identityExists_(source, stableId) {
+  var scopes = ['accounts', 'events', 'observations'];
+  for (var scopeIndex = 0; scopeIndex < scopes.length; scopeIndex += 1) {
+    var scope = scopes[scopeIndex];
+    var rows = scope === 'accounts' && source.accountIdentityRows
+      ? source.accountIdentityRows
+      : identityRowsForScope_(source, scope);
+    for (var index = 0; index < rows.length; index += 1) {
+      if (identityValueForScope_(scope, rows[index]) === stableId) {
+        return true;
+      }
     }
   }
   return false;
+}
+
+function duplicateStableIdentity_(source, scope) {
+  var scopes = scope ? [scope] : ['accounts', 'events', 'observations'];
+  var seen = Object.create(null);
+  for (var scopeIndex = 0; scopeIndex < scopes.length; scopeIndex += 1) {
+    var currentScope = scopes[scopeIndex];
+    var rows = !scope && currentScope === 'accounts' && source.accountIdentityRows
+      ? source.accountIdentityRows
+      : identityRowsForScope_(source, currentScope);
+    for (var index = 0; index < rows.length; index += 1) {
+      var identity = identityValueForScope_(currentScope, rows[index]);
+      if (!identity) {
+        continue;
+      }
+      if (seen[identity]) {
+        return identity;
+      }
+      seen[identity] = true;
+    }
+  }
+  return null;
 }
 
 function identityRowsForScope_(source, scope) {
@@ -867,10 +1019,16 @@ function readSnapshotSource_(spreadsheet) {
     '排序',
   ]);
   var vocabularyRows = [];
+  var accountIdentityRows = [];
+  var accountAliasRows = [];
   var accountTypes = Object.create(null);
   var accountStableIdColumn = optionalMetadataColumn_(
     accountSheet,
     ACCOUNT_STABLE_ID_HEADER,
+  );
+  var accountAliasesColumn = optionalMetadataColumn_(
+    accountSheet,
+    ACCOUNT_ALIASES_HEADER,
   );
   for (var accountIndex = 1; accountIndex < accountValues.length; accountIndex += 1) {
     var accountRow = accountValues[accountIndex];
@@ -886,17 +1044,47 @@ function readSnapshotSource_(spreadsheet) {
       }
       accountTypes[accountName] = accountType;
     }
-    if (!accountEnabled) {
-      continue;
-    }
-    vocabularyRows.push({
+    var accountAliases = accountAliasesColumn === null
+      ? []
+      : parseAccountAliases_(accountRow[accountAliasesColumn - 1], accountIndex + 1);
+    accountAliasRows.push({
+      name: accountName,
+      type: accountType,
+      enabled: accountEnabled,
+      aliases: accountAliases,
+    });
+    var identityRow = {
       sheetRow: accountIndex + 1,
       cells: accountRow,
+      name: accountName,
+      type: accountType,
+      aliases: accountAliases,
       stableIdColumn: accountStableIdColumn,
       stableId: accountStableIdColumn === null
         ? ''
         : String(accountRow[accountStableIdColumn - 1] || '').trim(),
-    });
+    };
+    accountIdentityRows.push(identityRow);
+    if (accountEnabled) {
+      vocabularyRows.push(identityRow);
+    }
+  }
+
+  var aliasOwners = Object.create(null);
+  for (var aliasRowIndex = 0; aliasRowIndex < accountAliasRows.length; aliasRowIndex += 1) {
+    var aliasRow = accountAliasRows[aliasRowIndex];
+    for (var aliasIndex = 0; aliasIndex < aliasRow.aliases.length; aliasIndex += 1) {
+      var alias = aliasRow.aliases[aliasIndex];
+      if (alias === aliasRow.name ||
+          Object.prototype.hasOwnProperty.call(accountTypes, alias) ||
+          Object.prototype.hasOwnProperty.call(aliasOwners, alias)) {
+        throw new Error('ambiguous account alias: ' + alias);
+      }
+      aliasOwners[alias] = aliasRow.name;
+      if (aliasRow.enabled) {
+        accountTypes[alias] = aliasRow.type;
+      }
+    }
   }
 
   var journal = requiredSheet_(spreadsheet, '日記帳');
@@ -938,6 +1126,7 @@ function readSnapshotSource_(spreadsheet) {
   }
 
   var observationRows = [];
+  var observationSchemaAvailable = false;
   var observationSheet = spreadsheet.getSheetByName(OBSERVATION_SHEET_NAME);
   var observationColumns = null;
   if (observationSheet && observationSheet.getLastColumn() > 0) {
@@ -946,8 +1135,13 @@ function readSnapshotSource_(spreadsheet) {
     var observationHeader = observationSheet
       .getRange(1, 1, 1, observationLastColumn)
       .getDisplayValues()[0];
-    observationColumns = resolveHeaders_(observationHeader, OBSERVATION_HEADERS);
-    if (observationLastRow >= 2) {
+    try {
+      observationColumns = resolveHeaders_(observationHeader, OBSERVATION_HEADERS);
+      observationSchemaAvailable = true;
+    } catch (error) {
+      observationColumns = null;
+    }
+    if (observationSchemaAvailable && observationLastRow >= 2) {
       var observationRange = observationSheet.getRange(
         2,
         1,
@@ -995,11 +1189,44 @@ function readSnapshotSource_(spreadsheet) {
   return {
     accountColumns: accountColumns,
     accountStableIdColumn: accountStableIdColumn,
+    accountIdentityRows: accountIdentityRows,
     vocabularyRows: vocabularyRows,
     journalRows: journalRows,
     journalColumns: journalColumns,
     observationRows: observationRows,
+    observationSchemaAvailable: observationSchemaAvailable,
   };
+}
+
+function parseAccountAliases_(value, sheetRow) {
+  var text = value === null || value === undefined ? '' : String(value).trim();
+  if (!text) {
+    return [];
+  }
+  var parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error('invalid account aliases at row ' + sheetRow);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error('invalid account aliases at row ' + sheetRow);
+  }
+  var aliases = [];
+  for (var index = 0; index < parsed.length; index += 1) {
+    if (typeof parsed[index] !== 'string' || !parsed[index].trim()) {
+      throw new Error('invalid account aliases at row ' + sheetRow);
+    }
+    var alias = parsed[index].trim();
+    if (aliases.indexOf(alias) !== -1) {
+      throw new Error('invalid account aliases at row ' + sheetRow);
+    }
+    aliases.push(alias);
+  }
+  if (JSON.stringify(aliases) !== JSON.stringify(parsed)) {
+    throw new Error('invalid account aliases at row ' + sheetRow);
+  }
+  return aliases;
 }
 
 function identityContentDigest_(scope, row) {
@@ -1146,6 +1373,7 @@ function snapshotAccountRecords_(source, revision) {
         : { kind: 'unidentified', reason: 'missing-stable-id' },
       sourceRow: source.vocabularyRows[index],
       name: String(cells[columns['名稱'] - 1] || '').trim(),
+      aliases: source.vocabularyRows[index].aliases || [],
       type: type,
       subtype: String(cells[columns['子類型'] - 1] || '').trim(),
       enabled: true,
@@ -1192,6 +1420,7 @@ function snapshotAccountRecords_(source, revision) {
       contentDigest: identityContentDigest_('accounts', account.sourceRow),
       repairReference: identityRepairReference_('accounts', account.sourceRow),
       name: account.name,
+      aliases: account.aliases,
       type: account.type,
       subtype: account.subtype,
       enabled: true,
@@ -1253,13 +1482,21 @@ function snapshotObservationRecords_(source) {
   for (var index = 0; index < source.observationRows.length; index += 1) {
     var row = source.observationRows[index];
     var observationId = row.observationId;
+    var sourceReference = String(row.values.source_reference || '').trim();
+    var sourceContentDigest = String(row.values.content_digest || '').trim();
+    var evidenceValid = observationEvidenceValid_(row);
+    var usableId = evidenceValid && observationId ? observationId : '';
+    var identityReason = !evidenceValid
+      ? 'invalid-observation-evidence'
+      : 'blank-observation-id';
     records.push({
-      id: observationId || null,
-      identity: observationId
-        ? { kind: 'identified', observationId: observationId }
-        : { kind: 'unidentified', reason: 'blank-observation-id' },
-      sourceReference: String(row.values.source_reference || '').trim(),
-      sourceContentDigest: String(row.values.content_digest || '').trim(),
+      id: usableId || null,
+      persistedId: observationId || null,
+      identity: usableId
+        ? { kind: 'identified', observationId: usableId }
+        : { kind: 'unidentified', reason: identityReason },
+      sourceReference: sourceReference,
+      sourceContentDigest: sourceContentDigest,
       sheetRow: row.sheetRow,
       contentDigest: identityContentDigest_('observations', row),
       repairReference: identityRepairReference_('observations', row),
@@ -1268,9 +1505,18 @@ function snapshotObservationRecords_(source) {
   return records;
 }
 
+function observationEvidenceValid_(row) {
+  if (!row || !row.values) {
+    return false;
+  }
+  var sourceReference = String(row.values.source_reference || '').trim();
+  var contentDigest = String(row.values.content_digest || '').trim();
+  return sourceReference !== '' && /^[0-9a-f]{64}$/i.test(contentDigest);
+}
+
 function applySnapshotBalanceRow_(account, row) {
-  var debit = String(row.values['借方帳戶'] || '').trim() === account.name;
-  var credit = String(row.values['貸方帳戶'] || '').trim() === account.name;
+  var debit = accountNameMatches_(account, row.values['借方帳戶']);
+  var credit = accountNameMatches_(account, row.values['貸方帳戶']);
   if (!debit && !credit) {
     return;
   }
@@ -1288,6 +1534,11 @@ function applySnapshotBalanceRow_(account, row) {
     if (debit) balance = addDecimalStrings_(balance, negateDecimal_(amount));
   }
   account.balanceByCurrency[currency] = balance;
+}
+
+function accountNameMatches_(account, value) {
+  var name = String(value || '').trim();
+  return name === account.name || (account.aliases || []).indexOf(name) !== -1;
 }
 
 function snapshotCursorOffset_(cursor) {
@@ -2440,8 +2691,10 @@ function readAccountVocabulary_(spreadsheet) {
   var lastColumn = sheet.getLastColumn();
   var values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
   var columns = resolveHeaders_(values[0], ['名稱', '類型', '啟用']);
+  var aliasesColumn = optionalMetadataColumn_(sheet, ACCOUNT_ALIASES_HEADER);
   var accountTypes = Object.create(null);
   var enabled = Object.create(null);
+  var aliasEntries = [];
 
   for (var rowIndex = 1; rowIndex < values.length; rowIndex += 1) {
     var row = values[rowIndex];
@@ -2451,6 +2704,27 @@ function readAccountVocabulary_(spreadsheet) {
     }
     accountTypes[name] = String(row[columns['類型'] - 1] || '').trim();
     enabled[name] = isTrue_(row[columns['啟用'] - 1]);
+    var aliases = aliasesColumn === null ? [] : parseAccountAliases_(
+      row[aliasesColumn - 1],
+      rowIndex + 1,
+    );
+    for (var aliasIndex = 0; aliasIndex < aliases.length; aliasIndex += 1) {
+      aliasEntries.push({
+        alias: aliases[aliasIndex],
+        type: accountTypes[name],
+        enabled: enabled[name],
+      });
+    }
+  }
+
+  for (var entryIndex = 0; entryIndex < aliasEntries.length; entryIndex += 1) {
+    var entry = aliasEntries[entryIndex];
+    if (Object.prototype.hasOwnProperty.call(accountTypes, entry.alias) ||
+        Object.prototype.hasOwnProperty.call(enabled, entry.alias)) {
+      throw new Error('ambiguous account alias: ' + entry.alias);
+    }
+    accountTypes[entry.alias] = entry.type;
+    enabled[entry.alias] = entry.enabled;
   }
 
   return { accountTypes: accountTypes, enabled: enabled };
@@ -3050,18 +3324,18 @@ function setupSpreadsheet() {
 
   initializeBlankSheet_(journal, [JOURNAL_HEADERS]);
   initializeBlankSheet_(accounts, [
-    ['名稱', '類型', '子類型', '啟用', '排序', ACCOUNT_STABLE_ID_HEADER],
-    ['期初餘額', '權益', '系統', true, 10, newStableIdentity_('account', '期初餘額')],
-    ['應收帳款', '資產', '往來', true, 20, newStableIdentity_('account', '應收帳款')],
-    ['應付帳款', '負債', '往來', true, 30, newStableIdentity_('account', '應付帳款')],
-    ['調整支出', '支出', '調整', true, 40, newStableIdentity_('account', '調整支出')],
-    ['調整收入', '收入', '調整', true, 50, newStableIdentity_('account', '調整收入')],
-    ['現金', '資產', '現金', true, 100, newStableIdentity_('account', '現金')],
-    ['銀行', '資產', '銀行', true, 110, newStableIdentity_('account', '銀行')],
-    ['悠遊卡', '資產', '電子票證', true, 120, newStableIdentity_('account', '悠遊卡')],
-    ['餐飲', '支出', '日常', true, 200, newStableIdentity_('account', '餐飲')],
-    ['交通', '支出', '日常', true, 210, newStableIdentity_('account', '交通')],
-    ['薪資收入', '收入', '薪資', true, 300, newStableIdentity_('account', '薪資收入')],
+    ['名稱', '類型', '子類型', '啟用', '排序', ACCOUNT_STABLE_ID_HEADER, ACCOUNT_ALIASES_HEADER],
+    ['期初餘額', '權益', '系統', true, 10, newAccountStableId_('期初餘額'), ''],
+    ['應收帳款', '資產', '往來', true, 20, newAccountStableId_('應收帳款'), ''],
+    ['應付帳款', '負債', '往來', true, 30, newAccountStableId_('應付帳款'), ''],
+    ['調整支出', '支出', '調整', true, 40, newAccountStableId_('調整支出'), ''],
+    ['調整收入', '收入', '調整', true, 50, newAccountStableId_('調整收入'), ''],
+    ['現金', '資產', '現金', true, 100, newAccountStableId_('現金'), ''],
+    ['銀行', '資產', '銀行', true, 110, newAccountStableId_('銀行'), ''],
+    ['悠遊卡', '資產', '電子票證', true, 120, newAccountStableId_('悠遊卡'), ''],
+    ['餐飲', '支出', '日常', true, 200, newAccountStableId_('餐飲'), ''],
+    ['交通', '支出', '日常', true, 210, newAccountStableId_('交通'), ''],
+    ['薪資收入', '收入', '薪資', true, 300, newAccountStableId_('薪資收入'), ''],
   ]);
   initializeBlankSheet_(options, [['交易對象']]);
   initializeBlankSheet_(settings, [
@@ -3113,6 +3387,7 @@ function setupSpreadsheet() {
 function ensureStableIdentitySchema_(spreadsheet) {
   var accounts = requiredSheet_(spreadsheet, '會計科目');
   ensureMetadataHeader_(accounts, ACCOUNT_STABLE_ID_HEADER);
+  ensureMetadataHeader_(accounts, ACCOUNT_ALIASES_HEADER);
   var observations = requiredSheet_(spreadsheet, OBSERVATION_SHEET_NAME);
   for (var index = 0; index < OBSERVATION_HEADERS.length; index += 1) {
     ensureMetadataHeader_(observations, OBSERVATION_HEADERS[index]);
@@ -3149,14 +3424,14 @@ function optionalMetadataColumn_(sheet, header) {
   return null;
 }
 
-function newStableIdentity_(kind, seed) {
-  if (seed !== undefined) {
-    return kind + ':' + digestHex_(Utilities.computeDigest(
-      Utilities.DigestAlgorithm.SHA_256,
-      kind + ':' + String(seed),
-    )).slice(0, 32);
+function newAccountStableId_(seed) {
+  if (!String(seed || '').trim()) {
+    throw new Error('account stable identity seed is required');
   }
-  return kind + ':' + String(Utilities.getUuid());
+  return 'account:' + digestHex_(Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    'account:' + String(seed),
+  )).slice(0, 32);
 }
 
 function getOrCreateSheet_(spreadsheet, name) {

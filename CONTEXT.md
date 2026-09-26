@@ -60,6 +60,17 @@ A mirror row that voids an earlier row, linked via 沖銷txn_id. The only
 correction mechanism — there is no edit-in-place.
 _Avoid_: delete, undo, edit, 調整 (that word means the drift-reconciliation categories 調整支出/調整收入)
 
+**Stable identity repair**:
+An explicit, reviewed adoption of an identity for a legacy row that has none.
+Under the locked repair path, adoption may fill only a blank txn_id identity
+cell; financial and source cells remain immutable, and corrections remain
+reversal-only.
+
+**Account alias**:
+A strict, deliberate historical name for one 會計科目 row. An alias preserves
+historical journal readability after a rename; an ambiguous alias is unavailable
+rather than guessed.
+
 **結清狀態 (Settlement status)**:
 Cached state of an 應收/應付 row: 未結 / 部分 / 已結 / 已沖銷. The journal
 arithmetic is the truth; this cell is a recomputable cache. "Open" rows =

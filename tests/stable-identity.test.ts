@@ -14,6 +14,7 @@ const journalHeaders = [
   '交易對象', '說明', '結清狀態', '沖銷txn_id', 'txn_id', '來源', '建立時間',
 ]
 const observationHeaders = ['observation_id', 'source_reference', 'content_digest']
+const validObservationDigest = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 
 describe('stable identity', () => {
   let harness: FakeGasHarness
@@ -50,12 +51,12 @@ describe('stable identity', () => {
     ]])
     const observations = requiredSheet(harness, '來源觀察')
     observations.getRange(2, 1, 1, observationHeaders.length).setValues([[
-      'observation:known-setup', 'test-fixture:row-1', 'source-content-1',
+      'observation:known-setup', 'test-fixture:row-1', validObservationDigest,
     ]])
     harness.setupSpreadsheet()
 
     expect(observations.getRange(2, 1, 1, observationHeaders.length).getValues()[0]).toEqual([
-      'observation:known-setup', 'test-fixture:row-1', 'source-content-1',
+      'observation:known-setup', 'test-fixture:row-1', validObservationDigest,
     ])
     expect(journal.getRange(2, 13).getValues()[0]![0]).toBe('')
   })
@@ -128,12 +129,140 @@ describe('stable identity', () => {
     harness.setupSpreadsheet()
     const observationSheet = requiredSheet(harness, '來源觀察')
     observationSheet.getRange(2, 1, 2, observationHeaders.length).setValues([
-      ['observation:one', 'bank:row-1', 'digest-one'],
-      ['observation:two', 'bank:row-2', 'digest-two'],
+      ['observation:one', 'bank:row-1', validObservationDigest],
+      ['observation:two', 'bank:row-2', validObservationDigest],
     ])
 
     const observations = await post(harness, { action: 'snapshot', scope: 'observations' }, 'identity-non-observation-snapshot')
     expect(observations.records).toHaveLength(2)
+  })
+
+  it('does not identify or adopt an observation without immutable source evidence', async () => {
+    harness.setupSpreadsheet()
+    const observationSheet = requiredSheet(harness, '來源觀察')
+    observationSheet.getRange(2, 1, 1, observationHeaders.length).setValues([[
+      'observation:invalid-evidence', '', 'not-a-digest',
+    ]])
+
+    const snapshot = await post(harness, { action: 'snapshot', scope: 'observations' }, 'identity-invalid-observation-snapshot')
+    const record = (snapshot.records as Array<Record<string, unknown>>)[0]!
+    expect(record).toMatchObject({
+      id: null,
+      persistedId: 'observation:invalid-evidence',
+      identity: { kind: 'unidentified', reason: 'invalid-observation-evidence' },
+    })
+    const lookup = await post(harness, {
+      action: 'lookup',
+      ids: ['observation:invalid-evidence'],
+      snapshotRevision: String(snapshot.snapshotRevision),
+    }, 'identity-invalid-observation-lookup')
+    expect(lookup).toMatchObject({ kind: 'ok', records: [], missing: ['observation:invalid-evidence'] })
+    const before = observationSheet.getRange(2, 1, 1, observationHeaders.length).getValues()[0]!
+    const adoption = await post(harness, {
+      action: 'adopt_identity',
+      operationId: 'identity-invalid-observation-adoption',
+      expectedSnapshotRevision: String(snapshot.snapshotRevision),
+      repairReference: record.repairReference,
+      stableId: 'observation:invalid-adopted',
+    }, 'identity-invalid-observation-adoption')
+    expect(adoption).toMatchObject({ ok: false, kind: 'conflict', reason: 'invalid-observation-evidence' })
+    expect(observationSheet.getRange(2, 1, 1, observationHeaders.length).getValues()[0]!).toEqual(before)
+  })
+
+  it('fails closed on duplicate stable identities within and across identity scopes', async () => {
+    harness.setupSpreadsheet()
+    const journal = requiredSheet(harness, '日記帳')
+    const duplicateEventId = '00000000-0000-4000-8000-000000000302'
+    journal.getRange(2, 1, 2, journalHeaders.length).setValues([
+      [
+        '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
+        '測試對象', 'duplicate one', '', '', duplicateEventId, 'test-fixture', '2026-07-27T12:34:00+08:00',
+      ],
+      [
+        '2026-07-27', '12:35', '測試', '餐飲', '現金', '2', 'TWD', '測試分類',
+        '測試對象', 'duplicate two', '', '', duplicateEventId, 'test-fixture', '2026-07-27T12:35:00+08:00',
+      ],
+    ])
+    const events = await post(harness, { action: 'snapshot', scope: 'events' }, 'identity-duplicate-scope-snapshot')
+    expect(events).toEqual({
+      kind: 'unavailable',
+      book: 'personal',
+      reason: 'stable-identity-duplicate-id',
+    })
+    const state = await post(harness, { action: 'integrationState' }, 'identity-duplicate-scope-state')
+    expect(state.capabilities).toEqual(['complete-revisioned-reads'])
+
+    const accounts = requiredSheet(harness, '會計科目')
+    const accountHeaders = accounts.getRange(1, 1, 1, accounts.getLastColumn()).getValues()[0]!.map(String)
+    const stableIdColumn = accountHeaders.indexOf('stable_id')
+    const cashRow = accounts.getRange(1, 1, accounts.getLastRow(), accounts.getLastColumn())
+      .getValues().findIndex(row => row[0] === '現金') + 1
+    accounts.getRange(cashRow, stableIdColumn + 1).setValues([[duplicateEventId]])
+    const accountSnapshot = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-duplicate-cross-scope-account')
+    expect(accountSnapshot).toMatchObject({ scope: 'accounts', records: expect.any(Array) })
+    const lookup = await post(harness, {
+      action: 'lookup', ids: [duplicateEventId], snapshotRevision: String(accountSnapshot.snapshotRevision),
+    }, 'identity-duplicate-cross-scope-lookup')
+    expect(lookup).toEqual({
+      kind: 'unavailable',
+      book: 'personal',
+      reason: 'stable-identity-duplicate-id',
+    })
+  })
+
+  it('rejects adoption when the requested identity already exists in another scope', async () => {
+    harness.setupSpreadsheet()
+    const collisionId = '00000000-0000-4000-8000-000000000304'
+    const accounts = requiredSheet(harness, '會計科目')
+    const accountValues = accounts.getRange(1, 1, accounts.getLastRow(), accounts.getLastColumn()).getValues()
+    const accountHeaders = accountValues[0]!.map(String)
+    const stableIdColumn = accountHeaders.indexOf('stable_id')
+    const cashRow = accountValues.findIndex(row => row[0] === '現金') + 1
+    accounts.getRange(cashRow, stableIdColumn + 1).setValues([[collisionId]])
+
+    const journal = requiredSheet(harness, '日記帳')
+    journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
+      '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
+      '測試對象', 'cross-scope adoption', '', '', '', 'test-fixture', '2026-07-27T12:34:00+08:00',
+    ]])
+    const snapshot = await post(harness, { action: 'snapshot', scope: 'events' }, 'identity-cross-scope-adoption-snapshot')
+    const reference = (snapshot.records as Array<Record<string, unknown>>)[0]!.repairReference
+    const adoption = await post(harness, {
+      action: 'adopt_identity',
+      operationId: 'identity-cross-scope-adoption',
+      expectedSnapshotRevision: String(snapshot.snapshotRevision),
+      repairReference: reference,
+      stableId: collisionId,
+    }, 'identity-cross-scope-adoption')
+    expect(adoption).toMatchObject({ ok: false, kind: 'conflict', reason: 'duplicate-stable-id' })
+    expect(journal.getRange(2, 13).getValues()[0]![0]).toBe('')
+  })
+
+  it('keeps account and event snapshots usable while an observation schema is unavailable', async () => {
+    harness.setupSpreadsheet()
+    const observationSheet = requiredSheet(harness, '來源觀察')
+    observationSheet.getRange(1, 1, 1, 1).setValues([['malformed']])
+
+    const state = await post(harness, { action: 'integrationState' }, 'identity-observation-schema-state')
+    expect(state.capabilities).toEqual(['complete-revisioned-reads'])
+    const accounts = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-observation-schema-accounts')
+    expect(accounts).toMatchObject({ scope: 'accounts', records: expect.any(Array) })
+    const events = await post(harness, { action: 'snapshot', scope: 'events' }, 'identity-observation-schema-events')
+    expect(events).toMatchObject({ scope: 'events', records: expect.any(Array) })
+    const observations = await post(harness, { action: 'snapshot', scope: 'observations' }, 'identity-observation-schema-observations')
+    expect(observations).toEqual({
+      kind: 'unavailable',
+      book: 'personal',
+      reason: 'stable-identity-schema-unavailable',
+    })
+    const lookup = await post(harness, {
+      action: 'lookup', ids: ['account:現金'], snapshotRevision: String(accounts.snapshotRevision),
+    }, 'identity-observation-schema-lookup')
+    expect(lookup).toEqual({
+      kind: 'unavailable',
+      book: 'personal',
+      reason: 'stable-identity-schema-unavailable',
+    })
   })
 
   it('looks up stable account and source-observation identities at one revision', async () => {
@@ -150,7 +279,7 @@ describe('stable identity', () => {
     ]])
     const observationSheet = requiredSheet(harness, '來源觀察')
     observationSheet.getRange(2, 1, 1, observationHeaders.length).setValues([[
-      'observation:known-lookup', 'import:file-1:row-2', 'source-content-2',
+      'observation:known-lookup', 'import:file-1:row-2', validObservationDigest,
     ]])
     harness.setupSpreadsheet()
 
@@ -159,10 +288,10 @@ describe('stable identity', () => {
     const accountSnapshot = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-account-snapshot')
     const revision = String(accountSnapshot.snapshotRevision)
     const accountsLookup = await post(harness, {
-      action: 'lookup', scope: 'accounts', ids: [accountId], snapshotRevision: revision,
+      action: 'lookup', ids: [accountId], snapshotRevision: revision,
     }, 'identity-account-lookup')
     const observationsLookup = await post(harness, {
-      action: 'lookup', scope: 'observations', ids: [observationId], snapshotRevision: revision,
+      action: 'lookup', ids: [observationId], snapshotRevision: revision,
     }, 'identity-observation-lookup')
     expect(accountsLookup).toMatchObject({ kind: 'ok', missing: [], unidentified: [] })
     expect(accountsLookup.records).toEqual([
@@ -172,6 +301,46 @@ describe('stable identity', () => {
     expect(observationsLookup.records).toEqual([
       expect.objectContaining({ id: observationId, sourceReference: 'import:file-1:row-2' }),
     ])
+  })
+
+  it('looks up requested identities across scopes and classifies a legacy account alias', async () => {
+    harness.setupSpreadsheet()
+    const accounts = requiredSheet(harness, '會計科目')
+    const accountValues = accounts.getRange(1, 1, accounts.getLastRow(), accounts.getLastColumn()).getValues()
+    const accountHeaders = accountValues[0]!.map(String)
+    const stableIdColumn = accountHeaders.indexOf('stable_id')
+    const cashRow = accountValues.findIndex(row => row[0] === '現金') + 1
+    accounts.getRange(cashRow, stableIdColumn + 1).setValues([['']])
+
+    const journal = requiredSheet(harness, '日記帳')
+    const eventId = '00000000-0000-4000-8000-000000000301'
+    journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
+      '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
+      '測試對象', 'cross-scope lookup', '', '', eventId, 'test-fixture', '2026-07-27T12:34:00+08:00',
+    ]])
+    const observations = requiredSheet(harness, '來源觀察')
+    const observationId = 'observation:lookup-cross-scope'
+    observations.getRange(2, 1, 1, observationHeaders.length).setValues([[
+      observationId, 'test-fixture:cross-scope', validObservationDigest,
+    ]])
+
+    const snapshot = await post(harness, { action: 'snapshot', scope: 'events' }, 'identity-unscoped-lookup-snapshot')
+    const lookup = await post(harness, {
+      action: 'lookup',
+      ids: ['account:現金', eventId, observationId],
+      snapshotRevision: String(snapshot.snapshotRevision),
+    }, 'identity-unscoped-lookup')
+
+    expect(lookup).toMatchObject({
+      kind: 'ok',
+      missing: [],
+      unidentified: ['account:現金'],
+    })
+    expect(lookup.records).toEqual([
+      expect.objectContaining({ id: eventId }),
+      expect.objectContaining({ id: observationId }),
+    ])
+    expect((lookup.records as Array<Record<string, unknown>>).some(record => record.id === 'account:現金')).toBe(false)
   })
 
   it('adopts a reviewed account identity without changing its source row', async () => {
@@ -186,11 +355,12 @@ describe('stable identity', () => {
 
     const snapshot = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-account-adopt-snapshot')
     const revision = String(snapshot.snapshotRevision)
+    const reference = (snapshot.records as Array<Record<string, unknown>>)
+      .find(record => record.name === '現金')!.repairReference
     const lookup = await post(harness, {
-      action: 'lookup', scope: 'accounts', ids: ['account:現金'], snapshotRevision: revision,
+      action: 'lookup', ids: ['account:現金'], snapshotRevision: revision,
     }, 'identity-account-adopt-lookup')
     expect(lookup).toMatchObject({ kind: 'ok', missing: [], unidentified: ['account:現金'] })
-    const reference = (lookup.records as Array<Record<string, unknown>>)[0]!.repairReference
 
     const adopted = await post(harness, {
       action: 'adopt_identity',
@@ -225,7 +395,7 @@ describe('stable identity', () => {
     ]])
     const observationSheet = requiredSheet(harness, '來源觀察')
     observationSheet.getRange(2, 1, 1, observationHeaders.length).setValues([[
-      '', 'legacy-source:row-1', 'legacy-content-1',
+      '', 'legacy-source:row-1', validObservationDigest,
     ]])
     harness.setupSpreadsheet()
 
@@ -235,12 +405,10 @@ describe('stable identity', () => {
     const accountSnapshot = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-legacy-account-snapshot')
     const accountRevision = String(accountSnapshot.snapshotRevision)
     const accountLookup = await post(harness, {
-      action: 'lookup', scope: 'accounts', ids: ['account:現金'], snapshotRevision: accountRevision,
+      action: 'lookup', ids: ['account:現金'], snapshotRevision: accountRevision,
     }, 'identity-legacy-account-lookup')
     expect(accountLookup).toMatchObject({ kind: 'ok', missing: [], unidentified: ['account:現金'] })
-    expect(accountLookup.records).toEqual([
-      expect.objectContaining({ identity: { kind: 'unidentified', reason: 'missing-stable-id' } }),
-    ])
+    expect(accountLookup.records).toEqual([])
 
     const observationSnapshot = await post(harness, { action: 'snapshot', scope: 'observations' }, 'identity-legacy-observation-snapshot')
     const observationRecord = (observationSnapshot.records as Array<Record<string, unknown>>)[0]!
@@ -321,6 +489,51 @@ describe('stable identity', () => {
     const snapshot = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-account-rename')
     const renamed = (snapshot.records as Array<Record<string, unknown>>).find(record => record.name === '現金改名')
     expect(renamed).toMatchObject({ id: stableId, stableId, identity: { kind: 'identified', stableId } })
+  })
+
+  it('resolves historical journal names through strict account aliases after a rename', async () => {
+    harness.setupSpreadsheet()
+    const accounts = requiredSheet(harness, '會計科目')
+    const values = accounts.getRange(1, 1, accounts.getLastRow(), accounts.getLastColumn()).getValues()
+    const headers = values[0]!.map(String)
+    const stableIdColumn = headers.indexOf('stable_id')
+    const aliasesColumn = headers.indexOf('aliases')
+    const nameColumn = headers.indexOf('名稱')
+    const accountRow = values.findIndex(row => row[nameColumn] === '現金') + 1
+    const stableId = String(values[accountRow - 1]![stableIdColumn])
+    accounts.getRange(accountRow, aliasesColumn + 1).setValues([['["舊現金"]']])
+    accounts.getRange(accountRow, nameColumn + 1).setValues([['現金改名']])
+
+    const journal = requiredSheet(harness, '日記帳')
+    journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
+      '2026-07-27', '12:34', '測試', '舊現金', '薪資收入', '12', 'TWD', '測試分類',
+      '測試對象', 'historical alias', '', '', '00000000-0000-4000-8000-000000000303',
+      'test-fixture', '2026-07-27T12:34:00+08:00',
+    ]])
+
+    const snapshot = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-account-alias-snapshot')
+    const renamed = (snapshot.records as Array<Record<string, unknown>>).find(record => record.name === '現金改名')!
+    expect(renamed).toMatchObject({
+      id: stableId,
+      stableId,
+      aliases: ['舊現金'],
+      balances: [{ amount: '12', currency: 'TWD' }],
+    })
+  })
+
+  it('rejects ambiguous account aliases instead of guessing a journal owner', async () => {
+    harness.setupSpreadsheet()
+    const accounts = requiredSheet(harness, '會計科目')
+    const values = accounts.getRange(1, 1, accounts.getLastRow(), accounts.getLastColumn()).getValues()
+    const headers = values[0]!.map(String)
+    const aliasesColumn = headers.indexOf('aliases')
+    const cashRow = values.findIndex(row => row[0] === '現金') + 1
+    const bankRow = values.findIndex(row => row[0] === '銀行') + 1
+    accounts.getRange(cashRow, aliasesColumn + 1).setValues([['["舊帳戶"]']])
+    accounts.getRange(bankRow, aliasesColumn + 1).setValues([['["舊帳戶"]']])
+
+    const snapshot = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-account-alias-ambiguous')
+    expect(snapshot).toEqual({ ok: false, error: 'ambiguous account alias: 舊帳戶' })
   })
 
   it('computes the event digest from resolved headers after journal columns are reordered', async () => {
