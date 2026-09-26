@@ -30,7 +30,7 @@ describe('integration runtime', () => {
       book: 'personal',
       identity: { contractVersion: CONTRACT_VERSION, appVersion: APP_VERSION },
       maintenance: { kind: 'maintenance', message: '系統更新中' },
-      capabilities: ['complete-revisioned-reads'],
+      capabilities: ['complete-revisioned-reads', 'stable-identity'],
       readAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+08:00$/),
     })
     expect(harness.events).toEqual([])

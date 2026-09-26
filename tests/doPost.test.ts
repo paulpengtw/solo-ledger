@@ -756,7 +756,9 @@ function journalRows(harness: FakeGasHarness): Array<Record<string, unknown>> {
   }
   const headers = journal.getRange(1, 1, 1, journal.getLastColumn()).getValues()[0]!.map(String)
   return journal.getRange(2, 1, lastRow - 1, journal.getLastColumn()).getValues().map((values) =>
-    Object.fromEntries(headers.map((header, index) => [header, values[index]])),
+    Object.fromEntries(headers
+      .map((header, index) => [header, values[index]] as const)
+      .filter(([header]) => header !== 'source_observation_id')),
   )
 }
 

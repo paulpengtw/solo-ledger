@@ -21,6 +21,7 @@ const expectedJournalHeaders = [
   'txn_id',
   '來源',
   '建立時間',
+  'source_observation_id',
 ]
 
 const expectedTabNames = ['日記帳', '會計科目', '選項清單', '設定', '餘額', '試算與檢查']
@@ -44,7 +45,7 @@ describe('setupSpreadsheet', () => {
     expect(harness.spreadsheet.getSheets().map((sheet) => sheet.getName())).toEqual(expectedTabNames)
   })
 
-  it('writes exactly the 15 required journal headers in spec order', () => {
+  it('writes the required journal headers plus additive observation identity metadata', () => {
     harness.setupSpreadsheet()
 
     expect(rowValues(requiredSheet(harness, '日記帳'), 1)).toEqual(expectedJournalHeaders)
@@ -302,6 +303,7 @@ describe('setupSpreadsheet', () => {
       txn_id: 13,
       來源: 14,
       建立時間: 15,
+      source_observation_id: 16,
     })
   })
 })
@@ -324,7 +326,9 @@ function tableRows(sheet: FakeSheet): unknown[][] {
   const lastColumn = sheet.getLastColumn()
   return lastRow === 0 || lastColumn === 0
     ? []
-    : sheet.getRange(1, 1, lastRow, lastColumn).getValues()
+    : sheet.getRange(1, 1, lastRow, lastColumn).getValues().map(row =>
+      sheet.getName() === '會計科目' ? row.slice(0, 5) : row,
+    )
 }
 
 function firstMatchedAccountHeader(formula: string): string | undefined {

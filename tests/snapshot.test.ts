@@ -38,7 +38,7 @@ describe('Personal read snapshots', () => {
         appVersion: expect.stringMatching(/^[0-9a-f]{40}$/),
       },
       maintenance: { kind: 'open' },
-      capabilities: ['complete-revisioned-reads'],
+      capabilities: ['complete-revisioned-reads', 'stable-identity'],
       readAt: '2026-07-27T08:00:00.000+08:00',
     })
   })
