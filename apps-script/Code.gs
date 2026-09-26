@@ -73,6 +73,7 @@ function stableIdentityMetadataSchemaPresent_(spreadsheet) {
   if (!accounts || !journal || !observations ||
       !sheetHasHeaders_(accounts, [
         '名稱', '類型', '子類型', '啟用', '排序', ACCOUNT_STABLE_ID_HEADER,
+        ACCOUNT_ALIASES_HEADER,
       ]) || !sheetHasHeaders_(journal, JOURNAL_HEADERS) ||
       !sheetHasHeaders_(observations, OBSERVATION_HEADERS)) {
     return false;
@@ -80,7 +81,8 @@ function stableIdentityMetadataSchemaPresent_(spreadsheet) {
   try {
     resolveHeaders_(
       accounts.getRange(1, 1, 1, accounts.getLastColumn()).getDisplayValues()[0],
-      ['名稱', '類型', '子類型', '啟用', '排序', ACCOUNT_STABLE_ID_HEADER],
+      ['名稱', '類型', '子類型', '啟用', '排序', ACCOUNT_STABLE_ID_HEADER,
+        ACCOUNT_ALIASES_HEADER],
     );
     resolveHeaders_(
       journal.getRange(1, 1, 1, journal.getLastColumn()).getDisplayValues()[0],
@@ -462,7 +464,7 @@ function snapshot_(payload) {
       actual: revision,
     };
   }
-  var duplicateId = duplicateStableIdentity_(source, payload.scope);
+  var duplicateId = duplicateStableIdentity_(source);
   if (duplicateId) {
     return identityUnavailable_('stable-identity-duplicate-id');
   }
@@ -546,6 +548,9 @@ function lookup_(payload) {
       missing.push(id);
       continue;
     }
+    if (match.kind === 'ambiguous') {
+      return identityUnavailable_('stable-identity-ambiguous-id');
+    }
     if (match.kind === 'unidentified') {
       unidentified.push(id);
       continue;
@@ -592,6 +597,10 @@ function lookupRecordAcrossScopes_(recordsByScope, id) {
           record.identity && record.identity.kind === 'unidentified' &&
           record.legacyId === id) {
         unidentified.push(record);
+      } else if (scope === 'observations' &&
+          record.identity && record.identity.kind === 'unidentified' &&
+          record.persistedId === id) {
+        unidentified.push(record);
       }
     }
   }
@@ -599,7 +608,7 @@ function lookupRecordAcrossScopes_(recordsByScope, id) {
     return { kind: 'identified', record: identified[0] };
   }
   if (identified.length > 0 || unidentified.length > 1) {
-    return { kind: 'missing' };
+    return { kind: 'ambiguous' };
   }
   if (unidentified.length === 1) {
     return { kind: 'unidentified' };
@@ -1081,9 +1090,7 @@ function readSnapshotSource_(spreadsheet) {
         throw new Error('ambiguous account alias: ' + alias);
       }
       aliasOwners[alias] = aliasRow.name;
-      if (aliasRow.enabled) {
-        accountTypes[alias] = aliasRow.type;
-      }
+      accountTypes[alias] = aliasRow.type;
     }
   }
 

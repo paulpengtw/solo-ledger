@@ -156,7 +156,7 @@ describe('stable identity', () => {
       ids: ['observation:invalid-evidence'],
       snapshotRevision: String(snapshot.snapshotRevision),
     }, 'identity-invalid-observation-lookup')
-    expect(lookup).toMatchObject({ kind: 'ok', records: [], missing: ['observation:invalid-evidence'] })
+    expect(lookup).toMatchObject({ kind: 'ok', records: [], missing: [], unidentified: ['observation:invalid-evidence'] })
     const before = observationSheet.getRange(2, 1, 1, observationHeaders.length).getValues()[0]!
     const adoption = await post(harness, {
       action: 'adopt_identity',
@@ -198,12 +198,24 @@ describe('stable identity', () => {
     const cashRow = accounts.getRange(1, 1, accounts.getLastRow(), accounts.getLastColumn())
       .getValues().findIndex(row => row[0] === '現金') + 1
     accounts.getRange(cashRow, stableIdColumn + 1).setValues([[duplicateEventId]])
+    const observations = requiredSheet(harness, '來源觀察')
+    observations.getRange(2, 1, 1, observationHeaders.length).setValues([[
+      duplicateEventId, 'test-fixture:duplicate', validObservationDigest,
+    ]])
     const accountSnapshot = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-duplicate-cross-scope-account')
-    expect(accountSnapshot).toMatchObject({ scope: 'accounts', records: expect.any(Array) })
-    const lookup = await post(harness, {
-      action: 'lookup', ids: [duplicateEventId], snapshotRevision: String(accountSnapshot.snapshotRevision),
-    }, 'identity-duplicate-cross-scope-lookup')
-    expect(lookup).toEqual({
+    expect(accountSnapshot).toEqual({
+      kind: 'unavailable',
+      book: 'personal',
+      reason: 'stable-identity-duplicate-id',
+    })
+    const observationsSnapshot = await post(harness, { action: 'snapshot', scope: 'observations' }, 'identity-duplicate-cross-scope-observations')
+    expect(observationsSnapshot).toEqual({
+      kind: 'unavailable',
+      book: 'personal',
+      reason: 'stable-identity-duplicate-id',
+    })
+    const eventsSnapshot = await post(harness, { action: 'snapshot', scope: 'events' }, 'identity-duplicate-cross-scope-events')
+    expect(eventsSnapshot).toEqual({
       kind: 'unavailable',
       book: 'personal',
       reason: 'stable-identity-duplicate-id',
@@ -263,6 +275,17 @@ describe('stable identity', () => {
       book: 'personal',
       reason: 'stable-identity-schema-unavailable',
     })
+  })
+
+  it('suppresses stable identity until the aliases metadata header is available', async () => {
+    harness.setupSpreadsheet()
+    const accounts = requiredSheet(harness, '會計科目')
+    const headers = accounts.getRange(1, 1, 1, accounts.getLastColumn()).getValues()[0]!.map(String)
+    const aliasesColumn = headers.indexOf('aliases')
+    accounts.getRange(1, aliasesColumn + 1).setValues([['legacy_aliases']])
+
+    const state = await post(harness, { action: 'integrationState' }, 'identity-alias-schema-state')
+    expect(state.capabilities).toEqual(['complete-revisioned-reads'])
   })
 
   it('looks up stable account and source-observation identities at one revision', async () => {
@@ -518,6 +541,69 @@ describe('stable identity', () => {
       stableId,
       aliases: ['舊現金'],
       balances: [{ amount: '12', currency: 'TWD' }],
+    })
+  })
+
+  it('keeps a renamed disabled account readable for history without enabling new writes', async () => {
+    harness.setupSpreadsheet()
+    const accounts = requiredSheet(harness, '會計科目')
+    const values = accounts.getRange(1, 1, accounts.getLastRow(), accounts.getLastColumn()).getValues()
+    const headers = values[0]!.map(String)
+    const aliasesColumn = headers.indexOf('aliases')
+    const nameColumn = headers.indexOf('名稱')
+    const enabledColumn = headers.indexOf('啟用')
+    const accountRow = values.findIndex(row => row[nameColumn] === '現金') + 1
+    accounts.getRange(accountRow, aliasesColumn + 1).setValues([['["舊現金"]']])
+    accounts.getRange(accountRow, nameColumn + 1).setValues([['現金改名']])
+    accounts.getRange(accountRow, enabledColumn + 1).setValues([[false]])
+
+    const journal = requiredSheet(harness, '日記帳')
+    journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
+      '2026-07-27', '12:34', '測試', '舊現金', '薪資收入', '12', 'TWD', '測試分類',
+      '測試對象', 'disabled historical alias', '', '', '00000000-0000-4000-8000-000000000305',
+      'test-fixture', '2026-07-27T12:34:00+08:00',
+    ]])
+
+    const events = await post(harness, { action: 'snapshot', scope: 'events' }, 'identity-disabled-alias-events')
+    expect(events.records).toEqual([expect.objectContaining({ debitAccount: '舊現金' })])
+    const refused = await post(harness, {
+      action: 'create_transaction',
+      idempotencyKey: 'identity-disabled-alias-write',
+      transaction: {
+        type: '支出',
+        date: '2026-07-28',
+        amount: '1',
+        account: '舊現金',
+        category: '餐飲',
+        payee: 'test',
+        currency: 'TWD',
+        description: 'must remain disabled',
+      },
+    }, 'identity-disabled-alias-write')
+    expect(refused).toEqual({ ok: false, error: 'unknown or disabled account: 舊現金' })
+  })
+
+  it('fails closed when an identified identity collides with an unidentified legacy alias', async () => {
+    harness.setupSpreadsheet()
+    const accounts = requiredSheet(harness, '會計科目')
+    const values = accounts.getRange(1, 1, accounts.getLastRow(), accounts.getLastColumn()).getValues()
+    const headers = values[0]!.map(String)
+    const stableIdColumn = headers.indexOf('stable_id')
+    const cashRow = values.findIndex(row => row[0] === '現金') + 1
+    const bankRow = values.findIndex(row => row[0] === '銀行') + 1
+    accounts.getRange(cashRow, stableIdColumn + 1).setValues([['']])
+    accounts.getRange(bankRow, stableIdColumn + 1).setValues([['account:現金']])
+
+    const snapshot = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-ambiguous-lookup-snapshot')
+    const lookup = await post(harness, {
+      action: 'lookup',
+      ids: ['account:現金'],
+      snapshotRevision: String(snapshot.snapshotRevision),
+    }, 'identity-ambiguous-lookup')
+    expect(lookup).toEqual({
+      kind: 'unavailable',
+      book: 'personal',
+      reason: 'stable-identity-ambiguous-id',
     })
   })
 
