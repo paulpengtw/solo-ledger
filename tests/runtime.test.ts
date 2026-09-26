@@ -27,8 +27,11 @@ describe('integration runtime', () => {
     harness.setScriptProperty('INTEGRATION_OPEN', '')
     harness.clearEvents()
     expect(await post(harness, { action: 'integrationState' }, 'state-1')).toEqual({
+      book: 'personal',
       identity: { contractVersion: CONTRACT_VERSION, appVersion: APP_VERSION },
       maintenance: { kind: 'maintenance', message: '系統更新中' },
+      capabilities: ['complete-revisioned-reads'],
+      readAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+08:00$/),
     })
     expect(harness.events).toEqual([])
     expect(await post(harness, { action: 'health', contractVersion: CONTRACT_VERSION }, 'health-closed'))

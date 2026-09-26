@@ -170,7 +170,17 @@ export class FakeRange {
   }
 
   getDisplayValues(): string[][] {
-    return this.getValues().map((row) => row.map(displayValue))
+    return this.getValues().map((valuesRow, rowOffset) =>
+      valuesRow.map((value, columnOffset) =>
+        displayValue(
+          value,
+          this.sheet.readNumberFormat(
+            this.row + rowOffset,
+            this.column + columnOffset,
+          ),
+        ),
+      ),
+    )
   }
 
   setNumberFormat(format: string): FakeRange {
@@ -592,6 +602,7 @@ export type FakeGasHarness = SetupGasFunctions & {
   onNextLock: (callback: () => void) => void
   peekCache: (key: string) => string | null
   peekScriptProperty: (name: string) => string | null
+  scriptPropertiesSnapshot: () => Record<string, string>
 }
 
 export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
@@ -904,6 +915,11 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
     peekScriptProperty(name: string) {
       return scriptProperties.get(name) ?? null
     },
+    scriptPropertiesSnapshot() {
+      return Object.fromEntries([...scriptProperties.entries()].sort(([left], [right]) =>
+        left.localeCompare(right),
+      ))
+    },
   }
 }
 
@@ -915,7 +931,7 @@ function cellKey(row: number, column: number): string {
   return `${row}:${column}`
 }
 
-function displayValue(value: CellValue): string {
+function displayValue(value: CellValue, numberFormat = ''): string {
   if (value === '' || value === null || value === undefined) {
     return ''
   }
@@ -927,6 +943,10 @@ function displayValue(value: CellValue): string {
   }
   if (value instanceof Date) {
     return value.toISOString().slice(0, 10)
+  }
+  const fixedDecimal = numberFormat.match(/^0\.(0+)$/)
+  if (typeof value === 'number' && fixedDecimal) {
+    return value.toFixed(fixedDecimal[1]!.length)
   }
   return String(value)
 }

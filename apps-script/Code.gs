@@ -32,6 +32,7 @@ var LIST_TRANSACTION_HEADERS = [
 ];
 
 var MAX_LIST_TRANSACTIONS = 200;
+var MAX_SNAPSHOT_RECORDS = 200;
 var NONCE_CACHE_SECONDS = 600;
 var LOCK_WAIT_MILLISECONDS = 30000;
 var SCHEMA_SHEET_NAMES = ['會計科目', '選項清單', '設定'];
@@ -47,8 +48,11 @@ function integrationState_() {
   }
   var open = PropertiesService.getScriptProperties().getProperty('INTEGRATION_OPEN') === 'true';
   return {
+    book: 'personal',
     identity: { contractVersion: CONTRACT_VERSION, appVersion: APP_VERSION },
     maintenance: open ? { kind: 'open' } : { kind: 'maintenance', message: '系統更新中' },
+    capabilities: ['complete-revisioned-reads'],
+    readAt: taipeiIsoNow_(),
   };
 }
 
@@ -126,6 +130,9 @@ function route_(payload, nonce) {
   }
   if (action === 'list_receivables') {
     return listReceivables_();
+  }
+  if (action === 'snapshot') {
+    return snapshot_(payload);
   }
   if (action === 'check_consistency') {
     return checkConsistency_(payload, nonce);
@@ -300,6 +307,503 @@ function vocabularyOptionNames_(options) {
     names.push(options[index].name);
   }
   return names;
+}
+
+function snapshot_(payload) {
+  if (!payload || (payload.scope !== 'accounts' && payload.scope !== 'events')) {
+    throw new Error('snapshot scope must be accounts or events');
+  }
+  if (payload.interval !== undefined) {
+    throw new Error('snapshot interval is not supported');
+  }
+  if (payload.cursor !== undefined && payload.snapshotRevision === undefined) {
+    throw new Error('snapshot continuation requires snapshotRevision');
+  }
+
+  var spreadsheet = SpreadsheetApp.openById(
+    requiredProp_('LEDGER_SPREADSHEET_ID'),
+  );
+  var source = readSnapshotSource_(spreadsheet);
+  var revision = snapshotRevision_(source);
+  if (
+    payload.snapshotRevision !== undefined &&
+    String(payload.snapshotRevision) !== revision
+  ) {
+    return {
+      kind: 'revision-changed',
+      book: 'personal',
+      expected: String(payload.snapshotRevision),
+      actual: revision,
+    };
+  }
+  var records = payload.scope === 'accounts'
+    ? snapshotAccountRecords_(source, revision)
+    : snapshotEventRecords_(source);
+  var offset = snapshotCursorOffset_(payload.cursor);
+  if (offset > records.length) {
+    throw new Error('snapshot cursor is outside the result');
+  }
+  var page = records.slice(offset, offset + MAX_SNAPSHOT_RECORDS);
+  var nextOffset = offset + page.length;
+  return {
+    scope: payload.scope,
+    snapshotRevision: revision,
+    records: page,
+    continuation: nextOffset < records.length
+      ? { kind: 'cursor', cursor: String(nextOffset) }
+      : { kind: 'end' },
+    readAt: taipeiIsoNow_(),
+  };
+}
+
+function readSnapshotSource_(spreadsheet) {
+  var accountSheet = requiredSheet_(spreadsheet, '會計科目');
+  var accountValues = accountSheet
+    .getRange(1, 1, accountSheet.getLastRow(), accountSheet.getLastColumn())
+    .getDisplayValues();
+  var accountColumns = resolveHeaders_(accountValues[0], [
+    '名稱',
+    '類型',
+    '子類型',
+    '啟用',
+    '排序',
+  ]);
+  var vocabularyRows = [];
+  var accountTypes = Object.create(null);
+  for (var accountIndex = 1; accountIndex < accountValues.length; accountIndex += 1) {
+    var accountRow = accountValues[accountIndex];
+    var accountName = String(accountRow[accountColumns['名稱'] - 1] || '').trim();
+    var accountType = String(accountRow[accountColumns['類型'] - 1] || '').trim();
+    var accountEnabled = isTrue_(accountRow[accountColumns['啟用'] - 1]);
+    if (accountEnabled && !accountName) {
+      throw new Error('enabled account name is required at row ' + (accountIndex + 1));
+    }
+    if (accountName) {
+      if (Object.prototype.hasOwnProperty.call(accountTypes, accountName)) {
+        throw new Error('duplicate account name: ' + accountName);
+      }
+      accountTypes[accountName] = accountType;
+    }
+    if (!accountEnabled) {
+      continue;
+    }
+    vocabularyRows.push({ sheetRow: accountIndex + 1, cells: accountRow });
+  }
+
+  var journal = requiredSheet_(spreadsheet, '日記帳');
+  var journalLastRow = journal.getLastRow();
+  var journalLastColumn = journal.getLastColumn();
+  var journalHeader = journal
+    .getRange(1, 1, 1, journalLastColumn)
+    .getDisplayValues()[0];
+  var journalColumns = resolveHeaders_(journalHeader, JOURNAL_HEADERS);
+  var journalRows = [];
+  if (journalLastRow >= 2) {
+    var journalRange = journal.getRange(
+      2,
+      1,
+      journalLastRow - 1,
+      journalLastColumn,
+    );
+    var rawRows = journalRange.getValues();
+    var displayed = journalRange.getDisplayValues();
+    for (var rowIndex = 0; rowIndex < displayed.length; rowIndex += 1) {
+      if (!snapshotRowHasData_(displayed[rowIndex], rawRows[rowIndex])) {
+        continue;
+      }
+      var values = {};
+      for (var headerIndex = 0; headerIndex < JOURNAL_HEADERS.length; headerIndex += 1) {
+        var header = JOURNAL_HEADERS[headerIndex];
+        values[header] = displayed[rowIndex][journalColumns[header] - 1];
+      }
+      var snapshotRow = {
+        sheetRow: rowIndex + 2,
+        cells: { raw: rawRows[rowIndex], displayed: displayed[rowIndex] },
+        values: values,
+        rawAmount: rawRows[rowIndex][journalColumns['金額'] - 1],
+      };
+      validateSnapshotJournalRow_(snapshotRow, accountTypes);
+      journalRows.push(snapshotRow);
+    }
+  }
+
+  return {
+    accountColumns: accountColumns,
+    vocabularyRows: vocabularyRows,
+    journalRows: journalRows,
+  };
+}
+
+function validateSnapshotJournalRow_(row, accountTypes) {
+  var values = row.values;
+  var financialDate = String(values['日期'] || '').trim();
+  if (!financialDate) {
+    throw new Error(
+      'invalid journal row at row ' + row.sheetRow + ': financial date is required',
+    );
+  }
+  if (!snapshotFinancialDateIsValid_(financialDate)) {
+    throw new Error(
+      'invalid journal row at row ' + row.sheetRow + ': financial date is invalid',
+    );
+  }
+  if (!String(values['類型'] || '').trim()) {
+    throw new Error(
+      'invalid journal row at row ' + row.sheetRow + ': type is required',
+    );
+  }
+  var debit = String(values['借方帳戶'] || '').trim();
+  var credit = String(values['貸方帳戶'] || '').trim();
+  if (!debit) {
+    throw new Error(
+      'invalid journal row at row ' + row.sheetRow + ': debit account is required',
+    );
+  }
+  if (!credit) {
+    throw new Error(
+      'invalid journal row at row ' + row.sheetRow + ': credit account is required',
+    );
+  }
+  if (!Object.prototype.hasOwnProperty.call(accountTypes, debit)) {
+    throw new Error(
+      'invalid journal row at row ' + row.sheetRow + ': unknown or disabled debit account',
+    );
+  }
+  if (!Object.prototype.hasOwnProperty.call(accountTypes, credit)) {
+    throw new Error(
+      'invalid journal row at row ' + row.sheetRow + ': unknown or disabled credit account',
+    );
+  }
+  var debitType = accountTypes[debit];
+  var creditType = accountTypes[credit];
+  if (
+    debitType !== '資產' && debitType !== '負債' &&
+    creditType !== '資產' && creditType !== '負債'
+  ) {
+    throw new Error(
+      'invalid journal row at row ' + row.sheetRow + ': no asset or liability account',
+    );
+  }
+  var amount = canonicalDecimal_(row.rawAmount, row.sheetRow);
+  if (amount === '0' || amount.charAt(0) === '-') {
+    throw new Error('journal amount must be positive at row ' + row.sheetRow);
+  }
+  row.amount = amount;
+  var currency = String(values['幣別'] || '').trim();
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    throw new Error(
+      'invalid journal row at row ' + row.sheetRow + ': currency must be ISO 4217',
+    );
+  }
+}
+
+function snapshotFinancialDateIsValid_(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+  var parsed = new Date(value + 'T00:00:00.000Z');
+  return !isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function snapshotRowHasData_(displayed, raw) {
+  var length = Math.max(displayed.length, raw.length);
+  for (var index = 0; index < length; index += 1) {
+    if (snapshotCellHasData_(displayed[index]) || snapshotCellHasData_(raw[index])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function snapshotCellHasData_(value) {
+  return value !== '' && value !== null && value !== undefined;
+}
+
+function snapshotRevision_(source) {
+  var revisionInput = {
+    vocabulary: source.vocabularyRows,
+    journal: source.journalRows.map(function (row) {
+      return { sheetRow: row.sheetRow, cells: row.cells };
+    }),
+  };
+  return digestHex_(Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    JSON.stringify(revisionInput),
+  ));
+}
+
+function snapshotAccountRecords_(source, revision) {
+  var columns = source.accountColumns;
+  var accounts = [];
+  for (var index = 0; index < source.vocabularyRows.length; index += 1) {
+    var cells = source.vocabularyRows[index].cells;
+    var type = String(cells[columns['類型'] - 1] || '').trim();
+    if (type !== '資產' && type !== '負債') {
+      continue;
+    }
+    var sort = Number(cells[columns['排序'] - 1]);
+    accounts.push({
+      id: 'account:' + String(cells[columns['名稱'] - 1] || '').trim(),
+      name: String(cells[columns['名稱'] - 1] || '').trim(),
+      type: type,
+      subtype: String(cells[columns['子類型'] - 1] || '').trim(),
+      enabled: true,
+      sort: sort,
+      balanceByCurrency: Object.create(null),
+    });
+  }
+  accounts.sort(compareVocabularyOptions_);
+
+  var financialCutoff = null;
+  for (index = 0; index < source.journalRows.length; index += 1) {
+    var row = source.journalRows[index];
+    var date = String(row.values['日期'] || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date) &&
+        (financialCutoff === null || date > financialCutoff)) {
+      financialCutoff = date;
+    }
+    for (var accountIndex = 0; accountIndex < accounts.length; accountIndex += 1) {
+      applySnapshotBalanceRow_(accounts[accountIndex], row);
+    }
+  }
+
+  var sourceRowCount = source.journalRows.length;
+  var sourceLastRow = sourceRowCount === 0
+    ? 0
+    : source.journalRows[sourceRowCount - 1].sheetRow;
+  var records = [];
+  for (index = 0; index < accounts.length; index += 1) {
+    var account = accounts[index];
+    var currencies = Object.keys(account.balanceByCurrency).sort();
+    var balances = [];
+    for (var currencyIndex = 0; currencyIndex < currencies.length; currencyIndex += 1) {
+      var currency = currencies[currencyIndex];
+      balances.push({
+        amount: account.balanceByCurrency[currency],
+        currency: currency,
+      });
+    }
+    records.push({
+      id: account.id,
+      name: account.name,
+      type: account.type,
+      subtype: account.subtype,
+      enabled: true,
+      sort: account.sort,
+      balances: balances,
+      financialCutoff: {
+        basis: 'all-posted-journal-entries',
+        throughFinancialDate: financialCutoff,
+      },
+      completion: {
+        kind: 'complete',
+        source: '日記帳',
+        sourceRowCount: sourceRowCount,
+        sourceLastRow: sourceLastRow,
+        snapshotRevision: revision,
+      },
+    });
+  }
+  return records;
+}
+
+function snapshotEventRecords_(source) {
+  var records = [];
+  for (var index = 0; index < source.journalRows.length; index += 1) {
+    var row = source.journalRows[index];
+    var values = row.values;
+    var txnId = String(values.txn_id || '').trim();
+    records.push({
+      id: txnId || null,
+      identity: txnId
+        ? { kind: 'identified', txnId: txnId }
+        : { kind: 'unidentified', reason: 'blank-txn-id' },
+      financialDate: String(values['日期'] || '').trim(),
+      time: String(values['時間'] || '').trim(),
+      type: String(values['類型'] || '').trim(),
+      debitAccount: String(values['借方帳戶'] || '').trim(),
+      creditAccount: String(values['貸方帳戶'] || '').trim(),
+      amount: {
+        amount: row.amount,
+        currency: String(values['幣別'] || '').trim(),
+      },
+      category: String(values['分類'] || '').trim(),
+      counterparty: String(values['交易對象'] || '').trim(),
+      description: String(values['說明'] || '').trim(),
+      settlementStatus: String(values['結清狀態'] || '').trim(),
+      reversalTxnId: String(values['沖銷txn_id'] || '').trim(),
+      source: String(values['來源'] || '').trim(),
+      createdAt: String(values['建立時間'] || '').trim(),
+      sheetRow: row.sheetRow,
+    });
+  }
+  return records;
+}
+
+function applySnapshotBalanceRow_(account, row) {
+  var debit = String(row.values['借方帳戶'] || '').trim() === account.name;
+  var credit = String(row.values['貸方帳戶'] || '').trim() === account.name;
+  if (!debit && !credit) {
+    return;
+  }
+  var currency = String(row.values['幣別'] || '').trim();
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    throw new Error('invalid journal currency at row ' + row.sheetRow);
+  }
+  var amount = row.amount;
+  var balance = account.balanceByCurrency[currency] || '0';
+  if (account.type === '資產') {
+    if (debit) balance = addDecimalStrings_(balance, amount);
+    if (credit) balance = addDecimalStrings_(balance, negateDecimal_(amount));
+  } else {
+    if (credit) balance = addDecimalStrings_(balance, amount);
+    if (debit) balance = addDecimalStrings_(balance, negateDecimal_(amount));
+  }
+  account.balanceByCurrency[currency] = balance;
+}
+
+function snapshotCursorOffset_(cursor) {
+  if (cursor === undefined) {
+    return 0;
+  }
+  var text = String(cursor);
+  if (!/^(0|[1-9]\d*)$/.test(text)) {
+    throw new Error('invalid snapshot cursor');
+  }
+  var offset = Number(text);
+  if (!Number.isSafeInteger(offset)) {
+    throw new Error('invalid snapshot cursor');
+  }
+  return offset;
+}
+
+function canonicalDecimal_(value, sheetRow) {
+  var text = String(value === null || value === undefined ? '' : value).trim();
+  if (text.indexOf(',') !== -1 &&
+      !/^[+-]?\d{1,3}(?:,\d{3})+(?:\.\d*)?$/.test(text)) {
+    throw new Error('invalid journal amount at row ' + sheetRow);
+  }
+  text = text.replace(/,/g, '');
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) {
+    throw new Error('invalid journal amount at row ' + sheetRow);
+  }
+  var negative = text.charAt(0) === '-';
+  if (text.charAt(0) === '-' || text.charAt(0) === '+') {
+    text = text.slice(1);
+  }
+  var parts = text.split('.');
+  var whole = (parts[0] || '0').replace(/^0+(?=\d)/, '');
+  var fraction = (parts[1] || '').replace(/0+$/, '');
+  var canonical = fraction ? whole + '.' + fraction : whole;
+  if (/^0(?:\.0*)?$/.test(canonical)) {
+    return '0';
+  }
+  return negative ? '-' + canonical : canonical;
+}
+
+function negateDecimal_(value) {
+  if (value === '0') return value;
+  return value.charAt(0) === '-' ? value.slice(1) : '-' + value;
+}
+
+function addDecimalStrings_(left, right) {
+  var leftParts = decimalParts_(left);
+  var rightParts = decimalParts_(right);
+  var scale = Math.max(leftParts.scale, rightParts.scale);
+  var leftDigits = leftParts.digits + repeatZero_(scale - leftParts.scale);
+  var rightDigits = rightParts.digits + repeatZero_(scale - rightParts.scale);
+  var negative;
+  var digits;
+  if (leftParts.negative === rightParts.negative) {
+    negative = leftParts.negative;
+    digits = addUnsignedDigits_(leftDigits, rightDigits);
+  } else {
+    var comparison = compareUnsignedDigits_(leftDigits, rightDigits);
+    if (comparison === 0) return '0';
+    if (comparison > 0) {
+      negative = leftParts.negative;
+      digits = subtractUnsignedDigits_(leftDigits, rightDigits);
+    } else {
+      negative = rightParts.negative;
+      digits = subtractUnsignedDigits_(rightDigits, leftDigits);
+    }
+  }
+  return decimalFromParts_(negative, digits, scale);
+}
+
+function decimalParts_(value) {
+  var negative = value.charAt(0) === '-';
+  var unsigned = negative ? value.slice(1) : value;
+  var parts = unsigned.split('.');
+  return {
+    negative: negative,
+    digits: ((parts[0] || '0') + (parts[1] || '')).replace(/^0+(?=\d)/, ''),
+    scale: (parts[1] || '').length,
+  };
+}
+
+function decimalFromParts_(negative, digits, scale) {
+  digits = digits.replace(/^0+(?=\d)/, '');
+  while (digits.length <= scale) digits = '0' + digits;
+  var whole = scale === 0 ? digits : digits.slice(0, digits.length - scale);
+  var fraction = scale === 0 ? '' : digits.slice(digits.length - scale);
+  fraction = fraction.replace(/0+$/, '');
+  var value = fraction ? whole + '.' + fraction : whole;
+  if (/^0(?:\.0*)?$/.test(value)) return '0';
+  return negative ? '-' + value : value;
+}
+
+function repeatZero_(count) {
+  var result = '';
+  while (count > 0) {
+    result += '0';
+    count -= 1;
+  }
+  return result;
+}
+
+function compareUnsignedDigits_(left, right) {
+  left = left.replace(/^0+(?=\d)/, '');
+  right = right.replace(/^0+(?=\d)/, '');
+  if (left.length !== right.length) return left.length > right.length ? 1 : -1;
+  if (left === right) return 0;
+  return left > right ? 1 : -1;
+}
+
+function addUnsignedDigits_(left, right) {
+  var carry = 0;
+  var result = '';
+  var leftIndex = left.length - 1;
+  var rightIndex = right.length - 1;
+  while (leftIndex >= 0 || rightIndex >= 0 || carry > 0) {
+    var sum = carry;
+    if (leftIndex >= 0) sum += Number(left.charAt(leftIndex));
+    if (rightIndex >= 0) sum += Number(right.charAt(rightIndex));
+    result = String(sum % 10) + result;
+    carry = Math.floor(sum / 10);
+    leftIndex -= 1;
+    rightIndex -= 1;
+  }
+  return result;
+}
+
+function subtractUnsignedDigits_(larger, smaller) {
+  var borrow = 0;
+  var result = '';
+  var smallerIndex = smaller.length - 1;
+  for (var index = larger.length - 1; index >= 0; index -= 1) {
+    var difference = Number(larger.charAt(index)) - borrow;
+    if (smallerIndex >= 0) difference -= Number(smaller.charAt(smallerIndex));
+    if (difference < 0) {
+      difference += 10;
+      borrow = 1;
+    } else {
+      borrow = 0;
+    }
+    result = String(difference) + result;
+    smallerIndex -= 1;
+  }
+  return result.replace(/^0+(?=\d)/, '');
 }
 
 function listTransactions_(payload) {
