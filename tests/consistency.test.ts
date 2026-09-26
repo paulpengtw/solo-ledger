@@ -6,7 +6,8 @@ import {
   generateKeyPair,
   type JWTVerifyGetKey,
 } from 'jose'
-import { buildEnvelope } from '../functions/lib/envelope'
+import { buildEnvelope as productionBuildEnvelope } from '../functions/lib/envelope'
+import { CONTRACT_VERSION } from '../src/generated/version'
 import { handleAction, type Env } from '../functions/lib/handler'
 import {
   loadGasFunctionsWithFakeGas,
@@ -15,6 +16,9 @@ import {
   type FakeSheet,
   type FakeTextOutput,
 } from './helpers/gas'
+
+const buildEnvelope = (secret: string, payload: Record<string, unknown>, ts: number, nonce: string) =>
+  productionBuildEnvelope(secret, { ...payload, contractVersion: CONTRACT_VERSION }, ts, nonce)
 
 const secret = 'test-secret'
 const fixedNow = new Date('2026-07-27T00:00:00.000Z')
@@ -653,6 +657,7 @@ describe('check_consistency Pages handler', () => {
         }
         expect(envelope.nonce).toBe('3b241101-e2bb-4255-8caf-4136c566a962')
         expect(decodePayload(envelope.payload)).toEqual({
+          contractVersion: CONTRACT_VERSION,
           action: 'check_consistency',
           repair: true,
           idempotencyKey: '3b241101-e2bb-4255-8caf-4136c566a962',
@@ -938,6 +943,7 @@ function handlerRawRequest(body: string): Request {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
+      'x-contract-version': CONTRACT_VERSION,
       cookie: handlerCookie,
     },
     body,

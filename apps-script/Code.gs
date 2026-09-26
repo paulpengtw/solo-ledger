@@ -40,8 +40,80 @@ var BACKUP_FOLDER_PROPERTY = 'LEDGER_BACKUP_FOLDER_ID';
 var BACKUP_FOLDER_NAME = 'Solo Ledger backups';
 var BACKUP_RETENTION_COUNT = 12;
 
+function integrationState_() {
+  if (!/^[0-9a-f]{40}$/.test(CONTRACT_VERSION) ||
+      !/^[0-9a-f]{40}$/.test(APP_VERSION)) {
+    throw new Error('系統版本不可用');
+  }
+  var open = PropertiesService.getScriptProperties().getProperty('INTEGRATION_OPEN') === 'true';
+  return {
+    identity: { contractVersion: CONTRACT_VERSION, appVersion: APP_VERSION },
+    maintenance: open ? { kind: 'open' } : { kind: 'maintenance', message: '系統更新中' },
+  };
+}
+
+function requireFinancialOpen_(payload) {
+  var state = integrationState_();
+  if (state.maintenance.kind !== 'open') {
+    throw new Error('系統更新中');
+  }
+  if (!payload || payload.contractVersion !== CONTRACT_VERSION) {
+    throw new Error('版本已更新，請重新整理頁面');
+  }
+}
+
+function setMaintenance_(payload, nonce) {
+  integrationState_();
+  if (!payload || typeof payload.open !== 'boolean' ||
+      String(payload.commandNonce || '') !== nonce ||
+      payload.contractVersion !== CONTRACT_VERSION) {
+    throw new Error('invalid maintenance command');
+  }
+  var commandTs = Number(payload.commandTs);
+  if (!Number.isSafeInteger(commandTs)) {
+    throw new Error('invalid maintenance command timestamp');
+  }
+  var lock = LockService.getScriptLock();
+  lock.waitLock(LOCK_WAIT_MILLISECONDS);
+  try {
+    var properties = PropertiesService.getScriptProperties();
+    var previousText = properties.getProperty('MAINTENANCE_LAST_COMMAND');
+    var previous = previousText ? JSON.parse(previousText) : null;
+    if (previous) {
+      if (!Number.isSafeInteger(previous.ts) || typeof previous.nonce !== 'string' ||
+          typeof previous.open !== 'boolean') {
+        throw new Error('maintenance command state unavailable');
+      }
+      if (commandTs < previous.ts ||
+          (commandTs === previous.ts &&
+            (nonce !== previous.nonce || payload.open !== previous.open))) {
+        throw new Error('stale maintenance command');
+      }
+    }
+    if (!previous || commandTs > previous.ts) {
+      if (Math.abs(Date.now() - commandTs) > 300000) {
+        throw new Error('maintenance command timestamp outside allowed window');
+      }
+      properties.setProperty('MAINTENANCE_LAST_COMMAND', JSON.stringify({
+        ts: commandTs, nonce: nonce, open: payload.open,
+      }));
+    }
+    properties.setProperty('INTEGRATION_OPEN', payload.open ? 'true' : 'false');
+    return integrationState_();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function route_(payload, nonce) {
   var action = payload && payload.action;
+  if (action === 'integrationState') {
+    return integrationState_();
+  }
+  if (action === 'setMaintenance') {
+    return setMaintenance_(payload, nonce);
+  }
+  requireFinancialOpen_(payload);
 
   if (action === 'health') {
     return health_();
@@ -450,6 +522,7 @@ function checkConsistency_(payload, nonce) {
   var lock = LockService.getScriptLock();
   lock.waitLock(LOCK_WAIT_MILLISECONDS);
   try {
+    requireFinancialOpen_(payload);
     var spreadsheet = SpreadsheetApp.openById(
       requiredProp_('LEDGER_SPREADSHEET_ID'),
     );
@@ -873,6 +946,7 @@ function createTransaction_(payload, nonce) {
   lock.waitLock(LOCK_WAIT_MILLISECONDS);
 
   try {
+    requireFinancialOpen_(payload);
     if (PropertiesService.getScriptProperties().getProperty('repair:' + idempotencyKey)) {
       throw new Error('idempotency key already used for repair');
     }
@@ -971,6 +1045,7 @@ function settle_(payload, nonce) {
   lock.waitLock(LOCK_WAIT_MILLISECONDS);
 
   try {
+    requireFinancialOpen_(payload);
     if (PropertiesService.getScriptProperties().getProperty('repair:' + idempotencyKey)) {
       throw new Error('idempotency key already used for repair');
     }
@@ -1096,6 +1171,7 @@ function reverseTransaction_(payload, nonce) {
   lock.waitLock(LOCK_WAIT_MILLISECONDS);
 
   try {
+    requireFinancialOpen_(payload);
     if (PropertiesService.getScriptProperties().getProperty('repair:' + idempotencyKey)) {
       throw new Error('idempotency key already used for repair');
     }

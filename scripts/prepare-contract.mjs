@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Verify the registered public contract before executing its checks or copying output.
-import { readFileSync, realpathSync, existsSync, copyFileSync, readdirSync } from 'node:fs'
+import { readFileSync, realpathSync, existsSync, copyFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const contract = join(root, 'contract')
@@ -49,8 +49,22 @@ try {
   if (existsSync(destination) && !readFileSync(source).equals(readFileSync(destination))) {
     fail('copied Apps Script contract differs from pinned generated source')
   }
+  const vocabulary = await import(pathToFileURL(join(contract, 'generated', consumer, 'vocabulary.ts')).href)
+  const code = readFileSync(join(root, 'apps-script', 'Code.gs'), 'utf8')
+  const declaration = code.match(/^var JOURNAL_HEADERS = \[([\s\S]*?)\];/m)
+  if (!declaration) fail('missing GAS JOURNAL_HEADERS')
+  const actualHeaders = [...declaration[1].matchAll(/'([^']+)'/g)].map(match => match[1])
+  if (JSON.stringify(actualHeaders) !== JSON.stringify(vocabulary.JOURNAL_HEADERS)) fail('GAS JOURNAL_HEADERS differs from generated vocabulary')
   copyFileSync(source, destination)
-  console.log(`verified contract ${pin}; copied ${consumer}/Contract.gs`)
+  const appVersion = run('git', ['rev-parse', 'HEAD'], root)
+  if (!/^[0-9a-f]{40}$/.test(appVersion)) fail('source commit version unavailable')
+  writeFileSync(join(root, 'apps-script', 'Version.gs'),
+    `// Generated from verified source; do not edit.\nvar CONTRACT_VERSION = '${pin}';\nvar APP_VERSION = '${appVersion}';\n`)
+  const generatedDir = join(root, 'src', 'generated')
+  mkdirSync(generatedDir, { recursive: true })
+  writeFileSync(join(generatedDir, 'version.ts'),
+    `// Generated from verified source; do not edit.\nexport const CONTRACT_VERSION = '${pin}'\nexport const APP_VERSION = '${appVersion}'\n`)
+  console.log(`verified contract ${pin}; built app ${appVersion}`)
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error))
   process.exitCode = 1

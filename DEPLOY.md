@@ -75,10 +75,11 @@ npm run build
    }
    ```
 
-   Do not commit `.clasp.json`. Authenticate if necessary, then push `apps-script/Code.gs` and `apps-script/appsscript.json`:
+   Do not commit `.clasp.json`. Authenticate if necessary, verify the contract and generate `Contract.gs` and `Version.gs`, then push them with `Code.gs` and `appsscript.json`:
 
    ```sh
    clasp login
+   npm run prepare:contract
    clasp push
    ```
 
@@ -474,3 +475,10 @@ Run `check_consistency` without repair and require `clean: true`. Then call `hea
 - **Never sort `日記帳` in place.** Use filter views so physical row order and row-addressed operations remain stable.
 - `日記帳` holds no formulas. Keep formulas in `餘額` and `試算與檢查`.
 - Every hand-entered journal row must set `來源=手動`.
+
+
+## Integration identity and maintenance
+
+The build generates `apps-script/Version.gs` and `src/generated/version.ts` from the verified contract pin and repository commit. `GET /api/identity` accepts a verified Cloudflare Access human or service JWT and reports the built Pages identity, actual Apps Script backend identity, and backend maintenance state. The two components may have different app revisions; their `contractVersion` pins must agree. Apps Script's signed `integrationState` action reports its own identity. An unreachable component or mismatched contract pin makes the integration unavailable.
+
+The integration starts in maintenance. After both deployments and their identity checks agree, run the **Set Maintenance** manual workflow with `mode=open`; choose `mode=maintenance` to close it. This workflow needs repository Actions secrets `EXPENSE_API_URL` (this ledger's Apps Script `/exec` URL) and `EXPENSE_API_SECRET` (the same HMAC secret held by Pages and Apps Script). Both secrets still need to be installed in this repository's Actions settings before the workflow is usable. It sends a signed Apps Script admin command; the Pages action allowlist cannot call that command. A stale command cannot undo a newer choice. If the workflow fails or times out, inspect signed `integrationState` before sending another command. No key or response body is logged.

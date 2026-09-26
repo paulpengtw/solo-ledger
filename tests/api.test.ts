@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { CONTRACT_VERSION } from '../src/generated/version'
 import {
   OPTIONS_CACHE_KEY,
   listTransactions,
@@ -53,6 +54,7 @@ describe('submitTransaction', () => {
     const fetchFn = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       expect(String(url)).toBe('/api/create_transaction')
       expect(init?.method).toBe('POST')
+      expect(new Headers(init?.headers).get('x-contract-version')).toBe(CONTRACT_VERSION)
       expect(JSON.parse(String(init?.body))).toEqual({
         transaction: TRANSACTION,
         idempotencyKey: KEY,

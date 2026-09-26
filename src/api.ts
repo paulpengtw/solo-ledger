@@ -1,16 +1,7 @@
-export type Transaction = {
-  type: '支出' | '收入' | '轉帳'
-  amount: number
-  date: string
-  description: string
-  time?: string
-  account?: string
-  toAccount?: string
-  category?: string
-  payee?: string
-  currency?: string
-  iou?: '應收' | '應付'
-}
+import type { Transaction } from '../contract/generated/solo-ledger/vocabulary'
+import { CONTRACT_VERSION } from './generated/version'
+
+export type { Transaction } from '../contract/generated/solo-ledger/vocabulary'
 
 export type AccountOption = {
   name: string
@@ -103,6 +94,7 @@ async function post(
         'content-type': 'application/json',
         // Marks the call as programmatic so Cloudflare Access answers 401, not a 302.
         'x-requested-with': 'XMLHttpRequest',
+        'x-contract-version': CONTRACT_VERSION,
       },
       body: JSON.stringify(body),
       redirect: 'manual',
