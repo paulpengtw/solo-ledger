@@ -17,9 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          submodules: recursive
       - uses: actions/setup-node@v5
         with:
-          node-version: '26'
+          node-version: '26.5.0'
       - run: npm ci
       - run: npm test
       - run: npm run build
@@ -27,9 +29,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          submodules: recursive
       - uses: actions/setup-node@v5
         with:
-          node-version: '26'
+          node-version: '26.5.0'
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:sw

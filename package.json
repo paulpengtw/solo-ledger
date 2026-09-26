@@ -11,7 +11,10 @@
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
     "test:sw": "npm run build && playwright test --config=sw-tests/playwright.config.ts",
-    "pages:dev": "npm run build && wrangler pages dev dist"
+    "pages:dev": "npm run build && wrangler pages dev dist",
+    "prepare:contract": "node scripts/prepare-contract.mjs",
+    "pretest": "npm run prepare:contract",
+    "prebuild": "npm run prepare:contract"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260726.1",

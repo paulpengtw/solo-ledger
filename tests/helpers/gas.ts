@@ -76,7 +76,8 @@ function throwingGasGlobal(name: string): object {
 
 export function loadGasFunctions(): GasFunctions {
   const codePath = fileURLToPath(new URL('../../apps-script/Code.gs', import.meta.url))
-  const source = readFileSync(codePath, 'utf8')
+  const contractPath = fileURLToPath(new URL('../../apps-script/Contract.gs', import.meta.url))
+  const source = readFileSync(contractPath, 'utf8') + '\n' + readFileSync(codePath, 'utf8')
   const evaluate = new Function(
     ...gasGlobalNames,
     [
@@ -592,7 +593,8 @@ export type FakeGasHarness = SetupGasFunctions & {
 
 export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
   const codePath = fileURLToPath(new URL('../../apps-script/Code.gs', import.meta.url))
-  const source = readFileSync(codePath, 'utf8')
+  const contractPath = fileURLToPath(new URL('../../apps-script/Contract.gs', import.meta.url))
+  const source = readFileSync(contractPath, 'utf8') + '\n' + readFileSync(codePath, 'utf8')
   const events: string[] = []
   const recordEvent = (event: string) => events.push(event)
   const spreadsheetId = 'test-ledger-spreadsheet-id'

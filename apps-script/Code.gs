@@ -32,7 +32,6 @@ var LIST_TRANSACTION_HEADERS = [
 ];
 
 var MAX_LIST_TRANSACTIONS = 200;
-var MAX_SKEW_SECONDS = 300;
 var NONCE_CACHE_SECONDS = 600;
 var LOCK_WAIT_MILLISECONDS = 30000;
 var BALANCE_FORMULA_SCHEMA_PROPERTY = 'BALANCE_FORMULA_SCHEMA_VERSION';
@@ -41,20 +40,6 @@ var SPREADSHEET_ID_TAIL_LENGTH = 8;
 var BACKUP_FOLDER_PROPERTY = 'LEDGER_BACKUP_FOLDER_ID';
 var BACKUP_FOLDER_NAME = 'Solo Ledger backups';
 var BACKUP_RETENTION_COUNT = 12;
-
-function doPost(e) {
-  try {
-    var requestText =
-      e && e.postData && e.postData.contents ? e.postData.contents : '{}';
-    var verified = verifyEnvelope_(JSON.parse(requestText));
-    return json_(route_(verified.payload, verified.nonce));
-  } catch (error) {
-    return json_({
-      ok: false,
-      error: String(error && error.message ? error.message : error),
-    });
-  }
-}
 
 function route_(payload, nonce) {
   var action = payload && payload.action;
@@ -85,48 +70,6 @@ function route_(payload, nonce) {
   }
 
   throw new Error('unsupported action: ' + action);
-}
-
-function verifyEnvelope_(envelope) {
-  if (!envelope || typeof envelope !== 'object') {
-    throw new Error('invalid envelope');
-  }
-
-  var ts = Number(envelope.ts);
-  var nonce = String(envelope.nonce || '');
-  var payloadB64 = String(envelope.payload || '');
-  var sig = String(envelope.sig || '');
-
-  if (!isFinite(ts)) {
-    throw new Error('missing ts');
-  }
-  if (!nonce) {
-    throw new Error('missing nonce');
-  }
-  if (!payloadB64) {
-    throw new Error('missing payload');
-  }
-  if (!sig) {
-    throw new Error('missing sig');
-  }
-
-  var now = Math.floor(Date.now() / 1000);
-  if (Math.abs(now - ts) > MAX_SKEW_SECONDS) {
-    throw new Error('request timestamp outside allowed window');
-  }
-
-  var secret = requiredProp_('EXPENSE_API_SECRET');
-  var signingInput = ts + '.' + nonce + '.' + payloadB64;
-  var expected = base64UrlEncode_(
-    Utilities.computeHmacSha256Signature(signingInput, secret),
-  );
-  if (!constantTimeEqual_(sig, expected)) {
-    throw new Error('bad signature');
-  }
-
-  var jsonText = Utilities.newBlob(base64UrlDecode_(payloadB64))
-    .getDataAsString('UTF-8');
-  return { payload: JSON.parse(jsonText), nonce: nonce };
 }
 
 function health_() {
@@ -1419,43 +1362,6 @@ function taipeiIsoNow_() {
   return new Date(Date.now() + offsetMilliseconds)
     .toISOString()
     .replace('Z', '+08:00');
-}
-
-function requiredProp_(name) {
-  var value = PropertiesService.getScriptProperties().getProperty(name);
-  if (!value) {
-    throw new Error('missing script property: ' + name);
-  }
-  return value;
-}
-
-function json_(object) {
-  return ContentService.createTextOutput(JSON.stringify(object)).setMimeType(
-    ContentService.MimeType.JSON,
-  );
-}
-
-function base64UrlEncode_(bytes) {
-  return Utilities.base64EncodeWebSafe(bytes).replace(/=+$/, '');
-}
-
-function base64UrlDecode_(text) {
-  var normalized = text.replace(/-/g, '+').replace(/_/g, '/');
-  while (normalized.length % 4) {
-    normalized += '=';
-  }
-  return Utilities.base64Decode(normalized);
-}
-
-function constantTimeEqual_(a, b) {
-  if (a.length !== b.length) {
-    return false;
-  }
-  var difference = 0;
-  for (var index = 0; index < a.length; index += 1) {
-    difference |= a.charCodeAt(index) ^ b.charCodeAt(index);
-  }
-  return difference === 0;
 }
 
 function resolveHeaders_(headerRow, requiredHeaders) {
