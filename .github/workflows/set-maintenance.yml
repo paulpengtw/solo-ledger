@@ -1,0 +1,33 @@
+name: Set Maintenance
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Ledger integration state'
+        required: true
+        type: choice
+        options: [maintenance, open]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ledger-maintenance
+  cancel-in-progress: false
+
+jobs:
+  toggle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '26.5.0'
+      - run: npm run prepare:contract
+      - run: node scripts/set-maintenance.mjs '${{ inputs.mode }}'
+        env:
+          EXPENSE_API_URL: ${{ secrets.EXPENSE_API_URL }}
+          EXPENSE_API_SECRET: ${{ secrets.EXPENSE_API_SECRET }}

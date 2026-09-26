@@ -46,7 +46,7 @@ describe('.github/workflows/deploy.yml', () => {
         step.uses.startsWith('actions/setup-node@'),
     )
     expect(setupNodeStep).toBeDefined()
-    expect(setupNodeStep.with['node-version']).toBe('26')
+    expect(setupNodeStep.with['node-version']).toBe('26.5.0')
   })
 
   it('deploys with npx wrangler via npm ci then npm run build then wrangler deploy with CF secrets', () => {

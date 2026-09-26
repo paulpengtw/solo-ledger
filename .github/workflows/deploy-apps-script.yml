@@ -6,6 +6,10 @@ on:
     paths:
       - 'apps-script/**'
       - '.github/workflows/deploy-apps-script.yml'
+      - 'contract'
+      - '.gitmodules'
+      - 'scripts/prepare-contract.mjs'
+      - '.nvmrc'
   workflow_dispatch:
 
 permissions:
@@ -23,9 +27,12 @@ jobs:
       DEPLOYMENT_ID: AKfycbw2fSloAC_xk6jXrdqmSUDxERJhjK1_FlMjMoa2RpXgbn4vgKkQDysgYQSPs2KEu81PKg
     steps:
       - uses: actions/checkout@v5
+        with:
+          submodules: recursive
       - uses: actions/setup-node@v5
         with:
-          node-version: '26'
+          node-version: '26.5.0'
+      - run: npm run prepare:contract
       - name: Write clasp credentials
         env:
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}

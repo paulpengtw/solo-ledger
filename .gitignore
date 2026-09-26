@@ -9,3 +9,6 @@ dist/
 .clasp.json
 test-results/
 playwright-report/
+apps-script/Contract.gs
+apps-script/Version.gs
+src/generated/version.ts

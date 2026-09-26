@@ -30,9 +30,33 @@ export async function verifyAccessJwt(
   if (!token) return { ok: false }
   try {
     const { payload } = await jwtVerify(token, jwks, { audience: aud, ...(currentDate ? { currentDate } : {}) })
-    if (typeof payload.exp !== 'number') return { ok: false }
+    if (typeof payload.exp !== 'number' || payload.sub === '' ||
+        typeof payload.common_name === 'string') return { ok: false }
     return { ok: true, exp: payload.exp }
   } catch {
     return { ok: false }
+  }
+}
+
+
+export async function verifyIdentityJwt(
+  request: Request, teamDomain: string, aud: string, jwks: JWTVerifyGetKey,
+  currentDate?: Date,
+): Promise<boolean> {
+  const token = request.headers.get('cf-access-jwt-assertion') ?? extractToken(request.headers.get('cookie'))
+  if (!token || !teamDomain || !aud) return false
+  try {
+    const { payload } = await jwtVerify(token, jwks, {
+      issuer: `https://${teamDomain}`, audience: aud,
+      ...(currentDate ? { currentDate } : {}),
+    })
+    if (payload.type !== 'app' || typeof payload.exp !== 'number') return false
+    const human = typeof payload.sub === 'string' && payload.sub !== ''
+      && typeof payload.email === 'string' && payload.email !== ''
+    const service = payload.sub === '' && typeof payload.common_name === 'string'
+      && payload.common_name.trim() !== ''
+    return human || service
+  } catch {
+    return false
   }
 }

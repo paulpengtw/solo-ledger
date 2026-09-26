@@ -6,7 +6,8 @@ import {
   generateKeyPair,
   type JWTVerifyGetKey,
 } from 'jose'
-import { buildEnvelope } from '../functions/lib/envelope'
+import { buildEnvelope as productionBuildEnvelope } from '../functions/lib/envelope'
+import { CONTRACT_VERSION } from '../src/generated/version'
 import { handleAction, type Env } from '../functions/lib/handler'
 import {
   loadGasFunctionsWithFakeGas,
@@ -15,6 +16,9 @@ import {
   type FakeSheet,
   type FakeTextOutput,
 } from './helpers/gas'
+
+const buildEnvelope = (secret: string, payload: Record<string, unknown>, ts: number, nonce: string) =>
+  productionBuildEnvelope(secret, { ...payload, contractVersion: CONTRACT_VERSION }, ts, nonce)
 
 const secret = 'test-secret'
 const fixedNow = new Date('2026-07-27T00:00:00.000Z')
@@ -355,7 +359,8 @@ describe('check_consistency', () => {
     const beforeRow = rawJournalRows(harness)[0]!
     harness.clearEvents()
 
-    const report = await postCheckConsistency(harness, true)
+    const repairKey = 'completed-repair-key'
+    const report = await postCheckConsistency(harness, true, repairKey)
     const afterRow = rawJournalRows(harness)[0]!
 
     expect(report.repair_requested).toBe(true)
@@ -374,6 +379,54 @@ describe('check_consistency', () => {
       'status-written',
       'lock-released',
     ])
+    const repeated = await postCheckConsistency(harness, true, repairKey) as unknown as Record<string, unknown>
+    expect(repeated).toEqual({ ok: false, error: 'repair key already completed; run a read-only audit' })
+    expect(rawJournalRows(harness)[0]).toEqual(afterRow)
+  })
+
+  it('requires a repair key matching the signed nonce', async () => {
+    const response = await post(harness, {
+      action: 'check_consistency', repair: true, idempotencyKey: 'different-key',
+    }, 'signed-key')
+    expect(response).toEqual({ ok: false, error: 'idempotencyKey must match nonce' })
+  })
+
+  it('refuses a pending repair key after a failed status write', async () => {
+    appendJournalRows(harness, [
+      receivable('pending-target', 100),
+      settlement('pending-settlement', 'pending-target', 100),
+    ])
+    const journal = requiredSheet(harness, '日記帳')
+    journal.failNextSetValuesInColumn(journalHeaders.indexOf('結清狀態') + 1)
+    const key = 'pending-repair-key'
+    const first = await postCheckConsistency(harness, true, key) as unknown as Record<string, unknown>
+    expect(first).toEqual({ ok: false, error: 'simulated write failure' })
+    const beforeRetry = journalBytes(harness)
+
+    const repeat = await postCheckConsistency(harness, true, key) as unknown as Record<string, unknown>
+    expect(repeat).toEqual({ ok: false, error: 'repair outcome unknown for idempotency key' })
+    expect(journalBytes(harness)).toBe(beforeRetry)
+  })
+
+  it('can retry the same repair key after a preflight header failure', async () => {
+    const journal = requiredSheet(harness, '日記帳')
+    const txnColumn = journalHeaders.indexOf('txn_id') + 1
+    journal.getRange(1, txnColumn).setValues([['']])
+    const key = 'preflight-repair-key'
+    const first = await postCheckConsistency(harness, true, key) as unknown as Record<string, unknown>
+    expect(first.ok).toBe(false)
+    expect(harness.peekScriptProperty(`repair:${key}`)).toBeNull()
+
+    journal.getRange(1, txnColumn).setValues([['txn_id']])
+    const repeat = await postCheckConsistency(harness, true, key)
+    expect(repeat.ok).toBe(true)
+    expect(harness.peekScriptProperty(`repair:${key}`)).toBe('complete')
+  })
+
+  it('refuses a repair key already used by a journal write', async () => {
+    appendJournalRows(harness, [cleanExpense('journal-key')])
+    const response = await postCheckConsistency(harness, true, 'journal-key') as unknown as Record<string, unknown>
+    expect(response).toEqual({ ok: false, error: 'idempotency key already used by journal' })
   })
 
   it('leaves the entire journal unchanged and takes no lock when repair is not opted in', async () => {
@@ -594,7 +647,7 @@ beforeAll(async () => {
 })
 
 describe('check_consistency Pages handler', () => {
-  it('allows and forwards the explicit repair flag under a random nonce', async () => {
+  it('requires and forwards the explicit repair key as nonce', async () => {
     const upstreamBody = '{"ok":true,"clean":false,"repaired":1}'
     const fetchFn = vi.fn(
       async (_url: RequestInfo | URL, init?: RequestInit) => {
@@ -602,12 +655,12 @@ describe('check_consistency Pages handler', () => {
           nonce: string
           payload: string
         }
-        expect(envelope.nonce).toMatch(
-          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-        )
+        expect(envelope.nonce).toBe('3b241101-e2bb-4255-8caf-4136c566a962')
         expect(decodePayload(envelope.payload)).toEqual({
+          contractVersion: CONTRACT_VERSION,
           action: 'check_consistency',
           repair: true,
+          idempotencyKey: '3b241101-e2bb-4255-8caf-4136c566a962',
         })
         return new Response(upstreamBody, { status: 200 })
       },
@@ -615,7 +668,7 @@ describe('check_consistency Pages handler', () => {
 
     const response = await handleAction(
       'check_consistency',
-      handlerRequest({ repair: true }),
+      handlerRequest({ repair: true, idempotencyKey: '3b241101-e2bb-4255-8caf-4136c566a962' }),
       handlerEnv,
       {
         jwks: handlerJwks,
@@ -627,6 +680,15 @@ describe('check_consistency Pages handler', () => {
     expect(response.status).toBe(200)
     expect(await response.text()).toBe(upstreamBody)
     expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects repair without an idempotency key before contacting Apps Script', async () => {
+    const fetchFn = vi.fn(async () => { throw new Error('must not fetch') }) as unknown as typeof fetch
+    const response = await handleAction('check_consistency', handlerRequest({ repair: true }),
+      handlerEnv, { jwks: handlerJwks, fetchFn, now: () => handlerNow })
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ ok: false, error: 'invalid idempotency key' })
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 
   it('rejects a non-boolean repair flag before contacting Apps Script', async () => {
@@ -769,22 +831,25 @@ function reversal(
 async function postCheckConsistency(
   harness: FakeGasHarness,
   repair = false,
+  idempotencyKey: string = crypto.randomUUID(),
 ): Promise<ConsistencyReport> {
   return await post(harness, {
     action: 'check_consistency',
     repair,
-  }) as unknown as ConsistencyReport
+    ...(repair ? { idempotencyKey } : {}),
+  }, idempotencyKey) as unknown as ConsistencyReport
 }
 
 async function post(
   harness: FakeGasHarness,
   payload: Record<string, unknown>,
+  nonce = `consistency-${crypto.randomUUID()}`,
 ): Promise<Record<string, unknown>> {
   const envelope = await buildEnvelope(
     secret,
     payload,
     Math.floor(fixedNow.getTime() / 1000),
-    `consistency-${crypto.randomUUID()}`,
+    nonce,
   )
   return parseOutput(
     harness.doPost({ postData: { contents: JSON.stringify(envelope) } }),
@@ -878,6 +943,7 @@ function handlerRawRequest(body: string): Request {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
+      'x-contract-version': CONTRACT_VERSION,
       cookie: handlerCookie,
     },
     body,

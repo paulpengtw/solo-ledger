@@ -76,7 +76,9 @@ function throwingGasGlobal(name: string): object {
 
 export function loadGasFunctions(): GasFunctions {
   const codePath = fileURLToPath(new URL('../../apps-script/Code.gs', import.meta.url))
-  const source = readFileSync(codePath, 'utf8')
+  const contractPath = fileURLToPath(new URL('../../apps-script/Contract.gs', import.meta.url))
+  const versionPath = fileURLToPath(new URL('../../apps-script/Version.gs', import.meta.url))
+  const source = readFileSync(contractPath, 'utf8') + '\n' + readFileSync(versionPath, 'utf8') + '\n' + readFileSync(codePath, 'utf8')
   const evaluate = new Function(
     ...gasGlobalNames,
     [
@@ -586,13 +588,17 @@ export type FakeGasHarness = SetupGasFunctions & {
   clearEvents: () => void
   setScriptProperty: (name: string, value: string) => void
   advanceCacheTime: (seconds: number) => void
+  failNextLock: () => void
+  onNextLock: (callback: () => void) => void
   peekCache: (key: string) => string | null
   peekScriptProperty: (name: string) => string | null
 }
 
 export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
   const codePath = fileURLToPath(new URL('../../apps-script/Code.gs', import.meta.url))
-  const source = readFileSync(codePath, 'utf8')
+  const contractPath = fileURLToPath(new URL('../../apps-script/Contract.gs', import.meta.url))
+  const versionPath = fileURLToPath(new URL('../../apps-script/Version.gs', import.meta.url))
+  const source = readFileSync(contractPath, 'utf8') + '\n' + readFileSync(versionPath, 'utf8') + '\n' + readFileSync(codePath, 'utf8')
   const events: string[] = []
   const recordEvent = (event: string) => events.push(event)
   const spreadsheetId = 'test-ledger-spreadsheet-id'
@@ -608,10 +614,13 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
   const triggers: FakeTrigger[] = []
   let nextUuid = 1
   let cacheNow = Date.now()
+  let lockShouldFail = false
+  let nextLockCallback: (() => void) | null = null
   const cacheEntries = new Map<string, { value: string; expiresAt: number }>()
   const scriptProperties = new Map<string, string>([
     ['LEDGER_SPREADSHEET_ID', spreadsheetId],
     ['EXPENSE_API_SECRET', 'test-secret'],
+    ['INTEGRATION_OPEN', 'true'],
   ])
   const scriptCache = {
     get(key: string) {
@@ -637,7 +646,14 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
   }
   const scriptLock = {
     waitLock(_milliseconds: number) {
+      if (lockShouldFail) {
+        lockShouldFail = false
+        throw new Error('simulated lock failure')
+      }
       recordEvent('lock-acquired')
+      const callback = nextLockCallback
+      nextLockCallback = null
+      callback?.()
     },
     releaseLock() {
       recordEvent('lock-released')
@@ -871,6 +887,12 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
     },
     setScriptProperty(name: string, value: string) {
       scriptProperties.set(name, value)
+    },
+    failNextLock() {
+      lockShouldFail = true
+    },
+    onNextLock(callback: () => void) {
+      nextLockCallback = callback
     },
     advanceCacheTime(seconds: number) {
       cacheNow += seconds * 1000

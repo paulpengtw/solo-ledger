@@ -1,3 +1,4 @@
+import { CONTRACT_VERSION, APP_VERSION } from '../../src/generated/version'
 import type { JWTVerifyGetKey } from 'jose'
 import { buildEnvelope } from './envelope'
 import { verifyAccessJwt } from './jwt'
@@ -61,6 +62,11 @@ export async function handleAction(
   }
   if (action === 'auth-check') {
     return json(200, { ok: true, exp: auth.exp })
+  }
+
+  if (action !== 'auth-check' && (!/^[0-9a-f]{40}$/.test(APP_VERSION) ||
+      request.headers.get('x-contract-version') !== CONTRACT_VERSION)) {
+    return json(409, { ok: false, error: '版本已更新，請重新整理頁面' })
   }
 
   let payload: Record<string, unknown>
@@ -183,16 +189,23 @@ export async function handleAction(
       return json(400, { ok: false, error: 'invalid repair flag' })
     }
 
-    nonce = crypto.randomUUID()
     payload = { action: 'check_consistency' }
     if (body.repair === true) {
+      if (!isValidUuid(body.idempotencyKey)) {
+        return json(400, { ok: false, error: 'invalid idempotency key' })
+      }
+      nonce = body.idempotencyKey
       payload.repair = true
+      payload.idempotencyKey = body.idempotencyKey
+    } else {
+      nonce = crypto.randomUUID()
     }
   } else {
     nonce = crypto.randomUUID()
     payload = { action }
   }
 
+  payload.contractVersion = CONTRACT_VERSION
   const envelope = await buildEnvelope(
     env.EXPENSE_API_SECRET,
     payload,
@@ -204,8 +217,14 @@ export async function handleAction(
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(envelope),
   })
-  return new Response(await upstream.text(), {
-    status: upstream.status,
+  const upstreamText = await upstream.text()
+  let upstreamResult: { error?: string } = {}
+  try { upstreamResult = JSON.parse(upstreamText) as { error?: string } } catch { /* preserve upstream response */ }
+  const status = upstreamResult.error === '系統更新中' ? 503
+    : upstreamResult.error === '版本已更新，請重新整理頁面' ? 409
+    : upstream.status
+  return new Response(upstreamText, {
+    status,
     headers: { 'content-type': 'application/json' },
   })
 }

@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { buildEnvelope } from '../functions/lib/envelope'
+import { buildEnvelope as productionBuildEnvelope } from '../functions/lib/envelope'
+import { CONTRACT_VERSION } from '../src/generated/version'
 import {
   loadGasFunctionsWithFakeGas,
   type FakeGasHarness,
   type FakeSheet,
   type FakeTextOutput,
 } from './helpers/gas'
+
+const buildEnvelope = (secret: string, payload: Record<string, unknown>, ts: number, nonce: string) =>
+  productionBuildEnvelope(secret, { ...payload, contractVersion: CONTRACT_VERSION }, ts, nonce)
 
 const secret = 'test-secret'
 const fixedNow = new Date('2026-07-27T00:00:00.000Z')

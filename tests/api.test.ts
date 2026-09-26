@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { CONTRACT_VERSION } from '../src/generated/version'
 import {
   OPTIONS_CACHE_KEY,
   listTransactions,
@@ -53,6 +54,7 @@ describe('submitTransaction', () => {
     const fetchFn = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       expect(String(url)).toBe('/api/create_transaction')
       expect(init?.method).toBe('POST')
+      expect(new Headers(init?.headers).get('x-contract-version')).toBe(CONTRACT_VERSION)
       expect(JSON.parse(String(init?.body))).toEqual({
         transaction: TRANSACTION,
         idempotencyKey: KEY,
@@ -270,6 +272,20 @@ describe('receivables API', () => {
     ).resolves.toEqual({
       ok: true,
       alreadyRecorded: false,
+    })
+  })
+})
+
+describe('write response safety', () => {
+  it('does not treat an error with already:true as success', async () => {
+    const fetchFn = (async () => new Response(
+      JSON.stringify({ ok: false, already: true, error: 'outcome unknown' }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )) as typeof fetch
+    await expect(submitTransaction(TRANSACTION, KEY, fetchFn)).resolves.toEqual({
+      ok: false,
+      kind: 'backend',
+      message: 'outcome unknown',
     })
   })
 })
