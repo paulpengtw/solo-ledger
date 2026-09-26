@@ -21,10 +21,9 @@ const expectedJournalHeaders = [
   'txn_id',
   '來源',
   '建立時間',
-  'source_observation_id',
 ]
 
-const expectedTabNames = ['日記帳', '會計科目', '選項清單', '設定', '餘額', '試算與檢查']
+const expectedTabNames = ['日記帳', '會計科目', '選項清單', '設定', '餘額', '試算與檢查', '來源觀察']
 const expectedCheckLabels = [
   '試算平衡',
   '未知帳戶',
@@ -39,16 +38,24 @@ describe('setupSpreadsheet', () => {
     harness = loadGasFunctionsWithFakeGas()
   })
 
-  it('creates all six required tabs on a blank spreadsheet', () => {
+  it('creates all required tabs on a blank spreadsheet', () => {
     harness.setupSpreadsheet()
 
     expect(harness.spreadsheet.getSheets().map((sheet) => sheet.getName())).toEqual(expectedTabNames)
   })
 
-  it('writes the required journal headers plus additive observation identity metadata', () => {
+  it('writes the required journal headers without embedding source observations in events', () => {
     harness.setupSpreadsheet()
 
     expect(rowValues(requiredSheet(harness, '日記帳'), 1)).toEqual(expectedJournalHeaders)
+  })
+
+  it('creates a narrow independent source-observation identity sheet', () => {
+    harness.setupSpreadsheet()
+
+    expect(rowValues(requiredSheet(harness, '來源觀察'), 1)).toEqual([
+      'observation_id', 'source_reference', 'content_digest',
+    ])
   })
 
   it('formats 日期, 時間, and 建立時間 journal columns as text', () => {
@@ -303,7 +310,6 @@ describe('setupSpreadsheet', () => {
       txn_id: 13,
       來源: 14,
       建立時間: 15,
-      source_observation_id: 16,
     })
   })
 })

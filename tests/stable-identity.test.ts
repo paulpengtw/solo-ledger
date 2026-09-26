@@ -13,6 +13,7 @@ const journalHeaders = [
   '日期', '時間', '類型', '借方帳戶', '貸方帳戶', '金額', '幣別', '分類',
   '交易對象', '說明', '結清狀態', '沖銷txn_id', 'txn_id', '來源', '建立時間',
 ]
+const observationHeaders = ['observation_id', 'source_reference', 'content_digest']
 
 describe('stable identity', () => {
   let harness: FakeGasHarness
@@ -47,16 +48,15 @@ describe('stable identity', () => {
       '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
       '測試對象', 'legacy row', '', '', '', 'test-fixture', '2026-07-27T12:34:00+08:00',
     ]])
-    setSourceObservationId(journal, 2, 'observation:known-setup')
+    const observations = requiredSheet(harness, '來源觀察')
+    observations.getRange(2, 1, 1, observationHeaders.length).setValues([[
+      'observation:known-setup', 'test-fixture:row-1', 'source-content-1',
+    ]])
     harness.setupSpreadsheet()
 
-    const headers = journal
-      .getRange(1, 1, 1, journal.getLastColumn())
-      .getValues()[0]!
-      .map(String)
-    const observationColumn = headers.indexOf('source_observation_id')
-    expect(observationColumn).toBeGreaterThanOrEqual(0)
-    expect(String(journal.getRange(2, observationColumn + 1).getValues()[0]![0])).toBe('observation:known-setup')
+    expect(observations.getRange(2, 1, 1, observationHeaders.length).getValues()[0]).toEqual([
+      'observation:known-setup', 'test-fixture:row-1', 'source-content-1',
+    ])
     expect(journal.getRange(2, 13).getValues()[0]![0]).toBe('')
   })
 
@@ -67,35 +67,21 @@ describe('stable identity', () => {
       '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
       '測試對象', 'legacy row', '', '', '', 'test-fixture', '2026-07-27T12:34:00+08:00',
     ]])
-    setSourceObservationId(journal, 2, 'observation:legacy-event')
 
     const snapshot = await post(harness, {
       action: 'snapshot',
       scope: 'events',
     }, 'identity-lookup-snapshot')
-    const revision = String(snapshot.snapshotRevision)
-    const headers = journal.getRange(1, 1, 1, journal.getLastColumn()).getValues()[0]!.map(String)
-    const observationColumn = headers.indexOf('source_observation_id')
-    const observationId = String(journal.getRange(2, observationColumn + 1).getValues()[0]![0])
-
-    const lookup = await post(harness, {
-      action: 'lookup',
-      scope: 'events',
-      ids: [observationId],
-      snapshotRevision: revision,
-    }, 'identity-lookup-001')
-
-    expect(lookup).toMatchObject({
-      kind: 'ok',
-      snapshotRevision: revision,
-      missing: [],
-      unidentified: [observationId],
-    })
-    expect(lookup.records).toEqual([
+    expect(snapshot.records).toEqual([
       expect.objectContaining({
         id: null,
         identity: { kind: 'unidentified', reason: 'blank-txn-id' },
-        sourceObservationId: observationId,
+        contentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        repairReference: {
+          scope: 'events',
+          sheetRow: 2,
+          contentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
       }),
     ])
   })
@@ -107,7 +93,6 @@ describe('stable identity', () => {
       '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
       '測試對象', 'legacy row', '', '', '', 'test-fixture', '2026-07-27T12:34:00+08:00',
     ]])
-    setSourceObservationId(journal, 2, 'observation:automatic-update-refusal')
     const before = journal.getRange(2, 1, 1, journal.getLastColumn()).getValues()[0]!
 
     const refused = await post(harness, {
@@ -120,17 +105,35 @@ describe('stable identity', () => {
     expect(journal.getRange(2, 1, 1, journal.getLastColumn()).getValues()[0]!).toEqual(before)
   })
 
-  it('does not classify pwa, manual, or transfer rows as source observations', async () => {
+  it('requires event adoption to write a UUID stable identity', async () => {
     harness.setupSpreadsheet()
     const journal = requiredSheet(harness, '日記帳')
-    journal.getRange(2, 1, 3, journalHeaders.length).setValues([
-      ['2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類', '測試對象', 'pwa', '', '', 'event:pwa', 'pwa', '2026-07-27T12:34:00+08:00'],
-      ['2026-07-27', '12:35', '測試', '餐飲', '現金', '1', 'TWD', '測試分類', '測試對象', 'manual', '', '', 'event:manual', '手動', '2026-07-27T12:35:00+08:00'],
-      ['2026-07-27', '12:36', '轉帳', '銀行', '現金', '1', 'TWD', '', '', 'transfer', '', '', 'event:transfer', '移轉', '2026-07-27T12:36:00+08:00'],
+    journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
+      '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
+      '測試對象', 'legacy row', '', '', '', 'test-fixture', '2026-07-27T12:34:00+08:00',
+    ]])
+    const snapshot = await post(harness, { action: 'snapshot', scope: 'events' }, 'identity-invalid-event-id-snapshot')
+    const refused = await post(harness, {
+      action: 'adopt_identity',
+      operationId: 'identity-invalid-event-id',
+      expectedSnapshotRevision: String(snapshot.snapshotRevision),
+      repairReference: (snapshot.records as Array<Record<string, unknown>>)[0]!.repairReference,
+      stableId: 'event:legacy-001',
+    }, 'identity-invalid-event-id')
+    expect(refused).toEqual({ ok: false, error: 'stableId must be a UUID' })
+    expect(journal.getRange(2, 13).getValues()[0]![0]).toBe('')
+  })
+
+  it('keeps source observations independent from journal rows', async () => {
+    harness.setupSpreadsheet()
+    const observationSheet = requiredSheet(harness, '來源觀察')
+    observationSheet.getRange(2, 1, 2, observationHeaders.length).setValues([
+      ['observation:one', 'bank:row-1', 'digest-one'],
+      ['observation:two', 'bank:row-2', 'digest-two'],
     ])
 
     const observations = await post(harness, { action: 'snapshot', scope: 'observations' }, 'identity-non-observation-snapshot')
-    expect(observations.records).toEqual([])
+    expect(observations.records).toHaveLength(2)
   })
 
   it('looks up stable account and source-observation identities at one revision', async () => {
@@ -145,7 +148,10 @@ describe('stable identity', () => {
       '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
       '測試對象', 'source observation', '', '', '', 'import', '2026-07-27T12:34:00+08:00',
     ]])
-    setSourceObservationId(journal, 2, 'observation:known-lookup')
+    const observationSheet = requiredSheet(harness, '來源觀察')
+    observationSheet.getRange(2, 1, 1, observationHeaders.length).setValues([[
+      'observation:known-lookup', 'import:file-1:row-2', 'source-content-2',
+    ]])
     harness.setupSpreadsheet()
 
     const observations = await post(harness, { action: 'snapshot', scope: 'observations' }, 'identity-observation-snapshot')
@@ -164,7 +170,7 @@ describe('stable identity', () => {
     ])
     expect(observationsLookup).toMatchObject({ kind: 'ok', missing: [], unidentified: [] })
     expect(observationsLookup.records).toEqual([
-      expect.objectContaining({ id: observationId, sourceObservationId: observationId }),
+      expect.objectContaining({ id: observationId, sourceReference: 'import:file-1:row-2' }),
     ])
   })
 
@@ -217,12 +223,14 @@ describe('stable identity', () => {
       '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
       '測試對象', 'legacy source row', '', '', '', 'import', '2026-07-27T12:34:00+08:00',
     ]])
+    const observationSheet = requiredSheet(harness, '來源觀察')
+    observationSheet.getRange(2, 1, 1, observationHeaders.length).setValues([[
+      '', 'legacy-source:row-1', 'legacy-content-1',
+    ]])
     harness.setupSpreadsheet()
 
-    const journalHeadersAfterSetup = journal.getRange(1, 1, 1, journal.getLastColumn()).getValues()[0]!.map(String)
-    const observationColumn = journalHeadersAfterSetup.indexOf('source_observation_id')
     expect(accounts.getRange(accountRow, stableIdColumn + 1).getValues()[0]![0]).toBe('')
-    expect(journal.getRange(2, observationColumn + 1).getValues()[0]![0]).toBe('')
+    expect(observationSheet.getRange(2, 1).getValues()[0]![0]).toBe('')
 
     const accountSnapshot = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-legacy-account-snapshot')
     const accountRevision = String(accountSnapshot.snapshotRevision)
@@ -238,9 +246,9 @@ describe('stable identity', () => {
     const observationRecord = (observationSnapshot.records as Array<Record<string, unknown>>)[0]!
     expect(observationRecord).toMatchObject({
       id: null,
-      identity: { kind: 'unidentified', reason: 'blank-source-observation-id' },
+      identity: { kind: 'unidentified', reason: 'blank-observation-id' },
     })
-    const before = journal.getRange(2, 1, 1, journal.getLastColumn()).getValues()[0]!
+    const before = observationSheet.getRange(2, 1, 1, observationHeaders.length).getValues()[0]!
     const adopted = await post(harness, {
       action: 'adopt_identity',
       operationId: 'identity-observation-adoption-001',
@@ -249,9 +257,9 @@ describe('stable identity', () => {
       stableId: 'observation:legacy-001',
     }, 'identity-observation-adoption-001')
     expect(adopted).toMatchObject({ ok: true, scope: 'observations', stableId: 'observation:legacy-001' })
-    const after = journal.getRange(2, 1, 1, journal.getLastColumn()).getValues()[0]!
+    const after = observationSheet.getRange(2, 1, 1, observationHeaders.length).getValues()[0]!
     expect(after).toEqual(before.map((value, index) =>
-      index === observationColumn ? 'observation:legacy-001' : value))
+      index === 0 ? 'observation:legacy-001' : value))
   })
 
   it('adopts a reviewed identity while leaving every original source cell unchanged', async () => {
@@ -261,23 +269,13 @@ describe('stable identity', () => {
       '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
       '測試對象', 'legacy row', '', '', '', 'test-fixture', '2026-07-27T12:34:00+08:00',
     ]])
-    setSourceObservationId(journal, 2, 'observation:adopt-event')
 
     const snapshot = await post(harness, {
       action: 'snapshot',
       scope: 'events',
     }, 'identity-adopt-snapshot')
     const revision = String(snapshot.snapshotRevision)
-    const headers = journal.getRange(1, 1, 1, journal.getLastColumn()).getValues()[0]!.map(String)
-    const observationColumn = headers.indexOf('source_observation_id')
-    const observationId = String(journal.getRange(2, observationColumn + 1).getValues()[0]![0])
-    const lookup = await post(harness, {
-      action: 'lookup',
-      scope: 'events',
-      ids: [observationId],
-      snapshotRevision: revision,
-    }, 'identity-adopt-lookup')
-    const repairReference = (lookup.records as Array<Record<string, unknown>>)[0]!.repairReference
+    const repairReference = (snapshot.records as Array<Record<string, unknown>>)[0]!.repairReference
     const before = journal.getRange(2, 1, 1, journal.getLastColumn()).getValues()[0]!
 
     const adopted = await post(harness, {
@@ -285,17 +283,17 @@ describe('stable identity', () => {
       operationId: 'identity-adoption-001',
       expectedSnapshotRevision: revision,
       repairReference,
-      stableId: 'event:legacy-001',
+      stableId: '00000000-0000-4000-8000-000000000201',
     }, 'identity-adoption-001')
     expect(adopted).toMatchObject({
       ok: true,
       operationId: 'identity-adoption-001',
-      stableId: 'event:legacy-001',
+      stableId: '00000000-0000-4000-8000-000000000201',
       sheetRow: 2,
     })
     const after = journal.getRange(2, 1, 1, journal.getLastColumn()).getValues()[0]!
     expect(after).toEqual(before.map((value, index) =>
-      index === 12 ? 'event:legacy-001' : value))
+      index === 12 ? '00000000-0000-4000-8000-000000000201' : value))
 
     const events = await post(harness, {
       action: 'snapshot',
@@ -303,10 +301,81 @@ describe('stable identity', () => {
     }, 'identity-adopt-events')
     expect(events.records).toEqual([
       expect.objectContaining({
-        id: 'event:legacy-001',
-        identity: { kind: 'identified', txnId: 'event:legacy-001' },
+        id: '00000000-0000-4000-8000-000000000201',
+        identity: { kind: 'identified', txnId: '00000000-0000-4000-8000-000000000201' },
       }),
     ])
+  })
+
+  it('keeps an identified account id stable when its display name is renamed', async () => {
+    harness.setupSpreadsheet()
+    const accounts = requiredSheet(harness, '會計科目')
+    const values = accounts.getRange(1, 1, accounts.getLastRow(), accounts.getLastColumn()).getValues()
+    const headers = values[0]!.map(String)
+    const stableIdColumn = headers.indexOf('stable_id')
+    const nameColumn = headers.indexOf('名稱')
+    const accountRow = values.findIndex(row => row[nameColumn] === '現金') + 1
+    const stableId = String(values[accountRow - 1]![stableIdColumn])
+    accounts.getRange(accountRow, nameColumn + 1).setValues([['現金改名']])
+
+    const snapshot = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-account-rename')
+    const renamed = (snapshot.records as Array<Record<string, unknown>>).find(record => record.name === '現金改名')
+    expect(renamed).toMatchObject({ id: stableId, stableId, identity: { kind: 'identified', stableId } })
+  })
+
+  it('computes the event digest from resolved headers after journal columns are reordered', async () => {
+    harness.setupSpreadsheet()
+    const journal = requiredSheet(harness, '日記帳')
+    const row = [
+      '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
+      '測試對象', 'legacy row', '', '', '', 'test-fixture', '2026-07-27T12:34:00+08:00',
+    ]
+    journal.getRange(2, 1, 1, journalHeaders.length).setValues([row])
+    const reorderedHeaders = [...journalHeaders].reverse()
+    const byHeader = Object.fromEntries(journalHeaders.map((header, index) => [header, row[index]]))
+    const reorderedRow = reorderedHeaders.map(header => byHeader[header])
+    journal.getRange(1, 1, 2, journalHeaders.length).setValues([reorderedHeaders, reorderedRow])
+    const before = await post(harness, { action: 'snapshot', scope: 'events' }, 'identity-header-order-before')
+    const repairReference = (before.records as Array<Record<string, unknown>>)[0]!.repairReference
+    const adopted = await post(harness, {
+      action: 'adopt_identity',
+      operationId: 'identity-header-order-adoption',
+      expectedSnapshotRevision: String(before.snapshotRevision),
+      repairReference,
+      stableId: '00000000-0000-4000-8000-000000000211',
+    }, 'identity-header-order-adoption')
+    expect(adopted).toMatchObject({ ok: true, stableId: '00000000-0000-4000-8000-000000000211' })
+    const after = await post(harness, { action: 'snapshot', scope: 'events' }, 'identity-header-order-after')
+    expect((after.records as Array<Record<string, unknown>>)[0]!.contentDigest)
+      .toBe((before.records as Array<Record<string, unknown>>)[0]!.contentDigest)
+  })
+
+  it('accepts only the canonical adoption action and payload fields', async () => {
+    harness.setupSpreadsheet()
+    const journal = requiredSheet(harness, '日記帳')
+    journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
+      '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
+      '測試對象', 'legacy row', '', '', '', 'test-fixture', '2026-07-27T12:34:00+08:00',
+    ]])
+    const snapshot = await post(harness, { action: 'snapshot', scope: 'events' }, 'identity-canonical-snapshot')
+    const reference = (snapshot.records as Array<Record<string, unknown>>)[0]!.repairReference
+    const aliasAction = await post(harness, {
+      action: 'adopt_stable_identity',
+      operationId: 'identity-canonical-alias-action',
+      expectedSnapshotRevision: String(snapshot.snapshotRevision),
+      repairReference: reference,
+      stableId: '00000000-0000-4000-8000-000000000208',
+    }, 'identity-canonical-alias-action')
+    expect(aliasAction).toEqual({ ok: false, error: 'unsupported action: adopt_stable_identity' })
+
+    const aliasField = await post(harness, {
+      action: 'adopt_identity',
+      idempotencyKey: 'identity-canonical-alias-field',
+      expectedSnapshotRevision: String(snapshot.snapshotRevision),
+      repairReference: reference,
+      stableId: '00000000-0000-4000-8000-000000000209',
+    }, 'identity-canonical-alias-field')
+    expect(aliasField).toEqual({ ok: false, error: 'operationId is required' })
   })
 
   it('durably replays identical adoption and conflicts on changed operation content', async () => {
@@ -316,34 +385,57 @@ describe('stable identity', () => {
       '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
       '測試對象', 'legacy row', '', '', '', 'test-fixture', '2026-07-27T12:34:00+08:00',
     ]])
-    setSourceObservationId(journal, 2, 'observation:replay-event')
     const snapshot = await post(harness, { action: 'snapshot', scope: 'events' }, 'identity-replay-snapshot')
     const revision = String(snapshot.snapshotRevision)
-    const observationId = String(journal.getRange(2, journal.getLastColumn()).getValues()[0]![0])
-    const lookup = await post(harness, {
-      action: 'lookup', scope: 'events', ids: [observationId], snapshotRevision: revision,
-    }, 'identity-replay-lookup')
-    const reference = (lookup.records as Array<Record<string, unknown>>)[0]!.repairReference
+    const reference = (snapshot.records as Array<Record<string, unknown>>)[0]!.repairReference
     const request = {
       action: 'adopt_identity',
       operationId: 'identity-adoption-replay',
       expectedSnapshotRevision: revision,
       repairReference: reference,
-      stableId: 'event:replay-001',
+      stableId: '00000000-0000-4000-8000-000000000202',
     }
 
     const first = await post(harness, request, 'identity-replay-first')
     const second = await post(harness, request, 'identity-replay-second')
     expect(second).toEqual({ ...first, already: true })
 
-    const changed = await post(harness, { ...request, stableId: 'event:replay-002' }, 'identity-replay-changed')
+    const changed = await post(harness, {
+      ...request,
+      stableId: '00000000-0000-4000-8000-000000000203',
+    }, 'identity-replay-changed')
     expect(changed).toMatchObject({
       ok: false,
       kind: 'conflict',
       operationId: 'identity-adoption-replay',
       reason: 'operation-content-changed',
     })
-    expect(journal.getRange(2, 13).getValues()[0]![0]).toBe('event:replay-001')
+    expect(journal.getRange(2, 13).getValues()[0]![0]).toBe('00000000-0000-4000-8000-000000000202')
+  })
+
+  it('replays a pending adoption after the identity write initially fails', async () => {
+    harness.setupSpreadsheet()
+    const journal = requiredSheet(harness, '日記帳')
+    journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
+      '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
+      '測試對象', 'legacy row', '', '', '', 'test-fixture', '2026-07-27T12:34:00+08:00',
+    ]])
+    const snapshot = await post(harness, { action: 'snapshot', scope: 'events' }, 'identity-pending-snapshot')
+    const request = {
+      action: 'adopt_identity',
+      operationId: 'identity-pending-replay',
+      expectedSnapshotRevision: String(snapshot.snapshotRevision),
+      repairReference: (snapshot.records as Array<Record<string, unknown>>)[0]!.repairReference,
+      stableId: '00000000-0000-4000-8000-000000000210',
+    }
+    journal.failNextSetValuesInColumn(13)
+    const failed = await post(harness, request, 'identity-pending-first')
+    expect(failed).toEqual({ ok: false, error: 'simulated write failure' })
+    expect(journal.getRange(2, 13).getValues()[0]![0]).toBe('')
+
+    const replayed = await post(harness, request, 'identity-pending-second')
+    expect(replayed).toMatchObject({ ok: true, operationId: request.operationId, stableId: request.stableId })
+    expect(journal.getRange(2, 13).getValues()[0]![0]).toBe(request.stableId)
   })
 
   it('refuses stale revisions and changed target content before writing identity metadata', async () => {
@@ -353,14 +445,9 @@ describe('stable identity', () => {
       '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
       '測試對象', 'legacy row', '', '', '', 'test-fixture', '2026-07-27T12:34:00+08:00',
     ]])
-    setSourceObservationId(journal, 2, 'observation:conflict-event')
     const snapshot = await post(harness, { action: 'snapshot', scope: 'events' }, 'identity-conflict-snapshot')
     const revision = String(snapshot.snapshotRevision)
-    const observationId = String(journal.getRange(2, journal.getLastColumn()).getValues()[0]![0])
-    const lookup = await post(harness, {
-      action: 'lookup', scope: 'events', ids: [observationId], snapshotRevision: revision,
-    }, 'identity-conflict-lookup')
-    const reference = (lookup.records as Array<Record<string, unknown>>)[0]!.repairReference as Record<string, unknown>
+    const reference = (snapshot.records as Array<Record<string, unknown>>)[0]!.repairReference as Record<string, unknown>
 
     journal.getRange(2, 10).setValues([['changed after review']])
     const stale = await post(harness, {
@@ -368,18 +455,15 @@ describe('stable identity', () => {
       operationId: 'identity-adoption-stale',
       expectedSnapshotRevision: revision,
       repairReference: reference,
-      stableId: 'event:stale-001',
+      stableId: '00000000-0000-4000-8000-000000000204',
     }, 'identity-adoption-stale')
     expect(stale).toMatchObject({ ok: false, kind: 'conflict', reason: 'revision-changed' })
     expect(journal.getRange(2, 13).getValues()[0]![0]).toBe('')
 
     const current = await post(harness, { action: 'snapshot', scope: 'events' }, 'identity-conflict-current')
     const currentRevision = String(current.snapshotRevision)
-    const currentLookup = await post(harness, {
-      action: 'lookup', scope: 'events', ids: [observationId], snapshotRevision: currentRevision,
-    }, 'identity-conflict-current-lookup')
     const wrongReference = {
-      ...(currentLookup.records as Array<Record<string, unknown>>)[0]!.repairReference as Record<string, unknown>,
+      ...((current.records as Array<Record<string, unknown>>)[0]!.repairReference as Record<string, unknown>),
       contentDigest: '0'.repeat(64),
     }
     const changed = await post(harness, {
@@ -387,7 +471,7 @@ describe('stable identity', () => {
       operationId: 'identity-adoption-content',
       expectedSnapshotRevision: currentRevision,
       repairReference: wrongReference,
-      stableId: 'event:content-001',
+      stableId: '00000000-0000-4000-8000-000000000205',
     }, 'identity-adoption-content')
     expect(changed).toMatchObject({ ok: false, kind: 'conflict', reason: 'content-changed' })
     expect(journal.getRange(2, 13).getValues()[0]![0]).toBe('')
@@ -399,27 +483,22 @@ describe('stable identity', () => {
     journal.getRange(2, 1, 2, journalHeaders.length).setValues([
       [
         '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
-        '測試對象', 'legacy', '', '', 'event:existing', 'test-fixture', '2026-07-27T12:34:00+08:00',
+        '測試對象', 'legacy', '', '', '00000000-0000-4000-8000-000000000206', 'test-fixture', '2026-07-27T12:34:00+08:00',
       ],
       [
         '2026-07-27', '12:34', '測試', '餐飲', '現金', '1', 'TWD', '測試分類',
         '測試對象', 'legacy', '', '', '', 'test-fixture', '2026-07-27T12:34:00+08:00',
       ],
     ])
-    setSourceObservationId(journal, 3, 'observation:ambiguous-event')
     const snapshot = await post(harness, { action: 'snapshot', scope: 'events' }, 'identity-duplicate-snapshot')
     const revision = String(snapshot.snapshotRevision)
-    const observationId = String(journal.getRange(3, journal.getLastColumn()).getValues()[0]![0])
-    const lookup = await post(harness, {
-      action: 'lookup', scope: 'events', ids: [observationId], snapshotRevision: revision,
-    }, 'identity-duplicate-lookup')
-    const reference = (lookup.records as Array<Record<string, unknown>>)[0]!.repairReference as Record<string, unknown>
+    const reference = (snapshot.records as Array<Record<string, unknown>>)[1]!.repairReference as Record<string, unknown>
     const duplicate = await post(harness, {
       action: 'adopt_identity',
       operationId: 'identity-adoption-duplicate',
       expectedSnapshotRevision: revision,
       repairReference: reference,
-      stableId: 'event:existing',
+      stableId: '00000000-0000-4000-8000-000000000206',
     }, 'identity-adoption-duplicate')
     expect(duplicate).toMatchObject({ ok: false, kind: 'conflict', reason: 'duplicate-stable-id' })
     expect(journal.getRange(3, 13).getValues()[0]![0]).toBe('')
@@ -433,7 +512,7 @@ describe('stable identity', () => {
       operationId: 'identity-adoption-ambiguous',
       expectedSnapshotRevision: revision,
       repairReference: ambiguousReference,
-      stableId: 'event:ambiguous',
+      stableId: '00000000-0000-4000-8000-000000000207',
     }, 'identity-adoption-ambiguous')
     expect(ambiguous).toMatchObject({ ok: false, kind: 'conflict', reason: 'ambiguous-target' })
     expect(journal.getRange(3, 13).getValues()[0]![0]).toBe('')
@@ -460,11 +539,4 @@ function requiredSheet(harness: FakeGasHarness, name: string): FakeSheet {
   const sheet = harness.spreadsheet.getSheetByName(name)
   if (!sheet) throw new Error(`missing test sheet: ${name}`)
   return sheet
-}
-
-function setSourceObservationId(journal: FakeSheet, row: number, id: string): void {
-  const headers = journal.getRange(1, 1, 1, journal.getLastColumn()).getValues()[0]!.map(String)
-  const column = headers.indexOf('source_observation_id')
-  if (column < 0) throw new Error('missing source_observation_id header')
-  journal.getRange(row, column + 1).setValues([[id]])
 }

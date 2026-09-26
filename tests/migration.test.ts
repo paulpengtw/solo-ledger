@@ -393,9 +393,7 @@ function journalRows(spreadsheet: FakeSpreadsheet): JournalRow[] {
     .getValues()
     .map(values =>
       Object.fromEntries(
-        headers
-          .map((header, index) => [header, values[index]] as const)
-          .filter(([header]) => header !== 'source_observation_id'),
+        headers.map((header, index) => [header, values[index]]),
       ) as JournalRow,
     )
 }
