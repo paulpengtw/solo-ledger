@@ -183,10 +183,16 @@ export async function handleAction(
       return json(400, { ok: false, error: 'invalid repair flag' })
     }
 
-    nonce = crypto.randomUUID()
     payload = { action: 'check_consistency' }
     if (body.repair === true) {
+      if (!isValidUuid(body.idempotencyKey)) {
+        return json(400, { ok: false, error: 'invalid idempotency key' })
+      }
+      nonce = body.idempotencyKey
       payload.repair = true
+      payload.idempotencyKey = body.idempotencyKey
+    } else {
+      nonce = crypto.randomUUID()
     }
   } else {
     nonce = crypto.randomUUID()

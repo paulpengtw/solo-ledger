@@ -194,12 +194,44 @@ describe('reverse_transaction', () => {
       txn_id: 'journal-backstop-original-001',
     })
 
-    expect(response).toEqual({ ok: true, already: true })
+    expect(response).toEqual({ ok: true, txn_id: 'prior-reversal-001', row: 3, already: true })
     expect(journalBytes(harness)).toBe(before)
     expect(journalRows(harness).filter(row =>
       row.類型 === '沖銷'
       && row.沖銷txn_id === 'journal-backstop-original-001',
     )).toHaveLength(1)
+  })
+
+  it('refuses a reversal key reused for another target after cache expiry', async () => {
+    appendJournalRows(harness, [
+      ordinaryExpense('reverse-key-first'),
+      ordinaryExpense('reverse-key-second'),
+    ])
+    await postReverse(harness, 'reverse-key-used', { txn_id: 'reverse-key-first' })
+    harness.advanceCacheTime(601)
+    const before = journalBytes(harness)
+
+    const response = await postReverse(harness, 'reverse-key-used', {
+      txn_id: 'reverse-key-second',
+    })
+
+    expect(response).toEqual({
+      ok: false,
+      error: 'idempotency key already used for another reversal',
+    })
+    expect(journalBytes(harness)).toBe(before)
+    const replay = await postReverse(harness, 'reverse-key-used', { txn_id: 'reverse-key-first' })
+    expect(replay).toEqual({ ok: true, txn_id: 'reverse-key-used', row: 4, already: true })
+    expect(journalBytes(harness)).toBe(before)
+  })
+
+  it('refuses a reversal when the script lock cannot be acquired', async () => {
+    appendJournalRows(harness, [ordinaryExpense('lock-original')])
+    const before = journalBytes(harness)
+    harness.failNextLock()
+    const response = await postReverse(harness, 'lock-reversal', { txn_id: 'lock-original' })
+    expect(response).toEqual({ ok: false, error: 'simulated lock failure' })
+    expect(journalBytes(harness)).toBe(before)
   })
 
   it('fully exempts derived legs from 啟用 checks', async () => {

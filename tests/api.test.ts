@@ -274,6 +274,20 @@ describe('receivables API', () => {
   })
 })
 
+describe('write response safety', () => {
+  it('does not treat an error with already:true as success', async () => {
+    const fetchFn = (async () => new Response(
+      JSON.stringify({ ok: false, already: true, error: 'outcome unknown' }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )) as typeof fetch
+    await expect(submitTransaction(TRANSACTION, KEY, fetchFn)).resolves.toEqual({
+      ok: false,
+      kind: 'backend',
+      message: 'outcome unknown',
+    })
+  })
+})
+
 describe('reverseTransaction', () => {
   it('POSTs the reversal without a currency field and maps success like other mutations', async () => {
     const reverseTransaction = (

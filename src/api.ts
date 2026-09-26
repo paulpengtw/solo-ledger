@@ -149,7 +149,7 @@ export async function submitTransaction(
     }
   }
 
-  if (body.ok === true || body.already === true) {
+  if (response.ok && body.ok === true) {
     return { ok: true, alreadyRecorded: body.already === true }
   }
   return {
@@ -291,7 +291,7 @@ export async function settleReceivable(
     }
   }
 
-  if (body.ok === true || body.already === true) {
+  if (response.ok && body.ok === true) {
     return { ok: true, alreadyRecorded: body.already === true }
   }
   return {
@@ -337,7 +337,7 @@ export async function reverseTransaction(
     }
   }
 
-  if (body.ok === true || body.already === true) {
+  if (response.ok && body.ok === true) {
     return { ok: true, alreadyRecorded: body.already === true }
   }
   return {

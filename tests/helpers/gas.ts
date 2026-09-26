@@ -587,6 +587,7 @@ export type FakeGasHarness = SetupGasFunctions & {
   clearEvents: () => void
   setScriptProperty: (name: string, value: string) => void
   advanceCacheTime: (seconds: number) => void
+  failNextLock: () => void
   peekCache: (key: string) => string | null
   peekScriptProperty: (name: string) => string | null
 }
@@ -610,6 +611,7 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
   const triggers: FakeTrigger[] = []
   let nextUuid = 1
   let cacheNow = Date.now()
+  let lockShouldFail = false
   const cacheEntries = new Map<string, { value: string; expiresAt: number }>()
   const scriptProperties = new Map<string, string>([
     ['LEDGER_SPREADSHEET_ID', spreadsheetId],
@@ -639,6 +641,10 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
   }
   const scriptLock = {
     waitLock(_milliseconds: number) {
+      if (lockShouldFail) {
+        lockShouldFail = false
+        throw new Error('simulated lock failure')
+      }
       recordEvent('lock-acquired')
     },
     releaseLock() {
@@ -873,6 +879,9 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
     },
     setScriptProperty(name: string, value: string) {
       scriptProperties.set(name, value)
+    },
+    failNextLock() {
+      lockShouldFail = true
     },
     advanceCacheTime(seconds: number) {
       cacheNow += seconds * 1000

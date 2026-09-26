@@ -84,53 +84,25 @@ describe('doPost', () => {
     expect(changed.schema_version).not.toBe(first.schema_version)
   })
 
-  it('repairs balance formulas after a hand-added account changes the schema', async () => {
+  it('keeps health and options read-only after account changes; editor setup refreshes formulas', async () => {
     const accounts = requiredSheet(harness, '會計科目')
     const balances = requiredSheet(harness, '餘額')
-    const initialBalanceRows = balances
-      .getRange(1, 1, balances.getLastRow(), balances.getLastColumn())
-      .getValues()
     const accountRow = accounts.getLastRow() + 1
-
     accounts.getRange(accountRow, 1, 1, 5).setValues([
       ['信用合作社', '資產', '銀行', true, 999],
     ])
+    const before = balances.getRange(1, 1, balances.getLastRow(), balances.getLastColumn()).getValues()
+    const propertyBefore = harness.peekScriptProperty('BALANCE_FORMULA_SCHEMA_VERSION')
 
-    expect(
-      balances
-        .getRange(1, 1, balances.getLastRow(), balances.getLastColumn())
-        .getValues(),
-    ).toEqual(initialBalanceRows)
-
-    const health = await post(harness, { action: 'health' }, 'health-balance-repair-001')
-
+    const health = await post(harness, { action: 'health' }, 'health-read-only-001')
+    const options = await post(harness, { action: 'get_options' }, 'options-read-only-001')
     expect(health.ok).toBe(true)
+    expect(options.schema_version).toBe(health.schema_version)
+    expect(balances.getRange(1, 1, balances.getLastRow(), balances.getLastColumn()).getValues()).toEqual(before)
+    expect(harness.peekScriptProperty('BALANCE_FORMULA_SCHEMA_VERSION')).toBe(propertyBefore)
+
+    harness.setupSpreadsheet()
     expect(balances.getLastRow()).toBe(accountRow)
-    expect(balances.getRange(accountRow, 1).getValues()[0]![0]).toContain(
-      "INDEX('會計科目'!$1:$1000,ROW(),MATCH(\"名稱\"",
-    )
-    expect(balances.getRange(accountRow, 2).getValues()[0]![0]).toContain(
-      "INDEX('會計科目'!$1:$1000,ROW(),MATCH(\"類型\"",
-    )
-    expect(balances.getRange(accountRow, 3).getValues()[0]![0]).toContain(
-      `$A${accountRow}`,
-    )
-
-    const repairedBalanceRows = balances
-      .getRange(1, 1, balances.getLastRow(), balances.getLastColumn())
-      .getValues()
-    const repeatedHealth = await post(
-      harness,
-      { action: 'health' },
-      'health-balance-repair-002',
-    )
-
-    expect(repeatedHealth.schema_version).toBe(health.schema_version)
-    expect(
-      balances
-        .getRange(1, 1, balances.getLastRow(), balances.getLastColumn())
-        .getValues(),
-    ).toEqual(repairedBalanceRows)
   })
 
   it('returns sorted enabled form options with the same schema_version as health', async () => {
@@ -564,6 +536,14 @@ describe('doPost', () => {
 
     expect(response).toEqual({ ok: false, error: 'bad signature' })
     expect(harness.events).not.toContain('lock-acquired')
+  })
+
+  it('refuses to use a reserved repair key for a journal write', async () => {
+    harness.setScriptProperty('repair:cross-purpose-key', 'pending')
+    const before = journalRows(harness)
+    const response = await postCreate(harness, 'cross-purpose-key')
+    expect(response).toEqual({ ok: false, error: 'idempotency key already used for repair' })
+    expect(journalRows(harness)).toEqual(before)
   })
 
   it('orders successful create work inside the lock through nonce commit', async () => {

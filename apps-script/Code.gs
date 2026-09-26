@@ -34,7 +34,6 @@ var LIST_TRANSACTION_HEADERS = [
 var MAX_LIST_TRANSACTIONS = 200;
 var NONCE_CACHE_SECONDS = 600;
 var LOCK_WAIT_MILLISECONDS = 30000;
-var BALANCE_FORMULA_SCHEMA_PROPERTY = 'BALANCE_FORMULA_SCHEMA_VERSION';
 var SCHEMA_SHEET_NAMES = ['會計科目', '選項清單', '設定'];
 var SPREADSHEET_ID_TAIL_LENGTH = 8;
 var BACKUP_FOLDER_PROPERTY = 'LEDGER_BACKUP_FOLDER_ID';
@@ -57,7 +56,7 @@ function route_(payload, nonce) {
     return listReceivables_();
   }
   if (action === 'check_consistency') {
-    return checkConsistency_(payload);
+    return checkConsistency_(payload, nonce);
   }
   if (action === 'create_transaction') {
     return createTransaction_(payload, nonce);
@@ -76,7 +75,6 @@ function health_() {
   var spreadsheetId = requiredProp_('LEDGER_SPREADSHEET_ID');
   var spreadsheet = SpreadsheetApp.openById(spreadsheetId);
   var schemaVersion = schemaVersion_(spreadsheet);
-  ensureBalanceFormulas_(spreadsheet, schemaVersion);
   var tailLength = Math.min(
     SPREADSHEET_ID_TAIL_LENGTH,
     Math.max(1, spreadsheetId.length - 1),
@@ -130,7 +128,6 @@ function getOptions_() {
     requiredProp_('LEDGER_SPREADSHEET_ID'),
   );
   var schemaVersion = schemaVersion_(spreadsheet);
-  ensureBalanceFormulas_(spreadsheet, schemaVersion);
   var accountSheet = requiredSheet_(spreadsheet, '會計科目');
   var accountValues = accountSheet
     .getRange(
@@ -439,16 +436,48 @@ function findRecordByTxnId_(records, txnId) {
   return null;
 }
 
-function checkConsistency_(payload) {
+function checkConsistency_(payload, nonce) {
   var repair = Boolean(payload && payload.repair === true);
   if (!repair) {
     return runConsistencyAudit_(false);
+  }
+  requireField_(payload, 'idempotencyKey');
+  var idempotencyKey = String(payload.idempotencyKey);
+  if (idempotencyKey !== nonce) {
+    throw new Error('idempotencyKey must match nonce');
   }
 
   var lock = LockService.getScriptLock();
   lock.waitLock(LOCK_WAIT_MILLISECONDS);
   try {
-    return runConsistencyAudit_(true);
+    var spreadsheet = SpreadsheetApp.openById(
+      requiredProp_('LEDGER_SPREADSHEET_ID'),
+    );
+    var journal = requiredSheet_(spreadsheet, '日記帳');
+    var headerRow = journal
+      .getRange(1, 1, 1, journal.getLastColumn())
+      .getDisplayValues()[0];
+    var columns = resolveHeaders_(headerRow, JOURNAL_HEADERS);
+    if (findTxnRow_(journal, columns.txn_id, idempotencyKey) !== null) {
+      throw new Error('idempotency key already used by journal');
+    }
+
+    var properties = PropertiesService.getScriptProperties();
+    var propertyKey = 'repair:' + idempotencyKey;
+    var existing = properties.getProperty(propertyKey);
+    if (existing) {
+      if (existing === 'complete') {
+        throw new Error('repair key already completed; run a read-only audit');
+      }
+      throw new Error('repair outcome unknown for idempotency key');
+    }
+
+    // Establish read/validation failures before reserving the key or writing.
+    runConsistencyAudit_(false);
+    properties.setProperty(propertyKey, 'pending');
+    var result = runConsistencyAudit_(true);
+    properties.setProperty(propertyKey, 'complete');
+    return result;
   } finally {
     lock.releaseLock();
   }
@@ -844,6 +873,9 @@ function createTransaction_(payload, nonce) {
   lock.waitLock(LOCK_WAIT_MILLISECONDS);
 
   try {
+    if (PropertiesService.getScriptProperties().getProperty('repair:' + idempotencyKey)) {
+      throw new Error('idempotency key already used for repair');
+    }
     var cache = CacheService.getScriptCache();
     var nonceKey = 'nonce:' + nonce;
     var storedResult = cache.get(nonceKey);
@@ -939,6 +971,9 @@ function settle_(payload, nonce) {
   lock.waitLock(LOCK_WAIT_MILLISECONDS);
 
   try {
+    if (PropertiesService.getScriptProperties().getProperty('repair:' + idempotencyKey)) {
+      throw new Error('idempotency key already used for repair');
+    }
     var cache = CacheService.getScriptCache();
     var nonceKey = 'nonce:' + nonce;
     var storedResult = cache.get(nonceKey);
@@ -1061,12 +1096,12 @@ function reverseTransaction_(payload, nonce) {
   lock.waitLock(LOCK_WAIT_MILLISECONDS);
 
   try {
+    if (PropertiesService.getScriptProperties().getProperty('repair:' + idempotencyKey)) {
+      throw new Error('idempotency key already used for repair');
+    }
     var cache = CacheService.getScriptCache();
     var nonceKey = 'nonce:' + nonce;
     var storedResult = cache.get(nonceKey);
-    if (storedResult) {
-      return withAlready_(JSON.parse(storedResult));
-    }
 
     var spreadsheet = SpreadsheetApp.openById(
       requiredProp_('LEDGER_SPREADSHEET_ID'),
@@ -1079,19 +1114,30 @@ function reverseTransaction_(payload, nonce) {
     var records = readJournalRecords_(journal, journalColumns);
     var targetTxnId = String(payload.txn_id);
     var index;
+    var ownRecord = findRecordByTxnId_(records, idempotencyKey);
+    if (ownRecord !== null) {
+      if (ownRecord.values['類型'] !== '沖銷' ||
+          ownRecord.values['沖銷txn_id'] !== targetTxnId) {
+        throw new Error('idempotency key already used for another reversal');
+      }
+      var durableResult = {
+        ok: true, txn_id: idempotencyKey, row: ownRecord.sheetRow, already: true,
+      };
+      cache.put(nonceKey, JSON.stringify(durableResult), NONCE_CACHE_SECONDS);
+      return durableResult;
+    }
+    if (storedResult) {
+      throw new Error('cached reversal has no durable row');
+    }
 
     for (index = 0; index < records.length; index += 1) {
       if (
         records[index].values['類型'] === '沖銷' &&
         records[index].values['沖銷txn_id'] === targetTxnId
       ) {
-        var existingResult = { ok: true, already: true };
-        cache.put(
-          nonceKey,
-          JSON.stringify(existingResult),
-          NONCE_CACHE_SECONDS,
-        );
-        return existingResult;
+        return {
+          ok: true, txn_id: records[index].values.txn_id, row: records[index].sheetRow, already: true,
+        };
       }
     }
 
@@ -1968,27 +2014,6 @@ function installBalanceFormulas_(sheet, accounts, journalMaxRows) {
   sheet
     .getRange(existingBalanceCount + 2, 1, rows.length, rows[0].length)
     .setValues(rows);
-}
-
-function ensureBalanceFormulas_(spreadsheet, schemaVersion) {
-  var properties = PropertiesService.getScriptProperties();
-  var lastSynchronizedVersion = properties.getProperty(
-    BALANCE_FORMULA_SCHEMA_PROPERTY,
-  );
-  var accounts = requiredSheet_(spreadsheet, '會計科目');
-  var balances = requiredSheet_(spreadsheet, '餘額');
-  var journal = requiredSheet_(spreadsheet, '日記帳');
-  var accountCount = Math.max(0, accounts.getLastRow() - 1);
-  var balanceCount = Math.max(0, balances.getLastRow() - 1);
-
-  if (
-    lastSynchronizedVersion !== schemaVersion ||
-    balanceCount < accountCount
-  ) {
-    installBalanceFormulas_(balances, accounts, journal.getMaxRows());
-  }
-
-  properties.setProperty(BALANCE_FORMULA_SCHEMA_PROPERTY, schemaVersion);
 }
 
 function installCheckFormulas_(sheet, accounts, journalMaxRows) {
