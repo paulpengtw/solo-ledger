@@ -4949,6 +4949,7 @@ function command_(payload, nonce) {
   var digest = e2ContentDigest_(payload, content);
   var spreadsheet = e2Spreadsheet_();
   var previous = e2OperationRow_(spreadsheet, operationId);
+  var recoveringUnknown = false;
   if (previous) {
     if (previous.values.content_digest !== digest) {
       return e2Conflict_(operationId, 'operation-id-reused-with-different-content', []);
@@ -4958,6 +4959,7 @@ function command_(payload, nonce) {
     // Re-enter the operation so its handler can resume missing append-only
     // steps. All other outcomes are terminal and safely replayable.
     if (previous.values.kind !== 'unknown') return e2OutcomeFromRow_(previous);
+    recoveringUnknown = true;
   }
 
   var lock = LockService.getScriptLock();
@@ -4970,9 +4972,16 @@ function command_(payload, nonce) {
         return e2Conflict_(operationId, 'operation-id-reused-with-different-content', []);
       }
       if (previous.values.kind !== 'unknown') return e2OutcomeFromRow_(previous);
+      recoveringUnknown = true;
     }
 
-    var expectedConflicts = e2CheckExpectedRevisions_(spreadsheet, payload.expectedRevisions);
+    // An unknown operation may already have appended its own receipt, group,
+    // or other durable metadata before the response was lost. Rechecking the
+    // caller's pre-write revisions would mistake those owned writes for an
+    // external race and prevent recovery of the same operation.
+    var expectedConflicts = recoveringUnknown
+      ? []
+      : e2CheckExpectedRevisions_(spreadsheet, payload.expectedRevisions);
     if (expectedConflicts.length > 0) {
       return e2PersistOutcome_(
         spreadsheet,
@@ -5002,15 +5011,15 @@ function command_(payload, nonce) {
     try {
       var kind = String(content.kind || 'generic');
       if (kind === 'event-group' || kind === 'compound-event-group') {
-        execution = e2ExecuteEventGroup_(spreadsheet, operationId, digest, content, reserveClaims);
+        execution = e2ExecuteEventGroup_(spreadsheet, operationId, digest, content, reserveClaims, recoveringUnknown);
       } else if (kind === 'confirmation' || kind === 'review') {
         reserveClaims();
         execution = e2ExecuteConfirmation_(spreadsheet, operationId, digest, content);
       } else if (kind === 'manifest' || kind === 'import') {
-        execution = e2ExecuteManifest_(spreadsheet, operationId, digest, content, reserveClaims);
+        execution = e2ExecuteManifest_(spreadsheet, operationId, digest, content, reserveClaims, recoveringUnknown);
       } else if (kind === 'resume-import') {
         reserveClaims();
-        execution = e2ExecuteResumeImport_(spreadsheet, operationId, digest, content);
+        execution = e2ExecuteResumeImport_(spreadsheet, operationId, digest, content, recoveringUnknown);
       } else if (kind === 'evidence') {
         reserveClaims();
         execution = e2ExecuteEvidence_(spreadsheet, operationId, digest, content);
@@ -5264,7 +5273,7 @@ function e2ExpectedRevisions_(payload, fallbackId) {
   return expectedRevisionInput_(payload, fallbackId);
 }
 
-function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content, reserveClaims) {
+function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content, reserveClaims, recoveringUnknown) {
   var groupId = String(content.groupId || operationId).trim();
   if (!groupId) return { rejected: e2Rejected_(operationId, 'group-id-required') };
   var legs = content.legs;
@@ -5729,7 +5738,7 @@ function e2ManifestId_(manifest) {
   return id;
 }
 
-function e2ExecuteManifest_(spreadsheet, operationId, digest, content, reserveClaims) {
+function e2ExecuteManifest_(spreadsheet, operationId, digest, content, reserveClaims, recoveringUnknown) {
   var manifest = content.manifest || content;
   var manifestId;
   try { manifestId = e2ManifestId_(manifest); } catch (error) {
@@ -5785,7 +5794,9 @@ function e2ExecuteManifest_(spreadsheet, operationId, digest, content, reserveCl
       seenExpectedRevisionIds[expectedRevisionId] = true;
       normalizedPlanExpectedRevisions.push({ id: expectedRevisionId, revision: expectedRevisionValue });
     }
-    var planRevisionConflicts = e2CheckExpectedRevisions_(spreadsheet, normalizedPlanExpectedRevisions);
+    var planRevisionConflicts = recoveringUnknown
+      ? []
+      : e2CheckExpectedRevisions_(spreadsheet, normalizedPlanExpectedRevisions);
     if (planRevisionConflicts.length > 0) {
       return { conflict: e2Conflict_(operationId, 'stale-expected-revision', planRevisionConflicts) };
     }
@@ -5870,13 +5881,40 @@ function e2ExecuteManifest_(spreadsheet, operationId, digest, content, reserveCl
       }
       var existingManifestDestinations = [{ id: manifestId, revision: existingRows[existingIndex].values.revision }];
       var existingManifestSteps = snapshotE2Records_(spreadsheet, 'steps');
+      var existingStepsById = Object.create(null);
       for (var existingStepIndex = 0; existingStepIndex < existingManifestSteps.length; existingStepIndex += 1) {
         if (existingManifestSteps[existingStepIndex].manifestId === manifestId) {
-          existingManifestDestinations.push({
-            id: manifestId + ':' + existingManifestSteps[existingStepIndex].stepId,
-            revision: existingManifestSteps[existingStepIndex].revision,
-          });
+          existingStepsById[existingManifestSteps[existingStepIndex].stepId] = existingManifestSteps[existingStepIndex];
         }
+      }
+      for (var existingPlanStepIndex = 0; existingPlanStepIndex < steps.length; existingPlanStepIndex += 1) {
+        var existingPlanStep = steps[existingPlanStepIndex];
+        var existingPlanStepId = String(existingPlanStep.stepId || existingPlanStep.step_id || existingPlanStep.id).trim();
+        var existingPlanStepDigest = String(existingPlanStep.contentDigest || '').trim() || e2Digest_(existingPlanStep);
+        var existingStoredStep = existingStepsById[existingPlanStepId];
+        if (existingStoredStep) {
+          if (existingStoredStep.contentDigest !== existingPlanStepDigest ||
+              existingStoredStep.state !== String(existingPlanStep.state || existingPlanStep.status || '').trim()) {
+            return { conflict: e2Conflict_(operationId, 'manifest-step-content-conflict', [{ id: manifestId + ':' + existingPlanStepId }]) };
+          }
+          existingManifestDestinations.push({ id: manifestId + ':' + existingPlanStepId, revision: existingStoredStep.revision });
+          continue;
+        }
+        var missingStepState = String(existingPlanStep.state || existingPlanStep.status || '').trim() || 'pending';
+        var missingStepRevision = e2Digest_({
+          manifestId: manifestId, stepId: existingPlanStepId, digest: existingPlanStepDigest, state: missingStepState,
+        });
+        if (reserveClaims) reserveClaims();
+        e2Append_(spreadsheet, '匯入步驟', {
+          manifest_id: manifestId, step_id: existingPlanStepId, state: missingStepState,
+          destination_id: String(existingPlanStep.destinationId || existingPlanStep.destination_id || '').trim(),
+          destination_revision: String(existingPlanStep.destinationRevision || existingPlanStep.destination_revision || '').trim(),
+          content_digest: existingPlanStepDigest,
+          expected_revisions_json: e2Json_(existingPlanStep.expectedRevisions || existingPlanStep.expected_revisions || []),
+          result_json: e2Json_(existingPlanStep.result || null), updated_at: taipeiIsoNow_(),
+        });
+        e2PersistActorMetadata_(spreadsheet, 'manifest-step', manifestId + ':' + existingPlanStepId, missingStepRevision, content.actor, operationId);
+        existingManifestDestinations.push({ id: manifestId + ':' + existingPlanStepId, revision: missingStepRevision });
       }
       return { destinations: existingManifestDestinations };
     }
@@ -5915,7 +5953,7 @@ function e2ExecuteManifest_(spreadsheet, operationId, digest, content, reserveCl
   return { destinations: destinations };
 }
 
-function e2ExecuteResumeImport_(spreadsheet, operationId, digest, content) {
+function e2ExecuteResumeImport_(spreadsheet, operationId, digest, content, recoveringUnknown) {
   var manifestId = String(content.manifestId || content.manifest_id || '').trim();
   if (!manifestId) return { rejected: e2Rejected_(operationId, 'manifest-id-required') };
   var manifestRows = e2Rows_(spreadsheet, '匯入清單');
@@ -5968,7 +6006,9 @@ function e2ExecuteResumeImport_(spreadsheet, operationId, digest, content) {
         seenStepExpectedIds[expectedId] = true;
         normalizedStepExpectedRevisions.push({ id: expectedId, revision: expectedValue });
       }
-      var stepExpectedConflicts = e2CheckExpectedRevisions_(spreadsheet, normalizedStepExpectedRevisions);
+      var stepExpectedConflicts = recoveringUnknown
+        ? []
+        : e2CheckExpectedRevisions_(spreadsheet, normalizedStepExpectedRevisions);
       if (stepExpectedConflicts.length > 0) {
         return { conflict: e2Conflict_(operationId, 'stale-expected-revision', stepExpectedConflicts) };
       }

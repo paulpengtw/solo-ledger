@@ -388,6 +388,32 @@ describe('E2 reviewed Personal operations', () => {
       ]))
   })
 
+  it('reconciles missing manifest receipt steps when the response is lost', async () => {
+    await post(harness, { action: 'enable_e2' }, 'manifest-receipt-retry-enable')
+    const stepSheet = harness.spreadsheet.getSheetByName('匯入步驟')!
+    stepSheet.failNextSetValues('simulated receipt step failure')
+    const payload = {
+      action: 'accept_import', operationId: 'manifest-receipt-retry', claims: ['observation:manifest-retry'],
+      manifest: { manifestId: 'manifest-receipt-retry', sourceEvidence: ['evidence-manifest-retry'] },
+      steps: [
+        { stepId: 'first', disposition: 'create', state: 'completed', destinationId: 'event-receipt-first', destinationRevision: 'rev-first' },
+        { stepId: 'second', disposition: 'skip', state: 'skipped', reason: 'already represented' },
+      ],
+    }
+    const first = await post(harness, payload, 'manifest-receipt-retry-first-transport')
+    expect(first).toEqual({ kind: 'unknown', operationId: 'manifest-receipt-retry', reason: 'write-outcome-unknown' })
+
+    const retry = await post(harness, payload, 'manifest-receipt-retry-second-transport')
+    expect(retry).toMatchObject({ kind: 'committed', operationId: 'manifest-receipt-retry' })
+    const steps = (await post(harness, { action: 'snapshot', scope: 'steps' }, 'manifest-receipt-retry-steps')).records
+    expect(steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ manifestId: 'manifest-receipt-retry', stepId: 'first', state: 'completed' }),
+      expect.objectContaining({ manifestId: 'manifest-receipt-retry', stepId: 'second', state: 'skipped' }),
+    ]))
+    expect(steps.filter((step: { manifestId: string; stepId: string }) => step.manifestId === 'manifest-receipt-retry' && step.stepId === 'first')).toHaveLength(1)
+    expect(steps.filter((step: { manifestId: string; stepId: string }) => step.manifestId === 'manifest-receipt-retry' && step.stepId === 'second')).toHaveLength(1)
+  })
+
   it('validates Confirmation against the resulting state before writing', async () => {
     const journal = harness.spreadsheet.getSheetByName('日記帳')!
     journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
