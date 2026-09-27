@@ -847,7 +847,9 @@ function normalizeIdentityScope_(value) {
 }
 
 function resolveIdentityRepairTarget_(source, reference) {
-  var rows = identityRowsForScope_(source, reference.scope);
+  var rows = reference.scope === 'accounts' && source.accountIdentityRows
+    ? source.accountIdentityRows
+    : identityRowsForScope_(source, reference.scope);
   var scopedCandidates = [];
   for (var index = 0; index < rows.length; index += 1) {
     var row = rows[index];

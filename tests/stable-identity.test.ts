@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { buildEnvelope } from '../functions/lib/envelope'
 import { CONTRACT_VERSION } from '../src/generated/version'
 import {
@@ -538,6 +539,68 @@ describe('stable identity', () => {
       reason: 'duplicate-stable-id',
     })
     expect(accounts.getRange(targetRow, 1, 1, accounts.getLastColumn()).getValues()[0]!).toEqual(before)
+  })
+
+  it('adopts a disabled blank account identity without enabling it or allowing new writes', async () => {
+    harness.setupSpreadsheet()
+    const accounts = requiredSheet(harness, '會計科目')
+    const values = accounts.getRange(1, 1, accounts.getLastRow(), accounts.getLastColumn()).getValues()
+    const headers = values[0]!.map(String)
+    const stableIdColumn = headers.indexOf('stable_id')
+    const enabledColumn = headers.indexOf('啟用')
+    const disabledRow = values.findIndex(row => row[0] === '悠遊卡') + 1
+    accounts.getRange(disabledRow, stableIdColumn + 1).setValues([['']])
+    accounts.getRange(disabledRow, enabledColumn + 1).setValues([[false]])
+    const before = accounts.getRange(disabledRow, 1, 1, accounts.getLastColumn()).getValues()[0]!
+    const reviewedCells = accounts.getRange(disabledRow, 1, 1, accounts.getLastColumn()).getDisplayValues()[0]!
+    reviewedCells[stableIdColumn] = ''
+    const repairReference = {
+      scope: 'accounts',
+      sheetRow: disabledRow,
+      contentDigest: createHash('sha256')
+        .update(JSON.stringify({ scope: 'accounts', cells: reviewedCells }), 'utf8')
+        .digest('hex'),
+    }
+
+    const snapshot = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-disabled-adoption-snapshot')
+    expect((snapshot.records as Array<Record<string, unknown>>).some(record => record.name === '悠遊卡')).toBe(false)
+    const stableId = 'account:disabled-easycard'
+    const adopted = await post(harness, {
+      action: 'adopt_identity',
+      operationId: 'identity-disabled-adoption',
+      expectedSnapshotRevision: String(snapshot.snapshotRevision),
+      repairReference,
+      stableId,
+    }, 'identity-disabled-adoption')
+    expect(adopted).toMatchObject({
+      ok: true,
+      scope: 'accounts',
+      stableId,
+      changedField: 'stable_id',
+    })
+
+    const after = accounts.getRange(disabledRow, 1, 1, accounts.getLastColumn()).getValues()[0]!
+    expect(after).toEqual(before.map((value, index) =>
+      index === stableIdColumn ? stableId : value))
+    expect(after[enabledColumn]).toBe(false)
+
+    const stillHidden = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-disabled-adoption-after')
+    expect((stillHidden.records as Array<Record<string, unknown>>).some(record => record.name === '悠遊卡')).toBe(false)
+    const refused = await post(harness, {
+      action: 'create_transaction',
+      idempotencyKey: 'identity-disabled-adoption-write',
+      transaction: {
+        type: '支出',
+        date: '2026-07-28',
+        amount: '1',
+        account: '悠遊卡',
+        category: '餐飲',
+        payee: 'test',
+        currency: 'TWD',
+        description: 'must remain disabled after identity repair',
+      },
+    }, 'identity-disabled-adoption-write')
+    expect(refused).toEqual({ ok: false, error: 'unknown or disabled account: 悠遊卡' })
   })
 
   it('leaves legacy blank account and observation identities for explicit repair', async () => {
