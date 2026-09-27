@@ -77,6 +77,69 @@ describe('E2 reviewed Personal operations', () => {
     ])
   })
 
+  it('reads 450 E2 metadata records across pages and proves the explicit end', async () => {
+    await post(harness, { action: 'enable_e2' }, 'e2-read-over-cap-enable')
+    const records = harness.spreadsheet.getSheetByName('整合記錄')!
+    records.getRange(2, 1, 450, 5).setValues(Array.from({ length: 450 }, (_, index) => [
+      'synthetic-read',
+      `record-${String(index).padStart(3, '0')}`,
+      `revision-${index}`,
+      JSON.stringify({ index }),
+      `2026-07-27T00:${String(index % 60).padStart(2, '0')}:00+08:00`,
+    ]))
+
+    const pages: Array<Record<string, unknown>> = []
+    let cursor: string | undefined
+    let snapshotRevision: string | undefined
+    for (;;) {
+      const page = await post(harness, {
+        action: 'snapshot',
+        scope: 'records',
+        ...(cursor === undefined ? {} : { cursor }),
+        ...(snapshotRevision === undefined ? {} : { snapshotRevision }),
+      }, `e2-read-over-cap-${pages.length}`)
+      pages.push(page)
+      if (snapshotRevision === undefined) snapshotRevision = String(page.snapshotRevision)
+      const continuation = page.continuation as { kind: string; cursor?: string }
+      if (continuation.kind === 'end') break
+      expect(continuation.kind).toBe('cursor')
+      cursor = continuation.cursor
+    }
+
+    expect(pages.map(page => (page.records as unknown[]).length)).toEqual([200, 200, 50])
+    expect(pages.at(-1)).toMatchObject({ continuation: { kind: 'end' } })
+    expect(new Set(pages.flatMap(page => (page.records as Array<Record<string, unknown>>).map(record => record.id))).size)
+      .toBe(450)
+  })
+
+  it('refuses a continuation when E2 metadata changes between pages', async () => {
+    await post(harness, { action: 'enable_e2' }, 'e2-read-revision-enable')
+    const records = harness.spreadsheet.getSheetByName('整合記錄')!
+    records.getRange(2, 1, 210, 5).setValues(Array.from({ length: 210 }, (_, index) => [
+      'synthetic-revision',
+      `record-${String(index).padStart(3, '0')}`,
+      `revision-${index}`,
+      JSON.stringify({ index }),
+      '2026-07-27T00:00:00+08:00',
+    ]))
+
+    const first = await post(harness, {
+      action: 'snapshot', scope: 'records',
+    }, 'e2-read-revision-first')
+    expect(first.continuation).toEqual({ kind: 'cursor', cursor: '200' })
+    const snapshotRevision = String(first.snapshotRevision)
+    records.getRange(211, 4).setValues([[JSON.stringify({ index: 209, changed: true })]])
+
+    expect(await post(harness, {
+      action: 'snapshot', scope: 'records', cursor: '200', snapshotRevision,
+    }, 'e2-read-revision-second')).toEqual({
+      kind: 'revision-changed',
+      book: 'personal',
+      expected: snapshotRevision,
+      actual: expect.any(String),
+    })
+  })
+
   it('records native-currency groups and excludes incomplete groups from balances', async () => {
     const complete = await post(harness, {
       action: 'create_event_group', operationId: 'group-complete', actor: 'group-actor', group: {
