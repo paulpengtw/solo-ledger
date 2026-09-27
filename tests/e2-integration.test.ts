@@ -113,6 +113,27 @@ describe('E2 reviewed Personal operations', () => {
     expect(competing).toMatchObject({ kind: 'conflict', reason: 'observation-already-claimed' })
   })
 
+  it('does not reserve claims for rejected event groups or import plans', async () => {
+    const rejectedGroup = await post(harness, {
+      action: 'create_event_group', operationId: 'group-claim-rejected',
+      claims: ['observation:rejected-group'], group: {
+        groupId: 'group-claim-rejected', legs: [],
+      },
+    }, 'group-claim-rejected-transport')
+    expect(rejectedGroup).toMatchObject({ kind: 'rejected', reason: 'group-legs-required' })
+
+    const rejectedImport = await post(harness, {
+      action: 'accept_import', operationId: 'manifest-claim-rejected',
+      claims: ['observation:rejected-import'], manifest: {
+        manifestId: 'manifest-claim-rejected', sourceEvidence: ['evidence-claim-rejected'],
+      }, steps: [
+        { stepId: 'invalid-link', disposition: 'link', state: 'completed' },
+      ],
+    }, 'manifest-claim-rejected-transport')
+    expect(rejectedImport).toMatchObject({ kind: 'rejected', reason: 'plan-incomplete' })
+    expect((await post(harness, { action: 'snapshot', scope: 'claims' }, 'rejected-claims-snapshot')).records).toEqual([])
+  })
+
   it('discovers durable outcomes while financial writes are closed and records actor provenance', async () => {
     const committed = await post(harness, {
       action: 'command', operationId: 'maintenance-outcome', actor: 'verified-actor', expectedRevisions: [],
@@ -304,6 +325,44 @@ describe('E2 reviewed Personal operations', () => {
     expect(imbalanced).toMatchObject({ kind: 'rejected', reason: 'group-not-balanced-within-currency' })
   })
 
+  it('keeps an interrupted group leg out of balances and resumes the same operation', async () => {
+    await post(harness, { action: 'enable_e2' }, 'group-detail-retry-enable')
+    const detailSheet = harness.spreadsheet.getSheetByName('事件群組明細')!
+    detailSheet.failNextSetValues('simulated group detail failure')
+    const group = {
+      groupId: 'group-detail-retry',
+      legs: [{
+        txnId: '00000000-0000-4000-8000-000000000921',
+        date: '2026-07-27',
+        type: '轉帳',
+        debitAccount: '銀行',
+        creditAccount: '現金',
+        amount: '10',
+        currency: 'TWD',
+      }],
+    }
+
+    const first = await post(harness, {
+      action: 'create_event_group', operationId: 'group-detail-retry-op', group,
+    }, 'group-detail-retry-first-transport')
+    expect(first).toEqual({ kind: 'unknown', operationId: 'group-detail-retry-op', reason: 'write-outcome-unknown' })
+
+    const beforeRetry = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'group-detail-retry-before-snapshot')
+    expect(beforeRetry.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: '現金', balances: [] }),
+      expect.objectContaining({ name: '銀行', balances: [] }),
+    ]))
+
+    const retry = await post(harness, {
+      action: 'create_event_group', operationId: 'group-detail-retry-op', group,
+    }, 'group-detail-retry-second-transport')
+    expect(retry).toMatchObject({ kind: 'committed', operationId: 'group-detail-retry-op' })
+    expect((await post(harness, { action: 'snapshot', scope: 'groups' }, 'group-detail-retry-group-snapshot')).records)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'group-detail-retry', status: 'complete' }),
+      ]))
+  })
+
   it('validates Confirmation against the resulting state before writing', async () => {
     const journal = harness.spreadsheet.getSheetByName('日記帳')!
     journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
@@ -394,6 +453,27 @@ describe('E2 reviewed Personal operations', () => {
       expect.objectContaining({ stepId: 'two', state: 'pending' }),
       expect.objectContaining({ stepId: 'three', state: 'conflicting' }),
     ]))
+
+    const staleStepRevision = await post(harness, {
+      action: 'resume_import', operationId: 'manifest-stale-step-revision', manifestId: 'manifest-1', steps: [
+        {
+          stepId: 'two', state: 'completed', destinationId: 'event-2', destinationRevision: 'rev-2',
+          expectedRevisions: [{ id: 'event-2', revision: 'revision-before-edit' }],
+        },
+      ],
+    }, 'manifest-stale-step-revision-transport')
+    expect(staleStepRevision).toMatchObject({ kind: 'conflict', reason: 'stale-expected-revision' })
+
+    const resumed = await post(harness, {
+      action: 'resume_import', operationId: 'manifest-omitted-pending-step', manifestId: 'manifest-1', steps: [
+        { stepId: 'one', disposition: 'create', state: 'completed', destinationId: 'event-1', destinationRevision: 'rev-1' },
+      ],
+    }, 'manifest-omitted-pending-step-transport')
+    expect(resumed).toMatchObject({ kind: 'committed' })
+    expect((await post(harness, { action: 'snapshot', scope: 'manifests' }, 'manifest-omitted-pending-snapshot')).records)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ manifestId: 'manifest-1', status: 'conflicting' }),
+      ]))
   })
 
   it('preflights the whole import plan before writing any manifest or step', async () => {

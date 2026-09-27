@@ -4953,7 +4953,11 @@ function command_(payload, nonce) {
     if (previous.values.content_digest !== digest) {
       return e2Conflict_(operationId, 'operation-id-reused-with-different-content', []);
     }
-    return e2OutcomeFromRow_(previous);
+    // An unknown outcome means the durable record survived a response or
+    // process failure, but it does not establish whether every effect did.
+    // Re-enter the operation so its handler can resume missing append-only
+    // steps. All other outcomes are terminal and safely replayable.
+    if (previous.values.kind !== 'unknown') return e2OutcomeFromRow_(previous);
   }
 
   var lock = LockService.getScriptLock();
@@ -4965,7 +4969,7 @@ function command_(payload, nonce) {
       if (previous.values.content_digest !== digest) {
         return e2Conflict_(operationId, 'operation-id-reused-with-different-content', []);
       }
-      return e2OutcomeFromRow_(previous);
+      if (previous.values.kind !== 'unknown') return e2OutcomeFromRow_(previous);
     }
 
     var expectedConflicts = e2CheckExpectedRevisions_(spreadsheet, payload.expectedRevisions);
@@ -4988,37 +4992,51 @@ function command_(payload, nonce) {
       }, digest, undefined, actor);
     }
 
+    var claimsReserved = false;
+    var reserveClaims = function () {
+      if (claimsReserved) return;
+      e2PersistClaims_(spreadsheet, operationId, digest, content.claims || [], actor);
+      claimsReserved = true;
+    };
     var execution;
     try {
-      // Claims are the durable ownership fence for source observations. They
-      // must be visible before any executor can append a journal effect.
-      e2PersistClaims_(spreadsheet, operationId, digest, content.claims || [], actor);
       var kind = String(content.kind || 'generic');
       if (kind === 'event-group' || kind === 'compound-event-group') {
-        execution = e2ExecuteEventGroup_(spreadsheet, operationId, digest, content);
+        execution = e2ExecuteEventGroup_(spreadsheet, operationId, digest, content, reserveClaims);
       } else if (kind === 'confirmation' || kind === 'review') {
+        reserveClaims();
         execution = e2ExecuteConfirmation_(spreadsheet, operationId, digest, content);
       } else if (kind === 'manifest' || kind === 'import') {
-        execution = e2ExecuteManifest_(spreadsheet, operationId, digest, content);
+        execution = e2ExecuteManifest_(spreadsheet, operationId, digest, content, reserveClaims);
       } else if (kind === 'resume-import') {
+        reserveClaims();
         execution = e2ExecuteResumeImport_(spreadsheet, operationId, digest, content);
       } else if (kind === 'evidence') {
+        reserveClaims();
         execution = e2ExecuteEvidence_(spreadsheet, operationId, digest, content);
       } else if (kind === 'link') {
+        reserveClaims();
         execution = e2ExecuteLink_(spreadsheet, operationId, digest, content);
       } else if (kind === 'checkpoint') {
+        reserveClaims();
         execution = e2ExecuteCheckpoint_(spreadsheet, operationId, digest, content);
       } else if (kind === 'setting') {
+        reserveClaims();
         execution = e2ExecuteSetting_(spreadsheet, operationId, digest, content);
       } else if (kind === 'result') {
+        reserveClaims();
         execution = e2ExecuteResult_(spreadsheet, operationId, digest, content);
       } else if (kind === 'opening-adjustment') {
+        reserveClaims();
         execution = e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content);
       } else if (kind === 'correction') {
+        reserveClaims();
         execution = e2ExecuteCorrection_(spreadsheet, operationId, digest, content);
       } else if (kind === 'claims') {
+        reserveClaims();
         execution = e2ExecuteClaims_(spreadsheet, operationId, digest, content);
       } else {
+        reserveClaims();
         execution = { rejected: e2Rejected_(operationId, 'unsupported-command-kind') };
       }
     } catch (error) {
@@ -5035,6 +5053,7 @@ function command_(payload, nonce) {
     if (execution && execution.rejected) {
       return e2PersistOutcome_(spreadsheet, execution.rejected, digest, undefined, actor);
     }
+    if (!claimsReserved) reserveClaims();
     var destinations = execution && execution.destinations ? execution.destinations : [];
     if (destinations.length === 0) {
       destinations = [{ id: operationId + '-effect', revision: snapshotRevision_(readSnapshotSource_(spreadsheet)) }];
@@ -5245,7 +5264,7 @@ function e2ExpectedRevisions_(payload, fallbackId) {
   return expectedRevisionInput_(payload, fallbackId);
 }
 
-function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
+function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content, reserveClaims) {
   var groupId = String(content.groupId || operationId).trim();
   if (!groupId) return { rejected: e2Rejected_(operationId, 'group-id-required') };
   var legs = content.legs;
@@ -5524,6 +5543,7 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
     existingDestinations.push({ id: groupId, revision: existingGroup.values.content_digest || digest });
     return { destinations: existingDestinations };
   }
+  if (reserveClaims) reserveClaims();
   var now = taipeiIsoNow_();
   var groupSheetRow;
   groupSheetRow = e2Append_(spreadsheet, '事件群組', {
@@ -5543,16 +5563,17 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
         if (existingDetailForLeg.content_digest !== legDigest) {
           return { conflict: e2Conflict_(operationId, 'group-leg-content-conflict', [{ id: item.txnId }]) };
         }
-        destinations.push({ id: item.txnId, revision: legDigest });
-        continue;
       }
+      var journalForLeg;
+      var columnsForLeg;
+      var existingTxnRowForLeg = null;
       if (item.posting) {
-        var journal = requiredSheet_(spreadsheet, '日記帳');
-        var headers = journal.getRange(1, 1, 1, journal.getLastColumn()).getDisplayValues()[0];
-        var columns = resolveHeaders_(headers, JOURNAL_HEADERS);
+        journalForLeg = requiredSheet_(spreadsheet, '日記帳');
+        var headers = journalForLeg.getRange(1, 1, 1, journalForLeg.getLastColumn()).getDisplayValues()[0];
+        columnsForLeg = resolveHeaders_(headers, JOURNAL_HEADERS);
         validatePostingVocabulary_(item.posting, vocabulary);
-        var existingTxnRow = findTxnRow_(journal, columns.txn_id, item.txnId);
-        if (existingTxnRow !== null) {
+        existingTxnRowForLeg = findTxnRow_(journalForLeg, columnsForLeg.txn_id, item.txnId);
+        if (existingTxnRowForLeg !== null) {
           if (!existingGroup) {
             return { conflict: e2Conflict_(operationId, 'txn-id-already-exists', [{ id: item.txnId }]) };
           }
@@ -5562,27 +5583,33 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
               return { conflict: e2Conflict_(operationId, 'txn-id-already-linked', [{ id: item.txnId }]) };
             }
           }
-          var existingJournalValues = journal.getRange(existingTxnRow, 1, 1, journal.getLastColumn()).getDisplayValues()[0];
+          var existingJournalValues = journalForLeg.getRange(existingTxnRowForLeg, 1, 1, journalForLeg.getLastColumn()).getDisplayValues()[0];
           var existingAmount;
-          try { existingAmount = canonicalDecimal_(existingJournalValues[columns['金額'] - 1], existingTxnRow); } catch (error) { existingAmount = ''; }
+          try { existingAmount = canonicalDecimal_(existingJournalValues[columnsForLeg['金額'] - 1], existingTxnRowForLeg); } catch (error) { existingAmount = ''; }
           if (existingAmount !== item.amount ||
-              String(existingJournalValues[columns['幣別'] - 1] || '').trim() !== item.currency ||
-              String(existingJournalValues[columns['借方帳戶'] - 1] || '').trim() !== item.posting['借方帳戶'] ||
-              String(existingJournalValues[columns['貸方帳戶'] - 1] || '').trim() !== item.posting['貸方帳戶']) {
+              String(existingJournalValues[columnsForLeg['幣別'] - 1] || '').trim() !== item.currency ||
+              String(existingJournalValues[columnsForLeg['借方帳戶'] - 1] || '').trim() !== item.posting['借方帳戶'] ||
+              String(existingJournalValues[columnsForLeg['貸方帳戶'] - 1] || '').trim() !== item.posting['貸方帳戶']) {
             return { conflict: e2Conflict_(operationId, 'group-leg-content-conflict', [{ id: item.txnId }]) };
           }
-        } else {
-          appendPosting_(journal, columns, item.posting);
         }
       }
-      e2Append_(spreadsheet, '事件群組明細', {
-        group_id: groupId, txn_id: item.txnId, leg_index: postingIndex,
-        amount: item.amount, currency: item.currency,
-        debit_account: item.posting ? item.posting['借方帳戶'] : '',
-        credit_account: item.posting ? item.posting['貸方帳戶'] : '',
-        content_digest: legDigest,
-      });
-      e2PersistActorMetadata_(spreadsheet, 'event-group-leg', groupId + ':' + item.txnId, legDigest, content.actor, operationId);
+      // The detail row is the visibility guard for account balances. Write it
+      // before the journal effect so an interruption cannot leave an
+      // unclassified posting counted by a later snapshot.
+      if (!existingDetailForLeg) {
+        e2Append_(spreadsheet, '事件群組明細', {
+          group_id: groupId, txn_id: item.txnId, leg_index: postingIndex,
+          amount: item.amount, currency: item.currency,
+          debit_account: item.posting ? item.posting['借方帳戶'] : '',
+          credit_account: item.posting ? item.posting['貸方帳戶'] : '',
+          content_digest: legDigest,
+        });
+        e2PersistActorMetadata_(spreadsheet, 'event-group-leg', groupId + ':' + item.txnId, legDigest, content.actor, operationId);
+      }
+      if (item.posting && existingTxnRowForLeg === null) {
+        appendPosting_(journalForLeg, columnsForLeg, item.posting);
+      }
       destinations.push({ id: item.txnId, revision: legDigest });
     }
     var completeRevision = e2Digest_({ groupId: groupId, digest: digest, status: 'complete' });
@@ -5697,7 +5724,7 @@ function e2ManifestId_(manifest) {
   return id;
 }
 
-function e2ExecuteManifest_(spreadsheet, operationId, digest, content) {
+function e2ExecuteManifest_(spreadsheet, operationId, digest, content, reserveClaims) {
   var manifest = content.manifest || content;
   var manifestId;
   try { manifestId = e2ManifestId_(manifest); } catch (error) {
@@ -5849,6 +5876,7 @@ function e2ExecuteManifest_(spreadsheet, operationId, digest, content) {
       return { destinations: existingManifestDestinations };
     }
   }
+  if (reserveClaims) reserveClaims();
   var revision = e2Digest_({ manifestId: manifestId, digest: digest, operationId: operationId });
   var now = taipeiIsoNow_();
   e2Append_(spreadsheet, '匯入清單', {
@@ -5897,10 +5925,16 @@ function e2ExecuteResumeImport_(spreadsheet, operationId, digest, content) {
   var destinations = [{ id: manifestId, revision: manifest.values.revision }];
   var completed = true;
   var conflicting = false;
+  var seenResumeStepIds = Object.create(null);
   for (var stepIndex = 0; stepIndex < steps.length; stepIndex += 1) {
     var candidate = steps[stepIndex];
+    if (!candidate || typeof candidate !== 'object') {
+      return { rejected: e2Rejected_(operationId, 'step-id-required') };
+    }
     var stepId = String(candidate.stepId || candidate.step_id || candidate.id || '').trim();
     if (!stepId) return { rejected: e2Rejected_(operationId, 'step-id-required') };
+    if (seenResumeStepIds[stepId]) return { rejected: e2Rejected_(operationId, 'duplicate-step-id') };
+    seenResumeStepIds[stepId] = true;
     var existing = null;
     for (var latestIndex = 0; latestIndex < latest.length; latestIndex += 1) {
       if (latest[latestIndex].manifestId === manifestId && latest[latestIndex].stepId === stepId) {
@@ -5912,6 +5946,28 @@ function e2ExecuteResumeImport_(spreadsheet, operationId, digest, content) {
       return { rejected: e2Rejected_(operationId, 'unsupported-step-state') };
     }
     var stepDigest = String(candidate.contentDigest || '').trim() || e2Digest_(candidate);
+    var rawStepExpectedRevisions = candidate.expectedRevisions || candidate.expected_revisions;
+    if (rawStepExpectedRevisions !== undefined) {
+      if (!Array.isArray(rawStepExpectedRevisions)) {
+        return { rejected: e2Rejected_(operationId, 'invalid-step-expected-revisions') };
+      }
+      var normalizedStepExpectedRevisions = [];
+      var seenStepExpectedIds = Object.create(null);
+      for (var stepExpectedIndex = 0; stepExpectedIndex < rawStepExpectedRevisions.length; stepExpectedIndex += 1) {
+        var rawExpectedRevision = rawStepExpectedRevisions[stepExpectedIndex];
+        var expectedId = String(rawExpectedRevision && (rawExpectedRevision.id || rawExpectedRevision.recordId || rawExpectedRevision.record_id) || '').trim();
+        var expectedValue = String(rawExpectedRevision && (rawExpectedRevision.revision || rawExpectedRevision.expectedRevision || rawExpectedRevision.expected_revision) || '').trim();
+        if (!expectedId || !expectedValue || seenStepExpectedIds[expectedId]) {
+          return { rejected: e2Rejected_(operationId, 'invalid-step-expected-revisions') };
+        }
+        seenStepExpectedIds[expectedId] = true;
+        normalizedStepExpectedRevisions.push({ id: expectedId, revision: expectedValue });
+      }
+      var stepExpectedConflicts = e2CheckExpectedRevisions_(spreadsheet, normalizedStepExpectedRevisions);
+      if (stepExpectedConflicts.length > 0) {
+        return { conflict: e2Conflict_(operationId, 'stale-expected-revision', stepExpectedConflicts) };
+      }
+    }
     if (existing && (existing.state === 'completed' || existing.state === 'skipped') &&
         (state !== existing.state || stepDigest !== existing.contentDigest)) {
       return { conflict: e2Conflict_(operationId, 'completed-step-cannot-regress', [{
@@ -5941,6 +5997,19 @@ function e2ExecuteResumeImport_(spreadsheet, operationId, digest, content) {
     destinations.push({ id: manifestId + ':' + stepId, revision: stepRevision });
     if (state !== 'completed' && state !== 'skipped') completed = false;
     if (state === 'conflicted' || state === 'conflicting' || state === 'rejected' || state === 'unknown') conflicting = true;
+  }
+  // A resume request may contain only steps that need work. Existing steps
+  // omitted from that request still determine the manifest's resulting state;
+  // otherwise a pending/conflicting receipt could be promoted to completed by
+  // mentioning only one successful step.
+  for (var omittedIndex = 0; omittedIndex < latest.length; omittedIndex += 1) {
+    var omitted = latest[omittedIndex];
+    if (omitted.manifestId !== manifestId || seenResumeStepIds[omitted.stepId]) continue;
+    destinations.push({ id: manifestId + ':' + omitted.stepId, revision: omitted.revision });
+    if (omitted.state !== 'completed' && omitted.state !== 'skipped') completed = false;
+    if (omitted.state === 'conflicted' || omitted.state === 'conflicting' || omitted.state === 'rejected' || omitted.state === 'unknown') {
+      conflicting = true;
+    }
   }
   var manifestState = conflicting ? 'conflicting' : completed ? 'completed' : 'pending';
   var manifestRevision = e2Digest_({ manifestId: manifestId, state: manifestState, operationId: operationId, digest: digest });
