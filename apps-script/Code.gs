@@ -905,8 +905,9 @@ function identityLookupExists_(source, target, stableId) {
   if (identityExists_(source, stableId)) {
     return true;
   }
-  for (var index = 0; index < source.vocabularyRows.length; index += 1) {
-    var row = source.vocabularyRows[index];
+  var accountRows = source.accountIdentityRows || source.vocabularyRows;
+  for (var index = 0; index < accountRows.length; index += 1) {
+    var row = accountRows[index];
     if (row.stableId || (row.type !== '資產' && row.type !== '負債') ||
         'account:' + row.name !== stableId) {
       continue;

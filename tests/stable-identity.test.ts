@@ -506,6 +506,40 @@ describe('stable identity', () => {
     expect(accounts.getRange(bankRow, 1, 1, accounts.getLastColumn()).getValues()[0]!).toEqual(before)
   })
 
+  it('rejects adoption of a disabled blank account legacy identity', async () => {
+    harness.setupSpreadsheet()
+    const accounts = requiredSheet(harness, '會計科目')
+    const values = accounts.getRange(1, 1, accounts.getLastRow(), accounts.getLastColumn()).getValues()
+    const headers = values[0]!.map(String)
+    const stableIdColumn = headers.indexOf('stable_id')
+    const enabledColumn = headers.indexOf('啟用')
+    const disabledRow = values.findIndex(row => row[0] === '悠遊卡') + 1
+    const targetRow = values.findIndex(row => row[0] === '銀行') + 1
+    accounts.getRange(disabledRow, stableIdColumn + 1).setValues([['']])
+    accounts.getRange(disabledRow, enabledColumn + 1).setValues([[false]])
+    accounts.getRange(targetRow, stableIdColumn + 1).setValues([['']])
+
+    const snapshot = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-disabled-legacy-collision-snapshot')
+    expect((snapshot.records as Array<Record<string, unknown>>).some(record => record.name === '悠遊卡')).toBe(false)
+    const reference = (snapshot.records as Array<Record<string, unknown>>)
+      .find(record => record.name === '銀行')!.repairReference
+    const before = accounts.getRange(targetRow, 1, 1, accounts.getLastColumn()).getValues()[0]!
+
+    const refused = await post(harness, {
+      action: 'adopt_identity',
+      operationId: 'identity-disabled-legacy-collision-adoption',
+      expectedSnapshotRevision: String(snapshot.snapshotRevision),
+      repairReference: reference,
+      stableId: 'account:悠遊卡',
+    }, 'identity-disabled-legacy-collision-adoption')
+    expect(refused).toMatchObject({
+      ok: false,
+      kind: 'conflict',
+      reason: 'duplicate-stable-id',
+    })
+    expect(accounts.getRange(targetRow, 1, 1, accounts.getLastColumn()).getValues()[0]!).toEqual(before)
+  })
+
   it('leaves legacy blank account and observation identities for explicit repair', async () => {
     harness.setupSpreadsheet()
     const accounts = requiredSheet(harness, '會計科目')
