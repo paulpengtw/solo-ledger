@@ -4621,13 +4621,27 @@ function e2CheckClaims_(spreadsheet, operationId, claims) {
 }
 
 function e2PersistClaims_(spreadsheet, operationId, digest, claims, actor) {
+  var existing = e2Claims_(spreadsheet);
+  var persisted = Object.create(null);
   for (var index = 0; index < (claims || []).length; index += 1) {
-    var claimId = String(claims[index]);
+    var claimId = String(claims[index] || '').trim();
+    if (persisted[claimId]) continue;
+    if (existing[claimId]) {
+      if (existing[claimId].operation_id !== operationId) {
+        throw new Error('claim is already reserved by another operation');
+      }
+      persisted[claimId] = true;
+      continue;
+    }
     e2Append_(spreadsheet, '觀察認領', {
       claim_id: claimId, operation_id: operationId,
       content_digest: digest, status: 'claimed', created_at: taipeiIsoNow_(),
     });
     e2PersistActorMetadata_(spreadsheet, 'claim', claimId, digest, actor, operationId);
+    existing[claimId] = {
+      operation_id: operationId, content_digest: digest,
+    };
+    persisted[claimId] = true;
   }
 }
 
@@ -4976,6 +4990,9 @@ function command_(payload, nonce) {
 
     var execution;
     try {
+      // Claims are the durable ownership fence for source observations. They
+      // must be visible before any executor can append a journal effect.
+      e2PersistClaims_(spreadsheet, operationId, digest, content.claims || [], actor);
       var kind = String(content.kind || 'generic');
       if (kind === 'event-group' || kind === 'compound-event-group') {
         execution = e2ExecuteEventGroup_(spreadsheet, operationId, digest, content);
@@ -5022,7 +5039,6 @@ function command_(payload, nonce) {
     if (destinations.length === 0) {
       destinations = [{ id: operationId + '-effect', revision: snapshotRevision_(readSnapshotSource_(spreadsheet)) }];
     }
-    e2PersistClaims_(spreadsheet, operationId, digest, content.claims || [], actor);
     return e2PersistOutcome_(spreadsheet, {
       kind: 'committed', operationId: operationId, destinations: destinations,
       committedAt: taipeiIsoNow_(),
@@ -5060,6 +5076,7 @@ function createEventGroup_(payload, nonce) {
     actor: payload.actor || group.actor || '',
     source: group.source || 'import',
   };
+  e2ForwardClaims_(content, payload, group);
   return command_({
     operationId: operationId,
     expectedRevisions: e2ExpectedRevisions_(payload, group.groupId || group.group_id || ''),
@@ -5103,16 +5120,26 @@ function e2PayloadContent_(payload) {
   return content;
 }
 
+function e2ForwardClaims_(content, payload, nested) {
+  var claims = payload && payload.claims;
+  if (claims === undefined && nested && nested.claims !== undefined) claims = nested.claims;
+  if (claims !== undefined) content.claims = claims;
+  return content;
+}
+
 function acceptImport_(payload, nonce) {
+  var manifest = payload.manifest || e2PayloadContent_(payload);
+  var content = {
+    kind: 'manifest', manifest: manifest,
+    steps: payload.steps || (payload.manifest && payload.manifest.steps) || [],
+    actor: payload.actor || '',
+  };
+  e2ForwardClaims_(content, payload, payload.manifest);
   return command_({
     operationId: e2OperationId_(payload, nonce),
     expectedRevisions: e2ExpectedRevisions_(payload, payload.manifestId || ''),
     contentDigest: payload.contentDigest,
-    content: {
-      kind: 'manifest', manifest: payload.manifest || e2PayloadContent_(payload),
-      steps: payload.steps || (payload.manifest && payload.manifest.steps) || [],
-      actor: payload.actor || '',
-    },
+    content: content,
     actor: payload.actor || '',
     contractVersion: payload.contractVersion,
   }, nonce);

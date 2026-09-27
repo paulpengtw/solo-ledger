@@ -47,6 +47,72 @@ describe('E2 reviewed Personal operations', () => {
     expect(changed).toMatchObject({ kind: 'conflict', reason: 'operation-id-reused-with-different-content' })
   })
 
+  it('forwards event-group claims and reserves them before journal effects', async () => {
+    const journal = harness.spreadsheet.getSheetByName('日記帳')!
+    journal.failNextSetValues('journal effect failed')
+
+    const attempted = await post(harness, {
+      action: 'create_event_group', operationId: 'group-claim-reservation',
+      claims: ['observation:event-group'], group: {
+        groupId: 'group-claim-reservation', legs: [
+          {
+            txnId: '00000000-0000-4000-8000-000000000930', date: '2026-07-27',
+            type: '轉帳', debitAccount: '銀行', creditAccount: '現金', amount: '10', currency: 'TWD',
+          },
+        ],
+      },
+    }, 'group-claim-reservation-transport')
+    expect(attempted).toEqual({
+      kind: 'unknown', operationId: 'group-claim-reservation', reason: 'write-outcome-unknown',
+    })
+    expect(journalRows(harness)).toHaveLength(0)
+
+    const claims = await post(harness, { action: 'snapshot', scope: 'claims' }, 'group-claim-reservation-snapshot')
+    expect(claims.records).toEqual([
+      expect.objectContaining({
+        claimId: 'observation:event-group', operationId: 'group-claim-reservation', status: 'claimed',
+      }),
+    ])
+
+    const competing = await post(harness, {
+      action: 'create_event_group', operationId: 'group-claim-competing',
+      claims: ['observation:event-group'], group: {
+        groupId: 'group-claim-competing', legs: [
+          {
+            txnId: '00000000-0000-4000-8000-000000000931', date: '2026-07-27',
+            type: '轉帳', debitAccount: '銀行', creditAccount: '現金', amount: '10', currency: 'TWD',
+          },
+        ],
+      },
+    }, 'group-claim-competing-transport')
+    expect(competing).toMatchObject({ kind: 'conflict', reason: 'observation-already-claimed' })
+  })
+
+  it('forwards import claims into the durable competing-claim gate', async () => {
+    const accepted = await post(harness, {
+      action: 'accept_import', operationId: 'manifest-claim-owner',
+      claims: ['observation:manifest'], manifest: {
+        manifestId: 'manifest-claim-owner', sourceEvidence: ['evidence-claim-owner'],
+      }, steps: [
+        { stepId: 'create-one', disposition: 'create', state: 'completed', destinationId: 'event-claim-owner', destinationRevision: 'rev-1' },
+      ],
+    }, 'manifest-claim-owner-transport')
+    expect(accepted).toMatchObject({ kind: 'committed', operationId: 'manifest-claim-owner' })
+    expect(await post(harness, { action: 'snapshot', scope: 'claims' }, 'manifest-claim-owner-snapshot')).toMatchObject({
+      records: [expect.objectContaining({ claimId: 'observation:manifest', operationId: 'manifest-claim-owner' })],
+    })
+
+    const competing = await post(harness, {
+      action: 'accept_import', operationId: 'manifest-claim-competing',
+      claims: ['observation:manifest'], manifest: {
+        manifestId: 'manifest-claim-competing', sourceEvidence: ['evidence-claim-competing'],
+      }, steps: [
+        { stepId: 'create-one', disposition: 'create', state: 'completed', destinationId: 'event-claim-competing', destinationRevision: 'rev-2' },
+      ],
+    }, 'manifest-claim-competing-transport')
+    expect(competing).toMatchObject({ kind: 'conflict', reason: 'observation-already-claimed' })
+  })
+
   it('discovers durable outcomes while financial writes are closed and records actor provenance', async () => {
     const committed = await post(harness, {
       action: 'command', operationId: 'maintenance-outcome', actor: 'verified-actor', expectedRevisions: [],
