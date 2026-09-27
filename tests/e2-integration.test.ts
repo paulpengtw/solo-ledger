@@ -134,6 +134,31 @@ describe('E2 reviewed Personal operations', () => {
     expect((await post(harness, { action: 'snapshot', scope: 'claims' }, 'rejected-claims-snapshot')).records).toEqual([])
   })
 
+  it('does not strand a claim when a leg conflicts before its first effect', async () => {
+    const first = await post(harness, {
+      action: 'create_event_group', operationId: 'group-existing-leg', group: {
+        groupId: 'group-existing-leg', legs: [{
+          txnId: '00000000-0000-4000-8000-000000000932', date: '2026-07-27',
+          type: '轉帳', debitAccount: '銀行', creditAccount: '現金', amount: '10', currency: 'TWD',
+        }],
+      },
+    }, 'group-existing-leg-transport')
+    expect(first).toMatchObject({ kind: 'committed' })
+
+    const conflicting = await post(harness, {
+      action: 'create_event_group', operationId: 'group-existing-leg-conflict',
+      claims: ['observation:conflicting-leg'], group: {
+        groupId: 'group-existing-leg-conflict', legs: [{
+          txnId: '00000000-0000-4000-8000-000000000932', date: '2026-07-27',
+          type: '轉帳', debitAccount: '銀行', creditAccount: '現金', amount: '10', currency: 'TWD',
+        }],
+      },
+    }, 'group-existing-leg-conflict-transport')
+    expect(conflicting).toMatchObject({ kind: 'conflict', reason: 'txn-id-already-exists' })
+    expect((await post(harness, { action: 'snapshot', scope: 'claims' }, 'conflicting-leg-claims-snapshot')).records)
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ claimId: 'observation:conflicting-leg' })]))
+  })
+
   it('discovers durable outcomes while financial writes are closed and records actor provenance', async () => {
     const committed = await post(harness, {
       action: 'command', operationId: 'maintenance-outcome', actor: 'verified-actor', expectedRevisions: [],

@@ -5543,7 +5543,6 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content, reserve
     existingDestinations.push({ id: groupId, revision: existingGroup.values.content_digest || digest });
     return { destinations: existingDestinations };
   }
-  if (reserveClaims) reserveClaims();
   var now = taipeiIsoNow_();
   var groupSheetRow;
   groupSheetRow = e2Append_(spreadsheet, '事件群組', {
@@ -5597,6 +5596,12 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content, reserve
       // The detail row is the visibility guard for account balances. Write it
       // before the journal effect so an interruption cannot leave an
       // unclassified posting counted by a later snapshot.
+      // Reserve source observations only after this leg has passed all
+      // conflict checks; a rejected/conflicting request must not strand a
+      // claim when it did not write a monetary effect.
+      if (reserveClaims && (!existingDetailForLeg || (item.posting && existingTxnRowForLeg === null))) {
+        reserveClaims();
+      }
       if (!existingDetailForLeg) {
         e2Append_(spreadsheet, '事件群組明細', {
           group_id: groupId, txn_id: item.txnId, leg_index: postingIndex,
