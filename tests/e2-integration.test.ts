@@ -373,6 +373,29 @@ describe('E2 reviewed Personal operations', () => {
     expect(changed).toMatchObject({ kind: 'conflict', reason: 'operation-id-reused-with-different-content' })
   })
 
+  it('refuses a command whose destination revision is stale before any write', async () => {
+    const before = journalRows(harness).length
+    const stale = await post(harness, {
+      action: 'command', operationId: 'stale-destination-command',
+      expectedRevisions: [{ id: 'event:missing', revision: 'revision-before-edit' }],
+      contentDigest: 'stale-destination-content',
+      content: {
+        kind: 'claims',
+        claims: ['observation:must-not-write'],
+      },
+    }, 'stale-destination-transport')
+
+    expect(stale).toMatchObject({
+      kind: 'conflict',
+      operationId: 'stale-destination-command',
+      reason: 'stale-expected-revision',
+      conflicts: [{ id: 'event:missing', expected: 'revision-before-edit', actual: 'missing' }],
+    })
+    expect(journalRows(harness)).toHaveLength(before)
+    expect(await post(harness, { action: 'snapshot', scope: 'claims' }, 'stale-destination-claims-snapshot'))
+      .toMatchObject({ records: [] })
+  })
+
   it('requires conversion evidence for mixed native currencies', async () => {
     const rejected = await post(harness, {
       action: 'create_event_group', operationId: 'group-missing-fx', group: {
