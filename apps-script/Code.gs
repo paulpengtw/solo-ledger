@@ -727,6 +727,7 @@ function lookup_(payload) {
     accounts: snapshotAccountRecords_(source, revision),
     events: snapshotEventRecords_(source),
     observations: snapshotObservationRecords_(source),
+    links: e2SchemaAvailable_(spreadsheet) ? snapshotE2Records_(spreadsheet, 'links') : [],
   };
   var found = [];
   var missing = [];
@@ -782,13 +783,14 @@ function isE2SnapshotScope_(scope) {
 function lookupRecordAcrossScopes_(recordsByScope, id) {
   var identified = [];
   var unidentified = [];
-  var scopes = ['accounts', 'events', 'observations'];
+  var scopes = ['accounts', 'events', 'observations', 'links'];
   for (var scopeIndex = 0; scopeIndex < scopes.length; scopeIndex += 1) {
     var scope = scopes[scopeIndex];
     var records = recordsByScope[scope];
     for (var index = 0; index < records.length; index += 1) {
       var record = records[index];
-      if (record.identity && record.identity.kind === 'identified' && record.id === id) {
+      if ((record.identity && record.identity.kind === 'identified' && record.id === id) ||
+          (scope === 'links' && record.id === id)) {
         identified.push(record);
       } else if (scope === 'accounts' &&
           record.identity && record.identity.kind === 'unidentified' &&
@@ -4468,6 +4470,14 @@ function e2OutcomeFromRow_(row) {
   if (kind === 'unknown') {
     return { kind: 'unknown', operationId: values.operation_id, reason: values.reason || 'unknown' };
   }
+  if (kind === 'incomplete') {
+    var incompleteDestinations = [];
+    try { incompleteDestinations = JSON.parse(values.destinations_json || '[]'); } catch (error) { incompleteDestinations = []; }
+    return {
+      kind: 'incomplete', operationId: values.operation_id,
+      reason: values.reason || 'incomplete', destinations: incompleteDestinations,
+    };
+  }
   return {
     kind: 'rejected', operationId: values.operation_id,
     reason: values.reason || 'rejected',
@@ -4596,12 +4606,76 @@ function e2CheckExpectedRevisions_(spreadsheet, expected) {
   return conflicts;
 }
 
+// A retry of an unknown operation may legitimately observe the revisions of
+// the manifest/group/step rows that this operation already appended. Keep
+// checking every other expected revision: a concurrent writer must still
+// turn the retry into a conflict rather than inherit stale content.
+function e2RecoveryOwnedIds_(spreadsheet, content, digest) {
+  var owned = Object.create(null);
+  var kind = String(content && content.kind || '');
+  if (kind === 'event-group' || kind === 'compound-event-group') {
+    var groupId = String(content.groupId || content.group_id || '').trim();
+    var groups = snapshotE2Records_(spreadsheet, 'groups');
+    for (var groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+      if (groups[groupIndex].id === groupId && groups[groupIndex].contentDigest === digest) {
+        owned[groupId] = true;
+        break;
+      }
+    }
+    return owned;
+  }
+
+  var manifest = content && (content.manifest || content);
+  var manifestId = String(manifest && (manifest.manifestId || manifest.manifest_id || manifest.id) || '').trim();
+  if (kind === 'manifest' || kind === 'import') {
+    var manifests = snapshotE2Records_(spreadsheet, 'manifests');
+    for (var manifestIndex = 0; manifestIndex < manifests.length; manifestIndex += 1) {
+      if (manifests[manifestIndex].id === manifestId && manifests[manifestIndex].contentDigest === digest) {
+        owned[manifestId] = true;
+        break;
+      }
+    }
+  }
+
+  if (kind === 'manifest' || kind === 'import' || kind === 'resume-import') {
+    var candidates = content.steps || (manifest && manifest.steps) || [];
+    var storedSteps = snapshotE2Records_(spreadsheet, 'steps');
+    for (var candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
+      var candidate = candidates[candidateIndex] || {};
+      var stepId = String(candidate.stepId || candidate.step_id || candidate.id || '').trim();
+      if (!stepId) continue;
+      var stepDigest = String(candidate.contentDigest || '').trim() || e2Digest_(candidate);
+      var stepState = String(candidate.state || candidate.status || '').trim() || 'pending';
+      var destinationId = manifestId + ':' + stepId;
+      for (var storedIndex = 0; storedIndex < storedSteps.length; storedIndex += 1) {
+        var stored = storedSteps[storedIndex];
+        if (stored.id === destinationId && stored.contentDigest === stepDigest && stored.state === stepState) {
+          owned[destinationId] = true;
+          break;
+        }
+      }
+    }
+  }
+  return owned;
+}
+
+function e2ExpectedConflictsForRecovery_(spreadsheet, expected, content, digest) {
+  var owned = e2RecoveryOwnedIds_(spreadsheet, content, digest);
+  var externalExpected = [];
+  for (var index = 0; index < expected.length; index += 1) {
+    if (!owned[String(expected[index].id || '').trim()]) externalExpected.push(expected[index]);
+  }
+  return e2CheckExpectedRevisions_(spreadsheet, externalExpected);
+}
+
 function e2Claims_(spreadsheet) {
   var result = Object.create(null);
   var rows = e2Rows_(spreadsheet, '觀察認領');
   for (var index = 0; index < rows.length; index += 1) {
     var claim = rows[index].values;
-    if (claim.status === 'claimed' && claim.claim_id) result[claim.claim_id] = claim;
+    if (!claim.claim_id) continue;
+    if (claim.status === 'claimed') result[claim.claim_id] = claim;
+    else if (claim.status === 'released') delete result[claim.claim_id];
   }
   return result;
 }
@@ -4645,6 +4719,27 @@ function e2PersistClaims_(spreadsheet, operationId, digest, claims, actor) {
   }
 }
 
+// Some command variants need to reserve claims before entering their handler
+// so a concurrent request cannot pass the claim gate while this request is
+// being validated. If that handler rejects before producing an effect, append
+// an auditable release while the script lock is still held; the next request
+// then sees the claim as available instead of inheriting a phantom reservation.
+function e2ReleaseClaims_(spreadsheet, operationId, claims, actor) {
+  var existing = e2Claims_(spreadsheet);
+  var released = Object.create(null);
+  for (var index = 0; index < (claims || []).length; index += 1) {
+    var claimId = String(claims[index] || '').trim();
+    if (!claimId || released[claimId]) continue;
+    if (!existing[claimId] || existing[claimId].operation_id !== operationId) continue;
+    e2Append_(spreadsheet, '觀察認領', {
+      claim_id: claimId, operation_id: operationId,
+      content_digest: existing[claimId].content_digest || '', status: 'released', created_at: taipeiIsoNow_(),
+    });
+    e2PersistActorMetadata_(spreadsheet, 'claim-release', claimId, existing[claimId].content_digest || '', actor, operationId);
+    released[claimId] = true;
+  }
+}
+
 function e2WriteRecord_(spreadsheet, scope, id, data, operationId) {
   var recordId = String(id || '').trim();
   if (!recordId) throw new Error('write id is required');
@@ -4654,6 +4749,43 @@ function e2WriteRecord_(spreadsheet, scope, id, data, operationId) {
     data_json: e2Json_(data), created_at: taipeiIsoNow_(),
   });
   return { id: recordId, revision: revision };
+}
+
+// Receipt and receipt-progress commands use the append-only generic record
+// table, while the scoped `results` snapshot exposes only the latest record
+// for each receipt id. A changed progress payload is a new durable revision;
+// an identical retry reuses the existing row instead of duplicating it.
+function e2ExecuteRecordWrites_(spreadsheet, operationId, content) {
+  var writes = content && content.writes;
+  if (!Array.isArray(writes) || writes.length === 0) {
+    return { rejected: e2Rejected_(operationId, 'record-writes-required') };
+  }
+  var seen = Object.create(null);
+  var destinations = [];
+  for (var index = 0; index < writes.length; index += 1) {
+    var write = writes[index];
+    if (!write || typeof write !== 'object') {
+      return { rejected: e2Rejected_(operationId, 'record-write-invalid') };
+    }
+    var scope = String(write.scope || '').trim();
+    var id = String(write.id || '').trim();
+    if (scope !== 'results' || !id || seen[id] || !Object.prototype.hasOwnProperty.call(write, 'data')) {
+      return { rejected: e2Rejected_(operationId, 'record-write-invalid') };
+    }
+    seen[id] = true;
+    var existing = e2LatestRecord_(spreadsheet, scope, id);
+    if (existing) {
+      var existingData = e2ParseJson_(existing.values.data_json, null);
+      if (e2Digest_(existingData) === e2Digest_(write.data)) {
+        destinations.push({ id: id, revision: existing.values.revision });
+        continue;
+      }
+    }
+    var stored = e2WriteRecord_(spreadsheet, scope, id, write.data, operationId);
+    e2PersistActorMetadata_(spreadsheet, 'record', scope + ':' + id, stored.revision, content.actor, operationId);
+    destinations.push(stored);
+  }
+  return { destinations: destinations };
 }
 
 function e2LatestRecord_(spreadsheet, scope, id) {
@@ -4743,16 +4875,31 @@ function snapshotE2Records_(spreadsheet, scope) {
   }[canonicalScope];
   if (!tableName) return [];
   var rows = e2Rows_(spreadsheet, tableName);
+  if (canonicalScope === 'results') {
+    var genericResultRows = e2Rows_(spreadsheet, '整合記錄');
+    for (var genericIndex = 0; genericIndex < genericResultRows.length; genericIndex += 1) {
+      if (genericResultRows[genericIndex].values.scope !== 'results') continue;
+      rows.push(genericResultRows[genericIndex]);
+    }
+  }
   var latest = Object.create(null);
   var records = [];
   for (var index = 0; index < rows.length; index += 1) {
     var values = rows[index].values;
-    var id = e2RowIdentity_(tableName, values);
-    var record = e2RecordForTableRow_(tableName, values, rows[index].sheetRow, spreadsheet);
-    if (tableName === '事件群組' || tableName === '整合操作' || tableName === '觀察認領' ||
-        tableName === '匯入步驟' || tableName === '匯入清單' || tableName === '跨簿連結' ||
-        tableName === '設定版本' || tableName === '結果版本' || tableName === '對帳檢查點' ||
-        tableName === '整合記錄') {
+    var rowTableName = canonicalScope === 'results' && values.scope === 'results'
+      ? '整合記錄'
+      : tableName;
+    var id = e2RowIdentity_(rowTableName, values);
+    var record = e2RecordForTableRow_(rowTableName, values, rows[index].sheetRow, spreadsheet);
+    if (canonicalScope === 'results' && rowTableName === '整合記錄') {
+      // Generic result records are namespaced in the all-records view, but a
+      // scoped results read addresses the receipt by its stable operation id.
+      record.id = String(values.record_id || '').trim();
+    }
+    if (rowTableName === '事件群組' || rowTableName === '整合操作' || rowTableName === '觀察認領' ||
+        rowTableName === '匯入步驟' || rowTableName === '匯入清單' || rowTableName === '跨簿連結' ||
+        rowTableName === '設定版本' || rowTableName === '結果版本' || rowTableName === '對帳檢查點' ||
+        rowTableName === '整合記錄') {
       latest[id] = record;
     } else {
       records.push(record);
@@ -4804,7 +4951,7 @@ function e2RecordForTableRow_(tableName, values, sheetRow, spreadsheet) {
         legs.push({
           txnId: detail.txn_id, amount: detail.amount, currency: detail.currency,
           debitAccount: detail.debit_account, creditAccount: detail.credit_account,
-          legIndex: Number(detail.leg_index),
+          legIndex: Number(detail.leg_index), contentDigest: detail.content_digest,
         });
       }
     }
@@ -4980,7 +5127,7 @@ function command_(payload, nonce) {
     // caller's pre-write revisions would mistake those owned writes for an
     // external race and prevent recovery of the same operation.
     var expectedConflicts = recoveringUnknown
-      ? []
+      ? e2ExpectedConflictsForRecovery_(spreadsheet, payload.expectedRevisions, content, digest)
       : e2CheckExpectedRevisions_(spreadsheet, payload.expectedRevisions);
     if (expectedConflicts.length > 0) {
       return e2PersistOutcome_(
@@ -5035,6 +5182,8 @@ function command_(payload, nonce) {
       } else if (kind === 'result') {
         reserveClaims();
         execution = e2ExecuteResult_(spreadsheet, operationId, digest, content);
+      } else if (kind === 'import-receipt' || kind === 'receipt-progress') {
+        execution = e2ExecuteRecordWrites_(spreadsheet, operationId, content);
       } else if (kind === 'opening-adjustment') {
         reserveClaims();
         execution = e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content);
@@ -5057,9 +5206,15 @@ function command_(payload, nonce) {
       return unknown;
     }
     if (execution && execution.conflict) {
+      if (claimsReserved && kind !== 'event-group' && kind !== 'compound-event-group') {
+        e2ReleaseClaims_(spreadsheet, operationId, content.claims || [], actor);
+      }
       return e2PersistOutcome_(spreadsheet, execution.conflict, digest, undefined, actor);
     }
     if (execution && execution.rejected) {
+      if (claimsReserved && kind !== 'event-group' && kind !== 'compound-event-group') {
+        e2ReleaseClaims_(spreadsheet, operationId, content.claims || [], actor);
+      }
       return e2PersistOutcome_(spreadsheet, execution.rejected, digest, undefined, actor);
     }
     if (!claimsReserved) reserveClaims();
@@ -5795,7 +5950,7 @@ function e2ExecuteManifest_(spreadsheet, operationId, digest, content, reserveCl
       normalizedPlanExpectedRevisions.push({ id: expectedRevisionId, revision: expectedRevisionValue });
     }
     var planRevisionConflicts = recoveringUnknown
-      ? []
+      ? e2ExpectedConflictsForRecovery_(spreadsheet, normalizedPlanExpectedRevisions, content, digest)
       : e2CheckExpectedRevisions_(spreadsheet, normalizedPlanExpectedRevisions);
     if (planRevisionConflicts.length > 0) {
       return { conflict: e2Conflict_(operationId, 'stale-expected-revision', planRevisionConflicts) };
@@ -6011,7 +6166,7 @@ function e2ExecuteResumeImport_(spreadsheet, operationId, digest, content, recov
         normalizedStepExpectedRevisions.push({ id: expectedId, revision: expectedValue });
       }
       var stepExpectedConflicts = recoveringUnknown
-        ? []
+        ? e2ExpectedConflictsForRecovery_(spreadsheet, normalizedStepExpectedRevisions, content, digest)
         : e2CheckExpectedRevisions_(spreadsheet, normalizedStepExpectedRevisions);
       if (stepExpectedConflicts.length > 0) {
         return { conflict: e2Conflict_(operationId, 'stale-expected-revision', stepExpectedConflicts) };

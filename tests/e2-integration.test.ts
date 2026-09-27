@@ -159,6 +159,26 @@ describe('E2 reviewed Personal operations', () => {
       .not.toEqual(expect.arrayContaining([expect.objectContaining({ claimId: 'observation:conflicting-leg' })]))
   })
 
+  it('releases claims when a direct metadata command rejects before writing', async () => {
+    const rejected = await post(harness, {
+      action: 'record_evidence', operationId: 'evidence-invalid-claim-release',
+      claims: ['observation:evidence-release'],
+      evidence: { evidenceId: 'evidence-invalid', sourceReference: '' },
+    }, 'evidence-invalid-claim-release-transport')
+    expect(rejected).toMatchObject({ kind: 'rejected', reason: 'invalid-source-evidence' })
+
+    const accepted = await post(harness, {
+      action: 'command', operationId: 'claim-after-evidence-rejection', expectedRevisions: [],
+      contentDigest: 'claim-after-evidence-rejection',
+      content: { kind: 'claims', claims: ['observation:evidence-release'] },
+    }, 'claim-after-evidence-rejection-transport')
+    expect(accepted).toMatchObject({ kind: 'committed', operationId: 'claim-after-evidence-rejection' })
+    expect((await post(harness, { action: 'snapshot', scope: 'claims' }, 'evidence-release-claim-snapshot')).records)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ claimId: 'observation:evidence-release', operationId: 'claim-after-evidence-rejection', status: 'claimed' }),
+      ]))
+  })
+
   it('discovers durable outcomes while financial writes are closed and records actor provenance', async () => {
     const committed = await post(harness, {
       action: 'command', operationId: 'maintenance-outcome', actor: 'verified-actor', expectedRevisions: [],
@@ -551,6 +571,41 @@ describe('E2 reviewed Personal operations', () => {
     }, 'unsupported-command-transport')
     expect(rejected).toMatchObject({ kind: 'rejected', reason: 'unsupported-command-kind' })
     expect((await post(harness, { action: 'snapshot', scope: 'records' }, 'unsupported-command-snapshot')).records).toEqual([])
+  })
+
+  it('persists import receipts and exposes the latest progress by results scope', async () => {
+    const receipt = {
+      operationId: 'receipt-operation', planId: 'plan-1', contractVersion: CONTRACT_VERSION,
+      actor: 'cheng', acceptedAt: '2026-07-27T08:00:00.000Z', contentDigest: 'plan-digest',
+      steps: [{ stepId: 'step-1', book: 'personal', state: { kind: 'pending' } }],
+      state: { kind: 'accepted' },
+    }
+    const accepted = await post(harness, {
+      action: 'command', operationId: 'receipt-operation', expectedRevisions: [],
+      contentDigest: 'receipt-content', content: {
+        kind: 'import-receipt',
+        writes: [{ scope: 'results', id: 'receipt-operation', data: receipt }],
+      },
+    }, 'receipt-operation-transport')
+    expect(accepted).toMatchObject({ kind: 'committed', operationId: 'receipt-operation' })
+    expect((await post(harness, { action: 'snapshot', scope: 'results' }, 'receipt-results-accepted')).records)
+      .toEqual([expect.objectContaining({ id: 'receipt-operation', scope: 'results', data: receipt })])
+
+    const progress = {
+      ...receipt,
+      steps: [{ stepId: 'step-1', book: 'personal', state: { kind: 'completed', destination: { id: 'event-1', revision: 'rev-1' }, completedAt: '2026-07-27T08:01:00.000Z' } }],
+      state: { kind: 'completed', completedAt: '2026-07-27T08:01:00.000Z' },
+    }
+    const progressed = await post(harness, {
+      action: 'command', operationId: 'receipt-progress-operation', expectedRevisions: [],
+      contentDigest: 'receipt-progress-content', content: {
+        kind: 'receipt-progress',
+        writes: [{ scope: 'results', id: 'receipt-operation', data: progress }],
+      },
+    }, 'receipt-progress-transport')
+    expect(progressed).toMatchObject({ kind: 'committed', operationId: 'receipt-progress-operation' })
+    expect((await post(harness, { action: 'snapshot', scope: 'results' }, 'receipt-results-progress')).records)
+      .toEqual([expect.objectContaining({ id: 'receipt-operation', data: progress })])
   })
 
   it('uses canonical content for operation conflicts even when the transport digest is forged', async () => {
