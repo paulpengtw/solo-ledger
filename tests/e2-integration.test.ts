@@ -214,6 +214,36 @@ describe('E2 reviewed Personal operations', () => {
         review: expect.objectContaining({ state: 'confirmed', category: '餐飲', confirmedAt: expect.any(String) }),
       }),
     ]))
+
+    const clearedWithoutPending = await post(harness, {
+      action: 'confirm_event', operationId: 'confirm-clear-without-pending',
+      txnId: '00000000-0000-4000-8000-000000000904', category: '', confirmed: false,
+    }, 'confirm-clear-without-pending-transport')
+    expect(clearedWithoutPending).toMatchObject({
+      kind: 'rejected', reason: 'pending-transition-required',
+    })
+    const stillConfirmed = await post(harness, { action: 'snapshot', scope: 'events' }, 'confirm-still-confirmed-snapshot')
+    expect(stillConfirmed.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: '00000000-0000-4000-8000-000000000904',
+        category: '餐飲', reviewState: 'confirmed', review_state: 'confirmed',
+      }),
+    ]))
+
+    const clearedWithPending = await post(harness, {
+      action: 'confirm_event', operationId: 'confirm-clear-with-pending',
+      txnId: '00000000-0000-4000-8000-000000000904', category: '', confirmed: false,
+      pendingTransition: true,
+    }, 'confirm-clear-with-pending-transport')
+    expect(clearedWithPending).toMatchObject({ kind: 'committed' })
+    const pendingAfterClear = await post(harness, { action: 'snapshot', scope: 'events' }, 'confirm-pending-after-clear-snapshot')
+    expect(pendingAfterClear.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: '00000000-0000-4000-8000-000000000904',
+        category: '尚未分類', reviewState: 'pending', review_state: 'pending',
+        review: expect.objectContaining({ state: 'pending', category: '' }),
+      }),
+    ]))
   })
 
   it('persists complete, pending and conflicting import steps across reads', async () => {

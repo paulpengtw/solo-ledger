@@ -5625,7 +5625,8 @@ function e2ExecuteConfirmation_(spreadsheet, operationId, digest, content) {
   if (!categoryProvided && priorReview && priorReview.category) {
     category = String(priorReview.category).trim();
   }
-  if (priorReview && priorReview.reviewState === 'confirmed' && category === '尚未分類' && !pendingTransition) {
+  if (priorReview && priorReview.reviewState === 'confirmed' &&
+      (!category || category === '尚未分類') && !pendingTransition) {
     return { rejected: e2Rejected_(operationId, 'pending-transition-required') };
   }
   if (confirmed && (!category || category === '尚未分類')) {
