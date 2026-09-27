@@ -23,7 +23,7 @@ describe('E2 reviewed Personal operations', () => {
   it('serializes observation claims and discovers a durable outcome after cache expiry', async () => {
     const first = await post(harness, {
       action: 'command', operationId: 'claim-a', expectedRevisions: [],
-      contentDigest: 'digest-plan-0001', content: {
+      contentDigest: 'digest-plan-0001', content: { kind: 'record',
         claims: ['observation:one'],
         writes: [{ scope: 'records', id: 'event:a', data: { amount: '10', currency: 'TWD' } }],
       },
@@ -32,7 +32,7 @@ describe('E2 reviewed Personal operations', () => {
 
     const second = await post(harness, {
       action: 'command', operationId: 'claim-b', expectedRevisions: [],
-      contentDigest: 'digest-plan-0002', content: { claims: ['observation:one'] },
+      contentDigest: 'digest-plan-0002', content: { kind: 'record', claims: ['observation:one'] },
     }, 'claim-b-transport')
     expect(second).toMatchObject({ kind: 'conflict', reason: 'observation-already-claimed' })
 
@@ -43,7 +43,7 @@ describe('E2 reviewed Personal operations', () => {
 
     const changed = await post(harness, {
       action: 'command', operationId: 'claim-a', expectedRevisions: [],
-      contentDigest: 'digest-plan-changed', content: { claims: ['observation:one'] },
+      contentDigest: 'digest-plan-changed', content: { kind: 'record', claims: ['observation:one'] },
     }, 'claim-a-changed-transport')
     expect(changed).toMatchObject({ kind: 'conflict', reason: 'operation-id-reused-with-different-content' })
   })
@@ -65,9 +65,11 @@ describe('E2 reviewed Personal operations', () => {
       action: 'create_event_group', operationId: 'group-complete', group: {
         groupId: 'group-complete', legs: [
           { txnId: '00000000-0000-4000-8000-000000000901', date: '2026-07-27', type: '轉帳', debitAccount: '銀行', creditAccount: '現金', amount: '3200', currency: 'TWD' },
-          { txnId: '00000000-0000-4000-8000-000000000902', date: '2026-07-27', type: '費用', debitAccount: '餐飲', creditAccount: '現金', amount: '10', currency: 'TWD' },
+          { txnId: '00000000-0000-4000-8000-000000000902', feeId: 'fee-1', kind: 'fee', date: '2026-07-27', type: '費用', debitAccount: '餐飲', creditAccount: '現金', amount: '10', currency: 'TWD' },
           { txnId: '00000000-0000-4000-8000-000000000903', date: '2026-07-27', type: '轉帳', debitAccount: '現金', creditAccount: '銀行', amount: '100', currency: 'USD' },
         ],
+        conversion: { reference: 'fx:2026-07-27:twd-usd', clearingReference: 'clearing:group-complete' },
+        fees: [{ feeId: 'fee-1', amount: '10', currency: 'TWD' }],
         currencyTotals: [
           { currency: 'TWD', debit: '3210', credit: '3210' },
           { currency: 'USD', debit: '100', credit: '100' },
@@ -78,6 +80,8 @@ describe('E2 reviewed Personal operations', () => {
     const groups = await post(harness, { action: 'snapshot', scope: 'groups' }, 'group-snapshot')
     expect(groups.records).toEqual([expect.objectContaining({
       id: 'group-complete', status: 'complete', completion: { kind: 'complete', marker: expect.any(String) },
+      conversion: { reference: 'fx:2026-07-27:twd-usd', clearingReference: 'clearing:group-complete' },
+      fees: [{ feeId: 'fee-1', amount: '10', currency: 'TWD' }],
     })])
 
     harness.spreadsheet.getSheetByName('日記帳')!.failNextSetValues('simulated group leg failure')
@@ -133,7 +137,7 @@ describe('E2 reviewed Personal operations', () => {
     const journal = harness.spreadsheet.getSheetByName('日記帳')!
     journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
       '2026-07-27', '12:00', '支出', '餐飲', '現金', '10', 'TWD', '尚未分類',
-      '', 'pending', '', '', '00000000-0000-4000-8000-000000000904', 'integration', '2026-07-27T12:00:00+08:00',
+      '', 'pending', '', '', '00000000-0000-4000-8000-000000000904', 'import', '2026-07-27T12:00:00+08:00',
     ]])
     const before = journal.getRange(2, 1, 1, journalHeaders.length).getValues()[0]
     const refused = await post(harness, {
@@ -146,6 +150,7 @@ describe('E2 reviewed Personal operations', () => {
       action: 'confirm_event', operationId: 'confirm-category-only', txnId: '00000000-0000-4000-8000-000000000904', category: '餐飲', confirmed: false,
     }, 'confirm-category-only-transport')
     expect(pending).toMatchObject({ kind: 'committed' })
+    expect(journal.getRange(2, 1, 1, journalHeaders.length).getValues()[0]).toEqual(before)
     const pendingSnapshot = await post(harness, { action: 'snapshot', scope: 'events' }, 'confirm-pending-snapshot')
     expect(pendingSnapshot.records).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -155,9 +160,10 @@ describe('E2 reviewed Personal operations', () => {
       }),
     ]))
     const confirmed = await post(harness, {
-      action: 'confirm_event', operationId: 'confirm-ok', txnId: '00000000-0000-4000-8000-000000000904', category: '餐飲', confirmed: true,
+      action: 'confirm_event', operationId: 'confirm-ok', txnId: '00000000-0000-4000-8000-000000000904', confirmed: true,
     }, 'confirm-ok-transport')
     expect(confirmed).toMatchObject({ kind: 'committed' })
+    expect(journal.getRange(2, 1, 1, journalHeaders.length).getValues()[0]).toEqual(before)
     const confirmedSnapshot = await post(harness, { action: 'snapshot', scope: 'events' }, 'confirm-confirmed-snapshot')
     expect(confirmedSnapshot.records).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -170,23 +176,82 @@ describe('E2 reviewed Personal operations', () => {
 
   it('persists complete, pending and conflicting import steps across reads', async () => {
     const accepted = await post(harness, {
-      action: 'accept_import', operationId: 'manifest-op', manifest: {
+      action: 'accept_import', operationId: 'manifest-op', actor: 'verified-auth-user', manifest: {
         manifestId: 'manifest-1', sourceEvidence: ['evidence-1'],
       }, steps: [
         { stepId: 'one', disposition: 'create', state: 'completed', destinationId: 'event-1', destinationRevision: 'rev-1' },
         { stepId: 'two', disposition: 'create', state: 'pending' },
-        { stepId: 'three', disposition: 'link', state: 'conflicting' },
+        { stepId: 'three', disposition: 'link', state: 'conflicting', destinationId: 'event-3', destinationRevision: 'rev-3' },
       ],
     }, 'manifest-op-transport')
     expect(accepted).toMatchObject({ kind: 'committed' })
     const manifests = await post(harness, { action: 'snapshot', scope: 'manifests' }, 'manifest-snapshot')
     const steps = await post(harness, { action: 'snapshot', scope: 'steps' }, 'step-snapshot')
-    expect(manifests.records).toEqual([expect.objectContaining({ manifestId: 'manifest-1', status: 'accepted' })])
+    expect(manifests.records).toEqual([expect.objectContaining({ manifestId: 'manifest-1', status: 'accepted', actor: 'verified-auth-user' })])
     expect(steps.records).toEqual(expect.arrayContaining([
       expect.objectContaining({ stepId: 'one', state: 'completed', destination: { id: 'event-1', revision: 'rev-1' } }),
       expect.objectContaining({ stepId: 'two', state: 'pending' }),
       expect.objectContaining({ stepId: 'three', state: 'conflicting' }),
     ]))
+  })
+
+  it('preflights the whole import plan before writing any manifest or step', async () => {
+    const rejected = await post(harness, {
+      action: 'accept_import', operationId: 'manifest-invalid', manifest: {
+        manifestId: 'manifest-invalid', sourceEvidence: ['evidence-1'],
+      }, steps: [
+        { stepId: 'valid-first', disposition: 'create', state: 'completed', destinationId: 'event-1', destinationRevision: 'rev-1' },
+        { stepId: 'invalid-link', disposition: 'link', state: 'completed' },
+      ],
+    }, 'manifest-invalid-transport')
+    expect(rejected).toMatchObject({ kind: 'rejected', reason: 'plan-incomplete' })
+    expect((await post(harness, { action: 'snapshot', scope: 'manifests' }, 'manifest-invalid-snapshot')).records).toEqual([])
+    expect((await post(harness, { action: 'snapshot', scope: 'steps' }, 'step-invalid-snapshot')).records).toEqual([])
+  })
+
+  it('rejects an unsupported command kind without writing generic records', async () => {
+    const rejected = await post(harness, {
+      action: 'command', operationId: 'unsupported-command', expectedRevisions: [],
+      contentDigest: 'transport-digest', content: {
+        kind: 'unknown-command-kind',
+        writes: [{ scope: 'records', id: 'must-not-write', data: { value: 1 } }],
+      },
+    }, 'unsupported-command-transport')
+    expect(rejected).toMatchObject({ kind: 'rejected', reason: 'unsupported-command-kind' })
+    expect((await post(harness, { action: 'snapshot', scope: 'records' }, 'unsupported-command-snapshot')).records).toEqual([])
+  })
+
+  it('uses canonical content for operation conflicts even when the transport digest is forged', async () => {
+    const first = await post(harness, {
+      action: 'command', operationId: 'canonical-content-op', expectedRevisions: [],
+      contentDigest: 'same-forged-digest', content: {
+        kind: 'record', writes: [{ scope: 'records', id: 'canonical-record', data: { amount: '10' } }],
+      },
+    }, 'canonical-content-first')
+    expect(first).toMatchObject({ kind: 'committed' })
+    const changed = await post(harness, {
+      action: 'command', operationId: 'canonical-content-op', expectedRevisions: [],
+      contentDigest: 'same-forged-digest', content: {
+        kind: 'record', writes: [{ scope: 'records', id: 'canonical-record', data: { amount: '11' } }],
+      },
+    }, 'canonical-content-changed')
+    expect(changed).toMatchObject({ kind: 'conflict', reason: 'operation-id-reused-with-different-content' })
+  })
+
+  it('requires conversion evidence for mixed native currencies', async () => {
+    const rejected = await post(harness, {
+      action: 'create_event_group', operationId: 'group-missing-fx', group: {
+        groupId: 'group-missing-fx', legs: [
+          { txnId: '00000000-0000-4000-8000-000000000911', date: '2026-07-27', type: '轉帳', debitAccount: '銀行', creditAccount: '現金', amount: '3200', currency: 'TWD' },
+          { txnId: '00000000-0000-4000-8000-000000000912', date: '2026-07-27', type: '轉帳', debitAccount: '現金', creditAccount: '銀行', amount: '100', currency: 'USD' },
+        ],
+        currencyTotals: [
+          { currency: 'TWD', debit: '3200', credit: '3200' },
+          { currency: 'USD', debit: '100', credit: '100' },
+        ],
+      },
+    }, 'group-missing-fx-transport')
+    expect(rejected).toMatchObject({ kind: 'rejected', reason: 'group-conversion-evidence-required' })
   })
 
   it('posts the reviewed cutover difference and preserves the no-pre-cutover claim', async () => {
@@ -199,7 +264,11 @@ describe('E2 reviewed Personal operations', () => {
     const journal = harness.spreadsheet.getSheetByName('日記帳')!
     journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
       '2026-07-26', '12:00', '轉帳', '現金', '期初餘額', '2000', 'TWD', '',
-      '', 'represented history', '', '', '00000000-0000-4000-8000-000000000907', 'integration', '2026-07-26T12:00:00+08:00',
+      '', 'represented history', '', '', '00000000-0000-4000-8000-000000000907', 'import', '2026-07-26T12:00:00+08:00',
+    ]])
+    journal.getRange(3, 1, 1, journalHeaders.length).setValues([[
+      '2026-07-28', '12:00', '轉帳', '現金', '期初餘額', '9000', 'TWD', '',
+      '', 'future history excluded from cutoff', '', '', '00000000-0000-4000-8000-000000000913', 'import', '2026-07-28T12:00:00+08:00',
     ]])
     const adjustment = await post(harness, {
       action: 'opening_adjustment', operationId: 'opening-op', adjustment: {
@@ -209,7 +278,7 @@ describe('E2 reviewed Personal operations', () => {
     }, 'opening-op-transport')
     expect(adjustment).toMatchObject({ kind: 'committed' })
     const accounts = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'opening-snapshot')
-    expect(accounts.records).toContainEqual(expect.objectContaining({ name: '現金', balances: [{ amount: '10000', currency: 'TWD' }] }))
+    expect(accounts.records).toContainEqual(expect.objectContaining({ name: '現金', balances: [{ amount: '19000', currency: 'TWD' }] }))
     const checkpoints = await post(harness, { action: 'snapshot', scope: 'checkpoints' }, 'checkpoint-snapshot')
     expect(checkpoints.records).toContainEqual(expect.objectContaining({
       checkpointId: 'cutover-1', adjustment: { amount: '8000', currency: 'TWD', account: '現金' },
@@ -217,13 +286,48 @@ describe('E2 reviewed Personal operations', () => {
     }))
   })
 
+  it('resumes an opening adjustment after the checkpoint was durable but the journal write failed', async () => {
+    await post(harness, {
+      action: 'record_evidence', operationId: 'opening-resume-evidence', evidence: {
+        evidenceId: 'opening-resume-evidence-1', sourceReference: 'synthetic:resume', contentDigest: 'e'.repeat(64), effectiveDate: '2026-07-27',
+      },
+    }, 'opening-resume-evidence-transport')
+    const journal = harness.spreadsheet.getSheetByName('日記帳')!
+    journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
+      '2026-07-26', '12:00', '轉帳', '現金', '期初餘額', '2000', 'TWD', '',
+      '', 'represented history', '', '', '00000000-0000-4000-8000-000000000914', 'import', '2026-07-26T12:00:00+08:00',
+    ]])
+    journal.failNextSetValues('opening journal failure')
+    const adjustment = {
+      checkpointId: 'cutover-resume', account: '現金', currency: 'TWD', date: '2026-07-27',
+      representedBalance: '2000', acceptedBalance: '10000', evidenceIds: ['opening-resume-evidence-1'],
+      txnId: '00000000-0000-4000-8000-000000000915',
+    }
+    const first = await post(harness, { action: 'opening_adjustment', operationId: 'opening-resume-first', adjustment }, 'opening-resume-first-transport')
+    expect(first).toEqual({ kind: 'unknown', operationId: 'opening-resume-first', reason: 'write-outcome-unknown' })
+    expect((await post(harness, { action: 'snapshot', scope: 'checkpoints' }, 'opening-resume-pending-snapshot')).records).toContainEqual(expect.objectContaining({ checkpointId: 'cutover-resume', status: 'pending' }))
+    const resumed = await post(harness, { action: 'opening_adjustment', operationId: 'opening-resume-second', adjustment }, 'opening-resume-second-transport')
+    expect(resumed).toMatchObject({ kind: 'committed' })
+    const rows = journal.getRange(2, 1, journal.getLastRow() - 1, journalHeaders.length).getValues()
+    expect(rows.filter(row => row[12] === '00000000-0000-4000-8000-000000000915')).toHaveLength(1)
+    expect((await post(harness, { action: 'snapshot', scope: 'checkpoints' }, 'opening-resume-accepted-snapshot')).records).toContainEqual(expect.objectContaining({ checkpointId: 'cutover-resume', status: 'accepted' }))
+  })
+
   it('keeps corrections append-only and references the original row', async () => {
     const journal = harness.spreadsheet.getSheetByName('日記帳')!
     journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
       '2026-07-27', '12:00', '支出', '餐飲', '現金', '10', 'TWD', '餐飲',
-      '月球雜貨店', 'original', '', '', '00000000-0000-4000-8000-000000000908', 'integration', '2026-07-27T12:00:00+08:00',
+      '月球雜貨店', 'original', '', '', '00000000-0000-4000-8000-000000000908', 'import', '2026-07-27T12:00:00+08:00',
     ]])
     const original = journal.getRange(2, 1, 1, journalHeaders.length).getValues()[0]
+    const result = await post(harness, {
+      action: 'publish_result', operationId: 'correction-dependent-result', result: {
+        resultId: 'dependent-result', interval: { from: '2026-07-01', to: '2026-07-27' },
+        dependencies: [{ id: '00000000-0000-4000-8000-000000000908', revision: 'before-correction' }],
+        state: 'accepted', value: { total: '10' },
+      },
+    }, 'correction-dependent-result-transport')
+    expect(result).toMatchObject({ kind: 'committed' })
     const correction = await post(harness, {
       action: 'correct_event', operationId: 'correction-op', txnId: '00000000-0000-4000-8000-000000000908',
       reversalTxnId: '00000000-0000-4000-8000-000000000909', replacementTxnId: '00000000-0000-4000-8000-000000000910',
@@ -240,6 +344,30 @@ describe('E2 reviewed Personal operations', () => {
     expect(events.records).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: '00000000-0000-4000-8000-000000000908' }),
       expect.objectContaining({ id: '00000000-0000-4000-8000-000000000909', reversalTxnId: '00000000-0000-4000-8000-000000000908' }),
+    ]))
+
+    const retry = await post(harness, {
+      action: 'correct_event', operationId: 'correction-retry-op', txnId: '00000000-0000-4000-8000-000000000908',
+      reversalTxnId: '00000000-0000-4000-8000-000000000909', replacementTxnId: '00000000-0000-4000-8000-000000000910',
+      replacement: { debitAccount: '餐飲', creditAccount: '現金', amount: '12', currency: 'TWD', category: '餐飲' },
+    }, 'correction-retry-transport')
+    expect(retry).toMatchObject({ kind: 'committed', destinations: expect.arrayContaining([
+      expect.objectContaining({ id: '00000000-0000-4000-8000-000000000909' }),
+      expect.objectContaining({ id: '00000000-0000-4000-8000-000000000910' }),
+    ]) })
+    const rowsAfterRetry = journal.getRange(2, 1, journal.getLastRow() - 1, journalHeaders.length).getValues()
+    expect(rowsAfterRetry.filter(row => row[12] === '00000000-0000-4000-8000-000000000909')).toHaveLength(1)
+    expect(rowsAfterRetry.filter(row => row[12] === '00000000-0000-4000-8000-000000000910')).toHaveLength(1)
+
+    const changedRetry = await post(harness, {
+      action: 'correct_event', operationId: 'correction-changed-retry-op', txnId: '00000000-0000-4000-8000-000000000908',
+      reversalTxnId: '00000000-0000-4000-8000-000000000909', replacementTxnId: '00000000-0000-4000-8000-000000000910',
+      replacement: { debitAccount: '餐飲', creditAccount: '現金', amount: '13', currency: 'TWD', category: '餐飲' },
+    }, 'correction-changed-retry-transport')
+    expect(changedRetry).toMatchObject({ kind: 'conflict', reason: 'correction-id-reused-with-different-content' })
+    const resultSnapshot = await post(harness, { action: 'snapshot', scope: 'results' }, 'correction-results-snapshot')
+    expect(resultSnapshot.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resultId: 'dependent-result', state: 'invalidated' }),
     ]))
   })
 })

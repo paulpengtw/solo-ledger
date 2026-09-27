@@ -62,6 +62,16 @@ const ALLOWED = new Set([
   'check_consistency',
 ])
 
+const E2_WRITE_ACTIONS = new Set([
+  'command', 'adopt_identity',
+  'create_event_group', 'event_group', 'confirm_event', 'review_event',
+  'accept_import', 'import_manifest', 'resume_import', 'record_evidence',
+  'source_evidence', 'record_link', 'link_record', 'accept_checkpoint',
+  'checkpoint', 'set_versioned_setting', 'publish_result',
+  'opening_adjustment', 'cutover_adjustment', 'correct_event',
+  'append_correction',
+])
+
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -291,6 +301,15 @@ export async function handleAction(
       if (typeof body.operationId !== 'string' || body.operationId.trim() === '') return json(400, { ok: false, error: 'operationId is required' })
     }
     nonce = crypto.randomUUID()
+    if (E2_WRITE_ACTIONS.has(action)) {
+      // Never persist an actor supplied by the browser.  GAS receives the
+      // verified Pages Access principal (or the deterministic fixture
+      // fallback) on both the envelope and command content.
+      body.actor = auth.actor
+      if (action === 'command' && typeof body.content === 'object' && body.content !== null && !Array.isArray(body.content)) {
+        body.content = { ...(body.content as Record<string, unknown>), actor: auth.actor }
+      }
+    }
     payload = { action, ...body }
   } else {
     nonce = crypto.randomUUID()

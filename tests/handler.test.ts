@@ -540,6 +540,7 @@ describe('handleAction', () => {
         contractVersion: CONTRACT_VERSION,
         action: 'create_event_group',
         operationId: 'group-route-1',
+        actor: `access-exp:${NOW + 86_400}`,
         group: { groupId: 'group-route-1', legs: [] },
       })
       return new Response('{"kind":"rejected","reason":"group-legs-required"}', { status: 200 })
@@ -547,7 +548,7 @@ describe('handleAction', () => {
 
     const response = await handleAction(
       'create_event_group',
-      req({ operationId: 'group-route-1', group: { groupId: 'group-route-1', legs: [] } }),
+      req({ actor: 'forged-caller', operationId: 'group-route-1', group: { groupId: 'group-route-1', legs: [] } }),
       env,
       deps(fetchFn),
     )

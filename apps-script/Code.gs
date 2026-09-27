@@ -1577,6 +1577,9 @@ function snapshotRevision_(source) {
 }
 
 function snapshotAccountRecords_(source, revision) {
+  if (revision === undefined) {
+    revision = snapshotRevision_(source);
+  }
   var columns = source.accountColumns;
   var accounts = [];
   for (var index = 0; index < source.vocabularyRows.length; index += 1) {
@@ -1781,6 +1784,34 @@ function applySnapshotBalanceRow_(account, row) {
     if (debit) balance = addDecimalStrings_(balance, negateDecimal_(amount));
   }
   account.balanceByCurrency[currency] = balance;
+}
+
+function accountBalanceThroughCutoff_(source, accountName, currency, cutoff) {
+  var columns = source.accountColumns;
+  var account = null;
+  for (var accountIndex = 0; accountIndex < source.vocabularyRows.length; accountIndex += 1) {
+    var vocabularyRow = source.vocabularyRows[accountIndex];
+    var cells = vocabularyRow.cells;
+    var name = String(cells[columns['名稱'] - 1] || '').trim();
+    var aliases = vocabularyRow.aliases || [];
+    var type = String(cells[columns['類型'] - 1] || '').trim();
+    if ((name === accountName || aliases.indexOf(accountName) !== -1 || vocabularyRow.stableId === accountName) &&
+        (type === '資產' || type === '負債')) {
+      account = { name: name, aliases: aliases, type: type, balanceByCurrency: Object.create(null) };
+      break;
+    }
+  }
+  if (!account) return '0';
+  for (var rowIndex = 0; rowIndex < source.journalRows.length; rowIndex += 1) {
+    var row = source.journalRows[rowIndex];
+    var date = String(row.values['日期'] || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date > cutoff) continue;
+    var rowTxnId = String(row.values.txn_id || '').trim();
+    var rowGroup = source.groupByTxnId && source.groupByTxnId[rowTxnId];
+    if (rowGroup && rowGroup.status !== 'complete') continue;
+    applySnapshotBalanceRow_(account, row);
+  }
+  return account.balanceByCurrency[currency] || '0';
 }
 
 function accountNameMatches_(account, value) {
@@ -4352,7 +4383,10 @@ function e2ContentDigest_(payload, content) {
   if (supplied && (supplied.length > 256 || !/^[A-Za-z0-9._:-]+$/.test(supplied))) {
     throw new Error('contentDigest is invalid');
   }
-  return supplied || e2Digest_(content);
+  // The transport digest is only a bounded compatibility field.  Idempotency
+  // and replay comparisons must be based on the content GAS actually sees so
+  // a caller cannot reuse an operation id by forging the same digest.
+  return e2Digest_(content);
 }
 
 function e2OperationRow_(spreadsheet, operationId) {
@@ -4431,7 +4465,7 @@ function e2Rejected_(operationId, reason, detail) {
 function e2CurrentRevision_(spreadsheet, id) {
   var source = readSnapshotSource_(spreadsheet);
   var scopes = [
-    snapshotAccountRecords_(source, 'unneeded'),
+    snapshotAccountRecords_(source),
     snapshotEventRecords_(source),
     snapshotObservationRecords_(source),
   ];
@@ -4669,6 +4703,13 @@ function e2RecordForTableRow_(tableName, values, sheetRow, spreadsheet) {
       : { kind: 'incomplete', marker: values.completion_marker || null };
     record.currencyTotals = e2ParseJson_(values.currency_totals_json, []);
     record.legs = legs;
+    var groupEvidence = e2LatestRecord_(spreadsheet, 'event-group-evidence', values.group_id);
+    if (groupEvidence) {
+      record.evidence = e2ParseJson_(groupEvidence.values.data_json, {});
+      record.conversion = record.evidence.conversion || null;
+      record.fees = record.evidence.fees || [];
+      record.actor = record.evidence.actor || '';
+    }
     record.contentDigest = values.content_digest;
     return record;
   }
@@ -4732,7 +4773,17 @@ function e2RecordForTableRow_(tableName, values, sheetRow, spreadsheet) {
     record.scopeVersion = values.scope_version;
     record.representedBalances = e2ParseJson_(values.represented_balances_json, {});
     record.acceptedBalances = e2ParseJson_(values.accepted_balances_json, {});
-    record.adjustment = e2ParseJson_(values.adjustment_json, null);
+    var storedAdjustment = e2ParseJson_(values.adjustment_json, null);
+    if (storedAdjustment && typeof storedAdjustment === 'object' && !Array.isArray(storedAdjustment)) {
+      record.adjustment = {};
+      for (var adjustmentKey in storedAdjustment) {
+        if (Object.prototype.hasOwnProperty.call(storedAdjustment, adjustmentKey) && adjustmentKey !== 'txnId') {
+          record.adjustment[adjustmentKey] = storedAdjustment[adjustmentKey];
+        }
+      }
+    } else {
+      record.adjustment = storedAdjustment;
+    }
     record.evidenceIds = e2ParseJson_(values.evidence_ids_json, []);
     record.coverage = e2ParseJson_(values.coverage_json, {});
     record.status = values.status;
@@ -4854,8 +4905,12 @@ function command_(payload, nonce) {
         execution = e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content);
       } else if (kind === 'correction') {
         execution = e2ExecuteCorrection_(spreadsheet, operationId, digest, content);
-      } else {
+      } else if (kind === 'record') {
+        // Explicitly scoped compatibility records are the only generic write
+        // surface.  Unknown command kinds must never become arbitrary rows.
         execution = e2ExecuteGenericWrites_(spreadsheet, operationId, content);
+      } else {
+        execution = { rejected: e2Rejected_(operationId, 'unsupported-command-kind') };
       }
     } catch (error) {
       var unknown = {
@@ -4906,7 +4961,12 @@ function createEventGroup_(payload, nonce) {
     completionMarker: group.completionMarker || group.completion_marker,
     legs: group.legs || group.entries || [],
     currencyTotals: group.currencyTotals || group.currency_totals,
-    source: group.source || 'integration',
+    conversion: group.conversion || group.fx || group.exchange,
+    fees: group.fees || group.feeMetadata || group.fee_metadata,
+    conversionReference: group.conversionReference || group.conversion_reference || group.fxReference || group.fx_reference,
+    clearingReference: group.clearingReference || group.clearing_reference || group.clearingLink || group.clearing_link,
+    actor: payload.actor || group.actor || '',
+    source: group.source || 'import',
   };
   return command_({
     operationId: operationId,
@@ -4936,13 +4996,26 @@ function confirmEvent_(payload, nonce) {
   }, nonce);
 }
 
+function e2PayloadContent_(payload) {
+  var content = {};
+  var excluded = {
+    action: true, operationId: true, operation_id: true,
+    expectedRevisions: true, expectedRevision: true, expectedSnapshotRevision: true,
+    contentDigest: true, contractVersion: true, actor: true,
+  };
+  for (var key in (payload || {})) {
+    if (Object.prototype.hasOwnProperty.call(payload, key) && !excluded[key]) content[key] = payload[key];
+  }
+  return content;
+}
+
 function acceptImport_(payload, nonce) {
   return command_({
     operationId: e2OperationId_(payload, nonce),
     expectedRevisions: e2ExpectedRevisions_(payload, payload.manifestId || ''),
     contentDigest: payload.contentDigest,
     content: {
-      kind: 'manifest', manifest: payload.manifest || payload,
+      kind: 'manifest', manifest: payload.manifest || e2PayloadContent_(payload),
       steps: payload.steps || (payload.manifest && payload.manifest.steps) || [],
       actor: payload.actor || '',
     },
@@ -4967,7 +5040,7 @@ function recordEvidence_(payload, nonce) {
   return command_({
     operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.evidenceId || ''),
     contentDigest: payload.contentDigest,
-    content: { kind: 'evidence', evidence: payload.evidence || payload },
+    content: { kind: 'evidence', evidence: payload.evidence || e2PayloadContent_(payload) },
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -4976,7 +5049,7 @@ function recordLink_(payload, nonce) {
   return command_({
     operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.linkId || ''),
     contentDigest: payload.contentDigest,
-    content: { kind: 'link', link: payload.link || payload },
+    content: { kind: 'link', link: payload.link || e2PayloadContent_(payload) },
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -4985,7 +5058,7 @@ function acceptCheckpoint_(payload, nonce) {
   return command_({
     operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.checkpointId || ''),
     contentDigest: payload.contentDigest,
-    content: { kind: 'checkpoint', checkpoint: payload.checkpoint || payload },
+    content: { kind: 'checkpoint', checkpoint: payload.checkpoint || e2PayloadContent_(payload) },
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -4994,7 +5067,7 @@ function setVersionedSetting_(payload, nonce) {
   return command_({
     operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.settingId || ''),
     contentDigest: payload.contentDigest,
-    content: { kind: 'setting', setting: payload.setting || payload },
+    content: { kind: 'setting', setting: payload.setting || e2PayloadContent_(payload) },
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -5003,7 +5076,7 @@ function publishResult_(payload, nonce) {
   return command_({
     operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.resultId || ''),
     contentDigest: payload.contentDigest,
-    content: { kind: 'result', result: payload.result || payload },
+    content: { kind: 'result', result: payload.result || e2PayloadContent_(payload) },
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -5012,7 +5085,7 @@ function openingAdjustment_(payload, nonce) {
   return command_({
     operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.checkpointId || ''),
     contentDigest: payload.contentDigest,
-    content: { kind: 'opening-adjustment', adjustment: payload.adjustment || payload },
+    content: { kind: 'opening-adjustment', adjustment: payload.adjustment || e2PayloadContent_(payload) },
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -5021,7 +5094,7 @@ function correctEvent_(payload, nonce) {
   return command_({
     operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, String(payload.txnId || payload.txn_id || '')),
     contentDigest: payload.contentDigest,
-    content: { kind: 'correction', correction: payload.correction || payload },
+    content: { kind: 'correction', correction: payload.correction || e2PayloadContent_(payload) },
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -5051,6 +5124,9 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
   var byCurrency = Object.create(null);
   var postings = [];
   var vocabulary = readAccountVocabulary_(spreadsheet);
+  var nativeCurrencies = Object.create(null);
+  var feeLegIds = Object.create(null);
+  var feeLegRecords = [];
   for (var index = 0; index < legs.length; index += 1) {
     var leg = legs[index];
     if (!leg || typeof leg !== 'object') {
@@ -5064,8 +5140,36 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
       return { rejected: e2Rejected_(operationId, 'group-amount-must-be-positive') };
     }
     var currency = String(leg.currency || '').trim();
-    if (!/^[A-Z]{3}$/.test(currency)) {
+    var debitCurrency = String(leg.debitCurrency || leg.debit_currency || currency).trim();
+    var creditCurrency = String(leg.creditCurrency || leg.credit_currency || currency).trim();
+    if (!currency) currency = debitCurrency || creditCurrency;
+    if (!/^[A-Z]{3}$/.test(currency) || !/^[A-Z]{3}$/.test(debitCurrency) || !/^[A-Z]{3}$/.test(creditCurrency)) {
       return { rejected: e2Rejected_(operationId, 'group-currency-invalid') };
+    }
+    nativeCurrencies[debitCurrency] = true;
+    nativeCurrencies[creditCurrency] = true;
+    var debitAmount;
+    var creditAmount;
+    try {
+      debitAmount = canonicalDecimal_(
+        Object.prototype.hasOwnProperty.call(leg, 'debitAmount') ? leg.debitAmount : amount,
+        index + 1,
+      );
+      creditAmount = canonicalDecimal_(
+        Object.prototype.hasOwnProperty.call(leg, 'creditAmount') ? leg.creditAmount : amount,
+        index + 1,
+      );
+    } catch (error) {
+      return { rejected: e2Rejected_(operationId, 'group-currency-total-invalid') };
+    }
+    if (debitAmount.charAt(0) === '-' || creditAmount.charAt(0) === '-') {
+      return { rejected: e2Rejected_(operationId, 'group-currency-total-invalid') };
+    }
+    if (leg.feeId || leg.fee_id || String(leg.kind || '').toLowerCase() === 'fee' || leg.isFee === true) {
+      var feeId = String(leg.feeId || leg.fee_id || '').trim();
+      var feeRecord = { id: feeId, amount: amount, currency: currency, txnId: txnId };
+      feeLegRecords.push(feeRecord);
+      if (feeId) feeLegIds[feeId] = feeRecord;
     }
     var debit = String(leg.debitAccount || leg.debit_account || '').trim();
     var credit = String(leg.creditAccount || leg.credit_account || '').trim();
@@ -5073,6 +5177,12 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
     if (debit || credit) {
       if (!debit || !credit || debit === credit) {
         return { rejected: e2Rejected_(operationId, 'group-posting-legs-invalid') };
+      }
+      // A journal row has one native currency.  Cross-currency movements must
+      // be represented by separate native legs (or metadata-only legs), never
+      // by forcing one amount/currency onto both sides of a row.
+      if (debitCurrency !== creditCurrency) {
+        return { rejected: e2Rejected_(operationId, 'group-native-leg-currency-mismatch') };
       }
       try {
         validateOptionalVocabulary_(debit, 'debit account', vocabulary, null);
@@ -5084,29 +5194,82 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
         date: leg.date || content.date || taipeiIsoNow_().slice(0, 10),
         time: leg.time || '', type: leg.type || content.type || '複合',
         debitAccount: debit, creditAccount: credit, amount: amount,
-        currency: currency,
+        currency: debitCurrency,
         category: leg.category || nominalLeg_(debit, credit, vocabulary.accountTypes),
         payee: leg.payee || leg.counterparty || '',
         description: leg.description || content.description || '',
         settlementStatus: leg.settlementStatus || '', reversalTxnId: leg.reversalTxnId || '',
-        txnId: txnId, source: leg.source || content.source || 'integration', now: taipeiIsoNow_(),
+        txnId: txnId, source: leg.source || content.source || 'import', now: taipeiIsoNow_(),
       });
-      postings.push({ posting: posting, txnId: txnId, amount: amount, currency: currency });
+      postings.push({ posting: posting, txnId: txnId, amount: amount, currency: debitCurrency,
+        debitCurrency: debitCurrency, creditCurrency: creditCurrency,
+        debitAmount: debitAmount, creditAmount: creditAmount });
     } else {
       // A metadata-only leg is allowed for a clearing representation that is
       // posted by another book. It still participates in per-currency proof.
-      postings.push({ posting: null, txnId: txnId, amount: amount, currency: currency });
+      postings.push({ posting: null, txnId: txnId, amount: amount, currency: currency,
+        debitCurrency: debitCurrency, creditCurrency: creditCurrency,
+        debitAmount: debitAmount, creditAmount: creditAmount });
     }
-    if (!byCurrency[currency]) byCurrency[currency] = { currency: currency, debit: '0', credit: '0' };
-    // A journal leg is itself a balanced pair. Abstract legs may provide
-    // explicit debit/credit amounts; otherwise its amount balances both sides.
-    var debitAmount = Object.prototype.hasOwnProperty.call(leg, 'debitAmount') ? leg.debitAmount : amount;
-    var creditAmount = Object.prototype.hasOwnProperty.call(leg, 'creditAmount') ? leg.creditAmount : amount;
-    try {
-      byCurrency[currency].debit = addDecimalStrings_(byCurrency[currency].debit, canonicalDecimal_(debitAmount, index + 1));
-      byCurrency[currency].credit = addDecimalStrings_(byCurrency[currency].credit, canonicalDecimal_(creditAmount, index + 1));
-    } catch (error) {
-      return { rejected: e2Rejected_(operationId, 'group-currency-total-invalid') };
+    if (!byCurrency[debitCurrency]) byCurrency[debitCurrency] = { currency: debitCurrency, debit: '0', credit: '0' };
+    if (!byCurrency[creditCurrency]) byCurrency[creditCurrency] = { currency: creditCurrency, debit: '0', credit: '0' };
+    byCurrency[debitCurrency].debit = addDecimalStrings_(byCurrency[debitCurrency].debit, debitAmount);
+    byCurrency[creditCurrency].credit = addDecimalStrings_(byCurrency[creditCurrency].credit, creditAmount);
+  }
+  var nativeCurrencyList = Object.keys(nativeCurrencies);
+  if (nativeCurrencyList.length > 1) {
+    var conversion = content.conversion || content.fx || content.exchange || {};
+    var conversionReference = String(
+      (conversion && (conversion.reference || conversion.id || conversion.link || conversion.conversionReference || conversion.conversion_reference))
+      || content.conversionReference || content.conversion_reference || content.fxReference || content.fx_reference || '',
+    ).trim();
+    var clearingReference = String(
+      (conversion && (conversion.clearingReference || conversion.clearing_reference || conversion.clearingLink || conversion.clearing_link))
+      || content.clearingReference || content.clearing_reference || content.clearingLink || content.clearing_link || '',
+    ).trim();
+    if (!conversionReference || !clearingReference) {
+      for (var referenceLegIndex = 0; referenceLegIndex < legs.length; referenceLegIndex += 1) {
+        var referenceLeg = legs[referenceLegIndex] || {};
+        if (!conversionReference) {
+          conversionReference = String(referenceLeg.conversionReference || referenceLeg.conversion_reference || referenceLeg.fxReference || referenceLeg.fx_reference || '').trim();
+        }
+        if (!clearingReference) {
+          clearingReference = String(referenceLeg.clearingReference || referenceLeg.clearing_reference || referenceLeg.clearingLink || referenceLeg.clearing_link || '').trim();
+        }
+        if (conversionReference && clearingReference) break;
+      }
+    }
+    if (!conversionReference && !clearingReference) {
+      return { rejected: e2Rejected_(operationId, 'group-conversion-evidence-required') };
+    }
+  }
+  var feeMetadata = content.fees || content.feeMetadata || content.fee_metadata || [];
+  if (feeMetadata && !Array.isArray(feeMetadata)) {
+    return { rejected: e2Rejected_(operationId, 'group-fee-metadata-invalid') };
+  }
+  for (var feeIndex = 0; feeIndex < (feeMetadata || []).length; feeIndex += 1) {
+    var fee = feeMetadata[feeIndex];
+    if (!fee || typeof fee !== 'object') {
+      return { rejected: e2Rejected_(operationId, 'group-fee-metadata-invalid') };
+    }
+    var feeAmount;
+    var feeCurrency = String(fee.currency || '').trim();
+    try { feeAmount = canonicalDecimal_(fee.amount, feeIndex + 1); } catch (error) { feeAmount = ''; }
+    if (!feeCurrency || !/^[A-Z]{3}$/.test(feeCurrency) || !feeAmount || feeAmount === '0' || feeAmount.charAt(0) === '-') {
+      return { rejected: e2Rejected_(operationId, 'group-fee-metadata-invalid') };
+    }
+    var feeIdValue = String(fee.feeId || fee.fee_id || fee.id).trim();
+    var feeLeg = feeLegIds[feeIdValue];
+    if (!feeLeg && !feeIdValue) {
+      for (var feeLegIndex = 0; feeLegIndex < feeLegRecords.length; feeLegIndex += 1) {
+        if (feeLegRecords[feeLegIndex].amount === feeAmount && feeLegRecords[feeLegIndex].currency === feeCurrency) {
+          feeLeg = feeLegRecords[feeLegIndex];
+          break;
+        }
+      }
+    }
+    if (!feeLeg || feeLeg.amount !== feeAmount || feeLeg.currency !== feeCurrency) {
+      return { rejected: e2Rejected_(operationId, 'group-fee-leg-missing') };
     }
   }
   var declared = content.currencyTotals;
@@ -5163,6 +5326,12 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
       return { rejected: e2Rejected_(operationId, 'group-currency-total-mismatch', actualCurrency) };
     }
   }
+  var declaredCurrencyList = Object.keys(declaredByCurrency);
+  for (var declaredCurrencyIndex = 0; declaredCurrencyIndex < declaredCurrencyList.length; declaredCurrencyIndex += 1) {
+    if (!byCurrency[declaredCurrencyList[declaredCurrencyIndex]]) {
+      return { rejected: e2Rejected_(operationId, 'group-currency-total-mismatch', declaredCurrencyList[declaredCurrencyIndex]) };
+    }
+  }
   var existingGroups = e2Rows_(spreadsheet, '事件群組');
   var existingGroup = null;
   for (var existingIndex = existingGroups.length - 1; existingIndex >= 0; existingIndex -= 1) {
@@ -5215,13 +5384,13 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
       group_id: groupId, status: 'incomplete', currency_totals_json: e2Json_(currencyTotals),
       completion_marker: '', content_digest: digest,
       created_at: existingGroup.values.created_at || now, updated_at: now,
-      source: content.source || 'integration',
+      source: content.source || 'import',
     });
   } else {
     groupSheetRow = e2Append_(spreadsheet, '事件群組', {
       group_id: groupId, status: 'incomplete', currency_totals_json: e2Json_(currencyTotals),
       completion_marker: '', content_digest: digest, created_at: now, updated_at: now,
-      source: content.source || 'integration',
+      source: content.source || 'import',
     });
   }
   var destinations = [];
@@ -5281,15 +5450,34 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
       content_digest: digest,
       created_at: existingGroup && existingGroup.values.created_at ? existingGroup.values.created_at : now,
       updated_at: taipeiIsoNow_(),
-      source: content.source || 'integration',
+      source: content.source || 'import',
     });
+    var groupEvidenceId = groupId;
+    var existingGroupEvidence = e2LatestRecord_(spreadsheet, 'event-group-evidence', groupEvidenceId);
+    if (!existingGroupEvidence && (content.actor || content.conversion || content.fx || content.exchange || content.fees || content.feeMetadata || content.fee_metadata ||
+        content.conversionReference || content.conversion_reference || content.fxReference || content.fx_reference ||
+        content.clearingReference || content.clearing_reference || content.clearingLink || content.clearing_link)) {
+      var groupEvidenceData = {
+        groupId: groupId,
+        actor: content.actor || '',
+        conversion: content.conversion || content.fx || content.exchange || null,
+        conversionReference: content.conversionReference || content.conversion_reference || content.fxReference || content.fx_reference || '',
+        clearingReference: content.clearingReference || content.clearing_reference || content.clearingLink || content.clearing_link || '',
+        fees: content.fees || content.feeMetadata || content.fee_metadata || [],
+      };
+      e2Append_(spreadsheet, '整合記錄', {
+        scope: 'event-group-evidence', record_id: groupEvidenceId,
+        revision: e2Digest_(groupEvidenceData), data_json: e2Json_(groupEvidenceData),
+        created_at: taipeiIsoNow_(),
+      });
+    }
   } catch (error) {
     if (groupSheetRow) {
       e2Set_(spreadsheet, '事件群組', groupSheetRow, {
         group_id: groupId, status: 'incomplete', currency_totals_json: e2Json_(currencyTotals),
         completion_marker: '', content_digest: digest,
         created_at: existingGroup && existingGroup.values.created_at ? existingGroup.values.created_at : now,
-        updated_at: taipeiIsoNow_(), source: content.source || 'integration',
+        updated_at: taipeiIsoNow_(), source: content.source || 'import',
       });
     }
     throw error;
@@ -5311,12 +5499,16 @@ function e2ExecuteConfirmation_(spreadsheet, operationId, digest, content) {
     }
   }
   if (!target) return { rejected: e2Rejected_(operationId, 'unknown-txn-id') };
-  var category = Object.prototype.hasOwnProperty.call(content, 'category') && content.category !== undefined
+  var categoryProvided = Object.prototype.hasOwnProperty.call(content, 'category') && content.category !== undefined;
+  var category = categoryProvided
     ? String(content.category || '').trim()
     : String(target.values['分類'] || '').trim();
   var confirmed = content.confirmed === true;
   var pendingTransition = content.pendingTransition === true;
   var priorReview = source.reviewByTxnId && source.reviewByTxnId[txnId];
+  if (!categoryProvided && priorReview && priorReview.category) {
+    category = String(priorReview.category).trim();
+  }
   if (priorReview && priorReview.reviewState === 'confirmed' && category === '尚未分類' && !pendingTransition) {
     return { rejected: e2Rejected_(operationId, 'pending-transition-required') };
   }
@@ -5333,13 +5525,9 @@ function e2ExecuteConfirmation_(spreadsheet, operationId, digest, content) {
        (vocabulary.accountTypes[category] !== '支出' && vocabulary.accountTypes[category] !== '收入'))) {
     return { rejected: e2Rejected_(operationId, 'confirmation-category-invalid') };
   }
-  var journal = requiredSheet_(spreadsheet, '日記帳');
-  var columns = resolveHeaders_(
-    journal.getRange(1, 1, 1, journal.getLastColumn()).getDisplayValues()[0],
-    JOURNAL_HEADERS,
-  );
-  // All resulting-state checks occur before this first mutation.
-  journal.getRange(target.sheetRow, columns['分類']).setValues([[category]]);
+  // Confirmation is an append-only review decision.  The original journal
+  // row is evidence and must remain byte-for-byte unchanged; snapshots layer
+  // the latest E2 review metadata over it to expose resulting state.
   var reviewRevision = e2Digest_({ txnId: txnId, category: category, state: confirmed ? 'confirmed' : 'pending', operationId: operationId });
   e2Append_(spreadsheet, '事件審核', {
     txn_id: txnId, category: category, review_state: confirmed ? 'confirmed' : 'pending',
@@ -5374,18 +5562,127 @@ function e2ExecuteManifest_(spreadsheet, operationId, digest, content) {
   if (!Array.isArray(steps) || steps.length === 0) {
     return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'steps are required') };
   }
+  var sourceEvidence = manifest.sourceEvidence || manifest.source_evidence;
+  if (!Array.isArray(sourceEvidence) || sourceEvidence.length === 0) {
+    return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'source evidence is required') };
+  }
+  var seenEvidenceIds = Object.create(null);
+  for (var evidenceIdIndex = 0; evidenceIdIndex < sourceEvidence.length; evidenceIdIndex += 1) {
+    if (typeof sourceEvidence[evidenceIdIndex] !== 'string') {
+      return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'source evidence ids must be strings') };
+    }
+    var sourceEvidenceId = String(sourceEvidence[evidenceIdIndex] || '').trim();
+    if (!sourceEvidenceId || seenEvidenceIds[sourceEvidenceId]) {
+      return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'source evidence ids must be unique and nonblank') };
+    }
+    seenEvidenceIds[sourceEvidenceId] = true;
+  }
+  var seenStepIds = Object.create(null);
+  var seenPlanClaims = Object.create(null);
+  var manifestClaims = content.claims || manifest.claims;
+  if (manifestClaims !== undefined && !Array.isArray(manifestClaims)) {
+    return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'claims must be an array') };
+  }
+  for (var manifestClaimIndex = 0; manifestClaimIndex < (manifestClaims || []).length; manifestClaimIndex += 1) {
+    var manifestClaimId = String(manifestClaims[manifestClaimIndex] || '').trim();
+    if (!manifestClaimId || seenPlanClaims[manifestClaimId]) {
+      return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'claims must be unique and nonblank') };
+    }
+    seenPlanClaims[manifestClaimId] = true;
+  }
+  var planExpectedRevisions = content.planExpectedRevisions || content.expectedRevisions
+    || manifest.expectedRevisions || manifest.expected_revisions;
+  if (planExpectedRevisions !== undefined) {
+    if (!Array.isArray(planExpectedRevisions)) {
+      return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'expected revisions must be an array') };
+    }
+    var seenExpectedRevisionIds = Object.create(null);
+    var normalizedPlanExpectedRevisions = [];
+    for (var planRevisionIndex = 0; planRevisionIndex < planExpectedRevisions.length; planRevisionIndex += 1) {
+      var expectedRevision = planExpectedRevisions[planRevisionIndex];
+      var expectedRevisionId = String(expectedRevision && (expectedRevision.id || expectedRevision.recordId || expectedRevision.record_id) || '').trim();
+      var expectedRevisionValue = String(expectedRevision && (expectedRevision.revision || expectedRevision.expectedRevision || expectedRevision.expected_revision) || '').trim();
+      if (!expectedRevisionId || !expectedRevisionValue || seenExpectedRevisionIds[expectedRevisionId]) {
+        return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'expected revisions are invalid') };
+      }
+      seenExpectedRevisionIds[expectedRevisionId] = true;
+      normalizedPlanExpectedRevisions.push({ id: expectedRevisionId, revision: expectedRevisionValue });
+    }
+    var planRevisionConflicts = e2CheckExpectedRevisions_(spreadsheet, normalizedPlanExpectedRevisions);
+    if (planRevisionConflicts.length > 0) {
+      return { conflict: e2Conflict_(operationId, 'stale-expected-revision', planRevisionConflicts) };
+    }
+  }
   for (var index = 0; index < steps.length; index += 1) {
     var step = steps[index];
     if (!step || typeof step !== 'object' || !String(step.stepId || step.step_id || step.id || '').trim()) {
       return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'every step needs an id') };
     }
+    var stepId = String(step.stepId || step.step_id || step.id).trim();
+    if (seenStepIds[stepId]) {
+      return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'step ids must be unique') };
+    }
+    seenStepIds[stepId] = true;
     var disposition = String(step.disposition || step.action || '').trim();
     var state = String(step.state || step.status || '').trim();
-    if (!disposition && !state) {
-      return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'every step needs a disposition') };
+    if (!disposition || !state) {
+      return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'every step needs a disposition and state') };
     }
-    if (disposition && ['create', 'link', 'already-imported', 'skip'].indexOf(disposition) === -1) {
+    if (['create', 'link', 'already-imported', 'skip'].indexOf(disposition) === -1) {
       return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'unsupported step disposition') };
+    }
+    if (['pending', 'completed', 'conflicted', 'conflicting', 'rejected', 'unknown', 'skipped'].indexOf(state) === -1) {
+      return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'unsupported step state') };
+    }
+    var destinationId = String(step.destinationId || step.destination_id || '').trim();
+    var destinationRevision = String(step.destinationRevision || step.destination_revision || '').trim();
+    if ((disposition === 'link' || disposition === 'already-imported' || state === 'completed') &&
+        (!destinationId || !destinationRevision)) {
+      return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'destination identity is required') };
+    }
+    if (disposition === 'skip' && !String(step.reason || (step.result && step.result.reason) || '').trim()) {
+      return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'skipped steps need a reason') };
+    }
+    var stepClaim = String(step.claimId || step.claim_id || step.observationId || step.observation_id || '').trim();
+    if (stepClaim) {
+      if (seenPlanClaims[stepClaim]) {
+        return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'claims must be unique and nonblank') };
+      }
+      seenPlanClaims[stepClaim] = true;
+    }
+    if (step.claims !== undefined) {
+      if (!Array.isArray(step.claims)) {
+        return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'step claims must be an array') };
+      }
+      for (var stepClaimIndex = 0; stepClaimIndex < step.claims.length; stepClaimIndex += 1) {
+        var stepClaimId = String(step.claims[stepClaimIndex] || '').trim();
+        if (!stepClaimId || seenPlanClaims[stepClaimId]) {
+          return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'claims must be unique and nonblank') };
+        }
+        seenPlanClaims[stepClaimId] = true;
+      }
+    }
+    var stepExpectedRevisions = step.expectedRevisions || step.expected_revisions;
+    if (stepExpectedRevisions !== undefined) {
+      if (!Array.isArray(stepExpectedRevisions)) {
+        return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'step expected revisions are invalid') };
+      }
+      var seenStepRevisionIds = Object.create(null);
+      var normalizedStepExpectedRevisions = [];
+      for (var stepRevisionIndex = 0; stepRevisionIndex < stepExpectedRevisions.length; stepRevisionIndex += 1) {
+        var stepExpectedRevision = stepExpectedRevisions[stepRevisionIndex];
+        var stepExpectedId = String(stepExpectedRevision && (stepExpectedRevision.id || stepExpectedRevision.recordId || stepExpectedRevision.record_id) || '').trim();
+        var stepExpectedValue = String(stepExpectedRevision && (stepExpectedRevision.revision || stepExpectedRevision.expectedRevision || stepExpectedRevision.expected_revision) || '').trim();
+        if (!stepExpectedId || !stepExpectedValue || seenStepRevisionIds[stepExpectedId]) {
+          return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'step expected revisions are invalid') };
+        }
+        seenStepRevisionIds[stepExpectedId] = true;
+        normalizedStepExpectedRevisions.push({ id: stepExpectedId, revision: stepExpectedValue });
+      }
+      var stepRevisionConflicts = e2CheckExpectedRevisions_(spreadsheet, normalizedStepExpectedRevisions);
+      if (stepRevisionConflicts.length > 0) {
+        return { conflict: e2Conflict_(operationId, 'stale-expected-revision', stepRevisionConflicts) };
+      }
     }
   }
   var existingRows = e2Rows_(spreadsheet, '匯入清單');
@@ -5420,7 +5717,9 @@ function e2ExecuteManifest_(spreadsheet, operationId, digest, content) {
     var stepId = String(candidate.stepId || candidate.step_id || candidate.id).trim();
     var stepDigest = String(candidate.contentDigest || '').trim() || e2Digest_(candidate);
     var stepState = String(candidate.state || candidate.status || '').trim() || 'pending';
-    if (['pending', 'completed', 'conflicted', 'conflicting', 'rejected', 'unknown', 'skipped'].indexOf(stepState) === -1) stepState = 'pending';
+    if (['pending', 'completed', 'conflicted', 'conflicting', 'rejected', 'unknown', 'skipped'].indexOf(stepState) === -1) {
+      return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'unsupported step state') };
+    }
     var destinationId = String(candidate.destinationId || candidate.destination_id || '').trim();
     var destinationRevision = String(candidate.destinationRevision || candidate.destination_revision || '').trim();
     var stepRevision = e2Digest_({ manifestId: manifestId, stepId: stepId, digest: stepDigest, state: stepState });
@@ -5462,6 +5761,9 @@ function e2ExecuteResumeImport_(spreadsheet, operationId, digest, content) {
       }
     }
     var state = String(candidate.state || candidate.status || '').trim() || 'pending';
+    if (['pending', 'completed', 'conflicted', 'conflicting', 'rejected', 'unknown', 'skipped'].indexOf(state) === -1) {
+      return { rejected: e2Rejected_(operationId, 'unsupported-step-state') };
+    }
     var stepDigest = String(candidate.contentDigest || '').trim() || e2Digest_(candidate);
     if (existing && (existing.state === 'completed' || existing.state === 'skipped') &&
         (state !== existing.state || stepDigest !== existing.contentDigest)) {
@@ -5658,30 +5960,65 @@ function e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content) 
   if (!Array.isArray(evidenceIds) || evidenceIds.length === 0) {
     return { rejected: e2Rejected_(operationId, 'opening-adjustment-evidence-required') };
   }
+  var seenOpeningEvidenceIds = Object.create(null);
+  for (var openingEvidenceIndex = 0; openingEvidenceIndex < evidenceIds.length; openingEvidenceIndex += 1) {
+    var openingEvidenceId = String(evidenceIds[openingEvidenceIndex] || '').trim();
+    if (!openingEvidenceId || seenOpeningEvidenceIds[openingEvidenceId]) {
+      return { rejected: e2Rejected_(operationId, 'opening-adjustment-evidence-invalid') };
+    }
+    seenOpeningEvidenceIds[openingEvidenceId] = true;
+  }
   var source = readSnapshotSource_(spreadsheet);
-  var accounts = snapshotAccountRecords_(source, snapshotRevision_(source));
-  var accountRecord = null;
-  for (var accountIndex = 0; accountIndex < accounts.length; accountIndex += 1) {
-    if (accounts[accountIndex].name === account || accounts[accountIndex].id === account) {
-      accountRecord = accounts[accountIndex];
-      break;
+  var requestedRepresentedBalances = adjustment.representedBalances || adjustment.represented_balances || { [currency]: representedText };
+  var requestedAcceptedBalances = adjustment.acceptedBalances || adjustment.accepted_balances || { [currency]: acceptedText };
+  var requestedTxnId = difference !== '0'
+    ? String(adjustment.txnId || adjustment.txn_id || '').trim()
+    : '';
+  var resumingCheckpoint = null;
+  var existingCheckpointRows = e2Rows_(spreadsheet, '對帳檢查點');
+  for (var existingCheckpointIndex = existingCheckpointRows.length - 1; existingCheckpointIndex >= 0; existingCheckpointIndex -= 1) {
+    var existingCheckpoint = existingCheckpointRows[existingCheckpointIndex].values;
+    if (existingCheckpoint.checkpoint_id !== checkpointId) continue;
+    var existingEvidenceIds = e2ParseJson_(existingCheckpoint.evidence_ids_json, []);
+    var existingAdjustment = e2ParseJson_(existingCheckpoint.adjustment_json, {});
+    var existingRepresentedBalances = e2ParseJson_(existingCheckpoint.represented_balances_json, {});
+    var existingAcceptedBalances = e2ParseJson_(existingCheckpoint.accepted_balances_json, {});
+    var sameEvidence = e2Digest_(existingEvidenceIds) === e2Digest_(evidenceIds);
+    var sameAdjustment = existingCheckpoint.cutoff === date &&
+      existingCheckpoint.scope_version === String(adjustment.scopeVersion || adjustment.scope_version || '') &&
+      String(existingAdjustment.account || '') === account &&
+      String(existingAdjustment.currency || '') === currency &&
+      String(existingAdjustment.amount || '') === difference &&
+      (!existingAdjustment.txnId || !requestedTxnId || String(existingAdjustment.txnId) === requestedTxnId) &&
+      e2Digest_(existingRepresentedBalances) === e2Digest_(requestedRepresentedBalances) &&
+      e2Digest_(existingAcceptedBalances) === e2Digest_(requestedAcceptedBalances);
+    if (!sameEvidence || !sameAdjustment) {
+      return { conflict: e2Conflict_(operationId, 'checkpoint-id-reused-with-different-content', [{ id: checkpointId }]) };
     }
-  }
-  var representedCurrent = '0';
-  if (accountRecord) {
-    for (var balanceIndex = 0; balanceIndex < accountRecord.balances.length; balanceIndex += 1) {
-      if (accountRecord.balances[balanceIndex].currency === currency) {
-        representedCurrent = accountRecord.balances[balanceIndex].amount;
-        break;
-      }
+    var existingCutoffBalance = accountBalanceThroughCutoff_(source, account, currency, date);
+    if (existingCutoffBalance !== representedText && existingCutoffBalance !== acceptedText) {
+      return { conflict: e2Conflict_(operationId, 'represented-balance-changed', [{ id: account, expected: representedText, actual: existingCutoffBalance }]) };
     }
+    if (existingCheckpoint.status === 'accepted') {
+      return { destinations: [{ id: checkpointId, revision: existingCheckpoint.revision }] };
+    }
+    if (existingCheckpoint.status !== 'pending') {
+      return { conflict: e2Conflict_(operationId, 'checkpoint-state-conflict', [{ id: checkpointId }]) };
+    }
+    resumingCheckpoint = existingCheckpointRows[existingCheckpointIndex];
+    if (!requestedTxnId && existingAdjustment.txnId) requestedTxnId = String(existingAdjustment.txnId).trim();
   }
-  if (representedCurrent !== representedText) {
+  var representedCurrent = accountBalanceThroughCutoff_(source, account, currency, date);
+  if (representedCurrent !== representedText && (!resumingCheckpoint || representedCurrent !== acceptedText)) {
     return { conflict: e2Conflict_(operationId, 'represented-balance-changed', [{
       id: account, expected: representedText, actual: representedCurrent,
     }]) };
   }
   var evidenceRows = e2Rows_(spreadsheet, '來源證據');
+  var expectedEvidenceDigests = adjustment.evidenceContentDigests || adjustment.evidence_content_digests || {};
+  if (expectedEvidenceDigests && (typeof expectedEvidenceDigests !== 'object' || Array.isArray(expectedEvidenceDigests))) {
+    return { rejected: e2Rejected_(operationId, 'opening-adjustment-evidence-invalid') };
+  }
   for (var evidenceIndex = 0; evidenceIndex < evidenceIds.length; evidenceIndex += 1) {
     var evidenceId = String(evidenceIds[evidenceIndex] || '').trim();
     var evidenceFound = null;
@@ -5695,26 +6032,33 @@ function e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content) 
     if (evidenceFound.effective_date && evidenceFound.effective_date !== date) {
       return { rejected: e2Rejected_(operationId, 'opening-evidence-cutoff-mismatch', evidenceId) };
     }
+    var expectedEvidenceDigest = String(expectedEvidenceDigests[evidenceId] || '').trim();
+    if (expectedEvidenceDigest && expectedEvidenceDigest !== evidenceFound.content_digest) {
+      return { conflict: e2Conflict_(operationId, 'opening-evidence-content-changed', [{ id: evidenceId, expected: expectedEvidenceDigest, actual: evidenceFound.content_digest }]) };
+    }
   }
+  if (difference !== '0' && !requestedTxnId) requestedTxnId = String(Utilities.getUuid()).trim();
   var checkpointRevision = e2Digest_({ checkpointId: checkpointId, cutoff: date, accepted: acceptedText, represented: representedText, digest: digest });
   var checkpoint = {
     checkpointId: checkpointId, cutoff: date,
     scopeVersion: String(adjustment.scopeVersion || adjustment.scope_version || ''),
     representedBalances: adjustment.representedBalances || { [currency]: representedText },
     acceptedBalances: adjustment.acceptedBalances || { [currency]: acceptedText },
-    adjustment: { amount: difference, currency: currency, account: account },
+    adjustment: { amount: difference, currency: currency, account: account, txnId: requestedTxnId },
     evidenceIds: evidenceIds,
     coverage: { kind: 'cutover-only', preCutoverCoverage: false, throughFinancialDate: date },
     status: 'pending',
   };
-  e2Append_(spreadsheet, '對帳檢查點', {
-    checkpoint_id: checkpointId, cutoff: date, scope_version: checkpoint.scopeVersion,
-    represented_balances_json: e2Json_(checkpoint.representedBalances),
-    accepted_balances_json: e2Json_(checkpoint.acceptedBalances),
-    adjustment_json: e2Json_(checkpoint.adjustment), evidence_ids_json: e2Json_(evidenceIds),
-    coverage_json: e2Json_(checkpoint.coverage), status: 'pending',
-    revision: checkpointRevision, created_at: taipeiIsoNow_(),
-  });
+  if (!resumingCheckpoint) {
+    e2Append_(spreadsheet, '對帳檢查點', {
+      checkpoint_id: checkpointId, cutoff: date, scope_version: checkpoint.scopeVersion,
+      represented_balances_json: e2Json_(checkpoint.representedBalances),
+      accepted_balances_json: e2Json_(checkpoint.acceptedBalances),
+      adjustment_json: e2Json_(checkpoint.adjustment), evidence_ids_json: e2Json_(evidenceIds),
+      coverage_json: e2Json_(checkpoint.coverage), status: 'pending',
+      revision: checkpointRevision, created_at: taipeiIsoNow_(),
+    });
+  }
   var destinations = [{ id: checkpointId, revision: checkpointRevision }];
   if (difference !== '0') {
     var debitAccount;
@@ -5727,7 +6071,7 @@ function e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content) 
       debitAccount = difference.charAt(0) === '-' ? account : '期初餘額';
       creditAccount = difference.charAt(0) === '-' ? '期初餘額' : account;
     }
-    var txnId = String(adjustment.txnId || adjustment.txn_id || Utilities.getUuid()).trim();
+    var txnId = requestedTxnId;
     if (!txnId) return { rejected: e2Rejected_(operationId, 'opening-txn-id-required') };
     var journal = requiredSheet_(spreadsheet, '日記帳');
     var columns = resolveHeaders_(journal.getRange(1, 1, 1, journal.getLastColumn()).getDisplayValues()[0], JOURNAL_HEADERS);
@@ -5738,11 +6082,18 @@ function e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content) 
       settlementStatus: '', reversalTxnId: '', txnId: txnId, source: '移轉', now: taipeiIsoNow_(),
     });
     validatePostingVocabulary_(posting, vocabulary);
-    appendPosting_(journal, columns, posting);
-    destinations.push({ id: txnId, revision: e2Digest_({ txnId: txnId, posting: posting }) });
+    var existingOpeningPosting = e2ExistingJournalPosting_(journal, columns, txnId);
+    if (existingOpeningPosting && !e2JournalPostingMatches_(existingOpeningPosting.values, posting)) {
+      return { conflict: e2Conflict_(operationId, 'opening-adjustment-id-reused-with-different-content', [{ id: txnId }]) };
+    }
+    if (!existingOpeningPosting) appendPosting_(journal, columns, posting);
+    destinations.push({ id: txnId, revision: e2PostingRevision_(posting) });
   }
   var checkpointRows = e2Rows_(spreadsheet, '對帳檢查點');
-  var checkpointRow = checkpointRows[checkpointRows.length - 1];
+  var checkpointRow = resumingCheckpoint;
+  if (!checkpointRow) {
+    checkpointRow = checkpointRows[checkpointRows.length - 1];
+  }
   e2Set_(spreadsheet, '對帳檢查點', checkpointRow.sheetRow, {
     checkpoint_id: checkpointId, cutoff: date, scope_version: checkpoint.scopeVersion,
     represented_balances_json: e2Json_(checkpoint.representedBalances),
@@ -5750,7 +6101,71 @@ function e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content) 
     evidence_ids_json: e2Json_(evidenceIds), coverage_json: e2Json_(checkpoint.coverage), status: 'accepted',
     revision: checkpointRevision, created_at: checkpointRow.values.created_at,
   });
+  e2InvalidateResults_(spreadsheet, 'opening-adjustment:' + checkpointId, [checkpointId, account]);
   return { destinations: destinations };
+}
+
+function e2PostingRevision_(posting) {
+  return e2Digest_({
+    date: posting['日期'], time: posting['時間'], type: posting['類型'],
+    debitAccount: posting['借方帳戶'], creditAccount: posting['貸方帳戶'],
+    amount: posting['金額'], currency: posting['幣別'], category: posting['分類'],
+    payee: posting['交易對象'], description: posting['說明'],
+    settlementStatus: posting['結清狀態'], reversalTxnId: posting['沖銷txn_id'],
+    txnId: posting.txn_id, source: posting['來源'],
+  });
+}
+
+function e2JournalPostingMatches_(rowValues, posting) {
+  var fields = ['日期', '時間', '類型', '借方帳戶', '貸方帳戶', '幣別', '分類', '交易對象', '說明', '結清狀態', '沖銷txn_id', 'txn_id', '來源'];
+  for (var index = 0; index < fields.length; index += 1) {
+    var field = fields[index];
+    if (String(rowValues[field] || '').trim() !== String(posting[field] || '').trim()) return false;
+  }
+  var rowAmount;
+  try { rowAmount = canonicalDecimal_(rowValues['金額'], 0); } catch (error) { return false; }
+  return rowAmount === canonicalDecimal_(posting['金額'], 0);
+}
+
+function e2ExistingJournalPosting_(journal, columns, txnId) {
+  var rowNumber = findTxnRow_(journal, columns.txn_id, txnId);
+  if (rowNumber === null) return null;
+  var displayed = journal.getRange(rowNumber, 1, 1, journal.getLastColumn()).getDisplayValues()[0];
+  var values = {};
+  var headers = Object.keys(columns);
+  for (var index = 0; index < headers.length; index += 1) {
+    values[headers[index]] = displayed[columns[headers[index]] - 1] || '';
+  }
+  return { row: rowNumber, values: values };
+}
+
+function e2InvalidateResults_(spreadsheet, reason, changedIds) {
+  var rows = snapshotE2Records_(spreadsheet, 'results');
+  for (var index = 0; index < rows.length; index += 1) {
+    var result = rows[index];
+    if (result.state === 'invalidated' || result.state === 'unknown') continue;
+    var dependencies = result.dependencies;
+    var dependent = !Array.isArray(dependencies) || dependencies.length === 0;
+    if (!dependent && Array.isArray(changedIds)) {
+      for (var dependencyIndex = 0; dependencyIndex < dependencies.length; dependencyIndex += 1) {
+        var dependency = dependencies[dependencyIndex];
+        var dependencyId = String(dependency && (dependency.id || dependency.recordId || dependency.record_id || dependency.txnId || dependency.txn_id || dependency.checkpointId || dependency.checkpoint_id) || dependency || '').trim();
+        if (changedIds.indexOf(dependencyId) !== -1) {
+          dependent = true;
+          break;
+        }
+      }
+    }
+    if (!dependent) continue;
+    var revision = e2Digest_({ resultId: result.resultId, previousRevision: result.revision, reason: reason });
+    e2Append_(spreadsheet, '結果版本', {
+      result_id: result.resultId,
+      interval_json: e2Json_(result.interval || {}),
+      dependency_revisions_json: e2Json_(result.dependencies || []),
+      state: 'invalidated', value_json: e2Json_(result.value),
+      created_at: taipeiIsoNow_(), revision: revision,
+    });
+  }
 }
 
 function e2ExecuteCorrection_(spreadsheet, operationId, digest, content) {
@@ -5768,9 +6183,17 @@ function e2ExecuteCorrection_(spreadsheet, operationId, digest, content) {
   var journal = requiredSheet_(spreadsheet, '日記帳');
   var columns = resolveHeaders_(journal.getRange(1, 1, 1, journal.getLastColumn()).getDisplayValues()[0], JOURNAL_HEADERS);
   var reversalId = String(correction.reversalTxnId || correction.reversal_txn_id || Utilities.getUuid()).trim();
-  var replacementId = String(correction.replacementTxnId || correction.replacement_txn_id || Utilities.getUuid()).trim();
-  var date = String(correction.date || taipeiIsoNow_().slice(0, 10)).trim();
+  var existingReversal = e2ExistingJournalPosting_(journal, columns, reversalId);
+  var date = String(correction.date || '').trim();
+  if (!date && existingReversal) date = String(existingReversal.values['日期'] || '').trim();
+  if (!date) date = taipeiIsoNow_().slice(0, 10);
   var replacement = correction.replacement || correction.newPosting;
+  var replacementId = replacement
+    ? String(correction.replacementTxnId || correction.replacement_txn_id || Utilities.getUuid()).trim()
+    : '';
+  var existingReplacement = replacement
+    ? e2ExistingJournalPosting_(journal, columns, replacementId)
+    : null;
   var replacementPosting = null;
   if (replacement && typeof replacement === 'object') {
     var replacementAmount;
@@ -5783,13 +6206,13 @@ function e2ExecuteCorrection_(spreadsheet, operationId, digest, content) {
       return { rejected: e2Rejected_(operationId, 'replacement-posting-invalid') };
     }
     replacementPosting = postingRow_({
-      date: String(replacement.date || date), time: replacement.time || '', type: replacement.type || original.values['類型'],
+      date: String(replacement.date || (existingReplacement && existingReplacement.values['日期']) || date), time: replacement.time || '', type: replacement.type || original.values['類型'],
       debitAccount: replacementDebit, creditAccount: replacementCredit, amount: replacementAmount,
       currency: String(replacement.currency || original.values['幣別']),
       category: replacement.category || nominalLeg_(replacementDebit, replacementCredit, vocabulary.accountTypes),
       payee: replacement.payee || replacement.counterparty || original.values['交易對象'],
       description: replacement.description || '更正後-' + originalId, settlementStatus: replacement.settlementStatus || '',
-      reversalTxnId: '', txnId: replacementId, source: 'integration', now: taipeiIsoNow_(),
+      reversalTxnId: '', txnId: replacementId, source: 'import', now: taipeiIsoNow_(),
     });
     try { validatePostingVocabulary_(replacementPosting, vocabulary); } catch (error) {
       return { rejected: e2Rejected_(operationId, 'replacement-posting-invalid', String(error.message || error)) };
@@ -5800,19 +6223,49 @@ function e2ExecuteCorrection_(spreadsheet, operationId, digest, content) {
     date: date, time: '', type: '沖銷', debitAccount: original.values['貸方帳戶'], creditAccount: original.values['借方帳戶'],
     amount: originalAmount, currency: original.values['幣別'], category: '', payee: original.values['交易對象'],
     description: String(correction.description || '更正-' + originalId), settlementStatus: '',
-    reversalTxnId: originalId, txnId: reversalId, source: 'integration', now: taipeiIsoNow_(),
+    reversalTxnId: originalId, txnId: reversalId, source: 'import', now: taipeiIsoNow_(),
   });
   validatePostingVocabulary_(reversal, vocabulary);
-  appendPosting_(journal, columns, reversal);
-  var destinations = [{ id: reversalId, revision: e2Digest_({ txnId: reversalId, posting: reversal }) }];
-  if (replacementPosting) {
-    appendPosting_(journal, columns, replacementPosting);
-    destinations.push({ id: replacementId, revision: e2Digest_({ txnId: replacementId, posting: replacementPosting }) });
+  var existingCorrectionRecord = e2LatestRecord_(spreadsheet, 'corrections', originalId + ':' + reversalId);
+  if (existingCorrectionRecord) {
+    var existingCorrectionData = e2ParseJson_(existingCorrectionRecord.values.data_json, {});
+    if (existingCorrectionData.contentDigest && existingCorrectionData.contentDigest !== digest) {
+      return { conflict: e2Conflict_(operationId, 'correction-id-reused-with-different-content', [{ id: reversalId }]) };
+    }
   }
-  e2Append_(spreadsheet, '整合記錄', {
-    scope: 'corrections', record_id: originalId + ':' + operationId,
-    revision: digest, data_json: e2Json_({ originalId: originalId, reversalId: reversalId, replacementId: replacementId }),
-    created_at: taipeiIsoNow_(),
-  });
+  if (existingReversal && !e2JournalPostingMatches_(existingReversal.values, reversal)) {
+    return { conflict: e2Conflict_(operationId, 'correction-id-reused-with-different-content', [{ id: reversalId }]) };
+  }
+  if (existingReplacement && !e2JournalPostingMatches_(existingReplacement.values, replacementPosting)) {
+    return { conflict: e2Conflict_(operationId, 'correction-id-reused-with-different-content', [{ id: replacementId }]) };
+  }
+  var destinations = [{ id: reversalId, revision: e2PostingRevision_(reversal) }];
+  var appended = false;
+  if (!existingReversal) {
+    appendPosting_(journal, columns, reversal);
+    appended = true;
+  }
+  if (replacementPosting) {
+    destinations.push({ id: replacementId, revision: e2PostingRevision_(replacementPosting) });
+    if (!existingReplacement) {
+      appendPosting_(journal, columns, replacementPosting);
+      appended = true;
+    }
+  }
+  if (appended || !existingCorrectionRecord) {
+    e2Append_(spreadsheet, '整合記錄', {
+      scope: 'corrections', record_id: originalId + ':' + reversalId,
+      revision: digest, data_json: e2Json_({
+        originalId: originalId, reversalId: reversalId, replacementId: replacementId,
+        reversalRevision: e2PostingRevision_(reversal),
+        replacementRevision: replacementPosting ? e2PostingRevision_(replacementPosting) : '',
+        contentDigest: digest,
+      }),
+      created_at: taipeiIsoNow_(),
+    });
+  }
+  if (appended) {
+    e2InvalidateResults_(spreadsheet, 'correction:' + originalId, [originalId, reversalId, replacementId]);
+  }
   return { destinations: destinations };
 }
