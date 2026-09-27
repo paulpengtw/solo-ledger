@@ -23,16 +23,15 @@ describe('E2 reviewed Personal operations', () => {
   it('serializes observation claims and discovers a durable outcome after cache expiry', async () => {
     const first = await post(harness, {
       action: 'command', operationId: 'claim-a', expectedRevisions: [],
-      contentDigest: 'digest-plan-0001', content: { kind: 'record',
+      contentDigest: 'digest-plan-0001', content: { kind: 'claims',
         claims: ['observation:one'],
-        writes: [{ scope: 'records', id: 'event:a', data: { amount: '10', currency: 'TWD' } }],
       },
     }, 'claim-a-transport')
     expect(first).toMatchObject({ kind: 'committed', operationId: 'claim-a' })
 
     const second = await post(harness, {
       action: 'command', operationId: 'claim-b', expectedRevisions: [],
-      contentDigest: 'digest-plan-0002', content: { kind: 'record', claims: ['observation:one'] },
+      contentDigest: 'digest-plan-0002', content: { kind: 'claims', claims: ['observation:one'] },
     }, 'claim-b-transport')
     expect(second).toMatchObject({ kind: 'conflict', reason: 'observation-already-claimed' })
 
@@ -43,9 +42,27 @@ describe('E2 reviewed Personal operations', () => {
 
     const changed = await post(harness, {
       action: 'command', operationId: 'claim-a', expectedRevisions: [],
-      contentDigest: 'digest-plan-changed', content: { kind: 'record', claims: ['observation:one'] },
+      contentDigest: 'digest-plan-changed', content: { kind: 'claims', claims: ['observation:one-changed'] },
     }, 'claim-a-changed-transport')
     expect(changed).toMatchObject({ kind: 'conflict', reason: 'operation-id-reused-with-different-content' })
+  })
+
+  it('discovers durable outcomes while financial writes are closed and records actor provenance', async () => {
+    const committed = await post(harness, {
+      action: 'command', operationId: 'maintenance-outcome', actor: 'verified-actor', expectedRevisions: [],
+      contentDigest: 'actor-transport', content: { kind: 'claims', claims: ['observation:maintenance'] },
+    }, 'maintenance-outcome-transport')
+    expect(committed).toMatchObject({ kind: 'committed', operationId: 'maintenance-outcome' })
+    const operations = await post(harness, { action: 'snapshot', scope: 'operations' }, 'maintenance-operation-snapshot')
+    const operation = (operations.records as Array<Record<string, unknown>>).find(record => record.operationId === 'maintenance-outcome')
+    expect(operation).toEqual(expect.objectContaining({ detail: expect.objectContaining({ actor: 'verified-actor' }) }))
+    const actorRecords = await post(harness, { action: 'snapshot', scope: 'records' }, 'maintenance-actor-record-snapshot')
+    expect(actorRecords.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ scope: 'actor-provenance', data: expect.objectContaining({ actor: 'verified-actor' }) }),
+    ]))
+    harness.setScriptProperty('INTEGRATION_OPEN', 'false')
+    expect(await post(harness, { action: 'outcome', operationId: 'maintenance-outcome' }, 'maintenance-outcome-lookup'))
+      .toMatchObject({ kind: 'committed', operationId: 'maintenance-outcome' })
   })
 
   it('advertises E2 capabilities only after the durable metadata schema is enabled', async () => {
@@ -62,10 +79,10 @@ describe('E2 reviewed Personal operations', () => {
 
   it('records native-currency groups and excludes incomplete groups from balances', async () => {
     const complete = await post(harness, {
-      action: 'create_event_group', operationId: 'group-complete', group: {
+      action: 'create_event_group', operationId: 'group-complete', actor: 'group-actor', group: {
         groupId: 'group-complete', legs: [
           { txnId: '00000000-0000-4000-8000-000000000901', date: '2026-07-27', type: '轉帳', debitAccount: '銀行', creditAccount: '現金', amount: '3200', currency: 'TWD' },
-          { txnId: '00000000-0000-4000-8000-000000000902', feeId: 'fee-1', kind: 'fee', date: '2026-07-27', type: '費用', debitAccount: '餐飲', creditAccount: '現金', amount: '10', currency: 'TWD' },
+          { txnId: '00000000-0000-4000-8000-000000000902', feeId: 'fee-1', kind: 'fee', date: '2026-07-27', type: '支出', category: '餐飲', debitAccount: '餐飲', creditAccount: '現金', amount: '10', currency: 'TWD', source: 'integration' },
           { txnId: '00000000-0000-4000-8000-000000000903', date: '2026-07-27', type: '轉帳', debitAccount: '現金', creditAccount: '銀行', amount: '100', currency: 'USD' },
         ],
         conversion: { reference: 'fx:2026-07-27:twd-usd', clearingReference: 'clearing:group-complete' },
@@ -77,14 +94,19 @@ describe('E2 reviewed Personal operations', () => {
       },
     }, 'group-complete-transport')
     expect(complete).toMatchObject({ kind: 'committed' })
+    const completeJournalRows = journalRows(harness)
+    expect(completeJournalRows.find(row => row[12] === '00000000-0000-4000-8000-000000000902')?.[13]).toBe('import')
     const groups = await post(harness, { action: 'snapshot', scope: 'groups' }, 'group-snapshot')
     expect(groups.records).toEqual([expect.objectContaining({
       id: 'group-complete', status: 'complete', completion: { kind: 'complete', marker: expect.any(String) },
       conversion: { reference: 'fx:2026-07-27:twd-usd', clearingReference: 'clearing:group-complete' },
       fees: [{ feeId: 'fee-1', amount: '10', currency: 'TWD' }],
+      actor: 'group-actor',
     })])
 
     harness.spreadsheet.getSheetByName('日記帳')!.failNextSetValues('simulated group leg failure')
+    const groupSheet = harness.spreadsheet.getSheetByName('事件群組')!
+    const groupRowsBeforeFailure = groupSheet.getLastRow()
     const failed = await post(harness, {
       action: 'create_event_group', operationId: 'group-incomplete', group: {
         groupId: 'group-incomplete', legs: [
@@ -94,6 +116,7 @@ describe('E2 reviewed Personal operations', () => {
       },
     }, 'group-incomplete-transport')
     expect(failed).toEqual({ kind: 'unknown', operationId: 'group-incomplete', reason: 'write-outcome-unknown' })
+    expect(groupSheet.getLastRow()).toBeGreaterThan(groupRowsBeforeFailure)
     const incomplete = await post(harness, { action: 'snapshot', scope: 'groups' }, 'group-incomplete-snapshot')
     expect(incomplete.records).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'group-incomplete', status: 'incomplete', completion: { kind: 'incomplete', marker: null } }),
@@ -122,6 +145,25 @@ describe('E2 reviewed Personal operations', () => {
       },
     }, 'group-changed-content-transport')
     expect(changed).toMatchObject({ kind: 'conflict', reason: 'group-id-reused-with-different-content' })
+
+    const duplicateLegs = await post(harness, {
+      action: 'create_event_group', operationId: 'group-duplicate-legs', group: {
+        groupId: 'group-duplicate-legs', legs: [
+          { txnId: '00000000-0000-4000-8000-000000000906', date: '2026-07-27', type: '轉帳', debitAccount: '銀行', creditAccount: '現金', amount: '10', currency: 'TWD' },
+          { txnId: '00000000-0000-4000-8000-000000000906', date: '2026-07-27', type: '轉帳', debitAccount: '現金', creditAccount: '銀行', amount: '10', currency: 'TWD' },
+        ],
+      },
+    }, 'group-duplicate-legs-transport')
+    expect(duplicateLegs).toMatchObject({ kind: 'rejected', reason: 'group-duplicate-leg-id' })
+
+    const invalidPosting = await post(harness, {
+      action: 'create_event_group', operationId: 'group-invalid-posting', group: {
+        groupId: 'group-invalid-posting', legs: [
+          { txnId: 'not-a-uuid', date: '2026-07-27', type: '費用', debitAccount: '餐飲', creditAccount: '現金', amount: '10', currency: 'TWD', category: '尚未分類' },
+        ],
+      },
+    }, 'group-invalid-posting-transport')
+    expect(invalidPosting).toMatchObject({ kind: 'rejected', reason: 'group-posting-invalid' })
 
     const imbalanced = await post(harness, {
       action: 'create_event_group', operationId: 'group-imbalanced', group: {
@@ -213,7 +255,7 @@ describe('E2 reviewed Personal operations', () => {
     const rejected = await post(harness, {
       action: 'command', operationId: 'unsupported-command', expectedRevisions: [],
       contentDigest: 'transport-digest', content: {
-        kind: 'unknown-command-kind',
+        kind: 'record',
         writes: [{ scope: 'records', id: 'must-not-write', data: { value: 1 } }],
       },
     }, 'unsupported-command-transport')
@@ -225,14 +267,14 @@ describe('E2 reviewed Personal operations', () => {
     const first = await post(harness, {
       action: 'command', operationId: 'canonical-content-op', expectedRevisions: [],
       contentDigest: 'same-forged-digest', content: {
-        kind: 'record', writes: [{ scope: 'records', id: 'canonical-record', data: { amount: '10' } }],
+        kind: 'claims', claims: ['observation:canonical'],
       },
     }, 'canonical-content-first')
     expect(first).toMatchObject({ kind: 'committed' })
     const changed = await post(harness, {
       action: 'command', operationId: 'canonical-content-op', expectedRevisions: [],
       contentDigest: 'same-forged-digest', content: {
-        kind: 'record', writes: [{ scope: 'records', id: 'canonical-record', data: { amount: '11' } }],
+        kind: 'claims', claims: ['observation:canonical-changed'],
       },
     }, 'canonical-content-changed')
     expect(changed).toMatchObject({ kind: 'conflict', reason: 'operation-id-reused-with-different-content' })
@@ -252,6 +294,30 @@ describe('E2 reviewed Personal operations', () => {
       },
     }, 'group-missing-fx-transport')
     expect(rejected).toMatchObject({ kind: 'rejected', reason: 'group-conversion-evidence-required' })
+
+    const conversionOnly = await post(harness, {
+      action: 'create_event_group', operationId: 'group-conversion-only', group: {
+        groupId: 'group-conversion-only', conversionReference: 'fx:conversion-only', currencyTotals: [
+          { currency: 'TWD', debit: '3200', credit: '3200' }, { currency: 'USD', debit: '100', credit: '100' },
+        ], legs: [
+          { txnId: '00000000-0000-4000-8000-000000000916', date: '2026-07-27', type: '轉帳', debitAccount: '銀行', creditAccount: '現金', amount: '3200', currency: 'TWD' },
+          { txnId: '00000000-0000-4000-8000-000000000917', date: '2026-07-27', type: '轉帳', debitAccount: '現金', creditAccount: '銀行', amount: '100', currency: 'USD' },
+        ],
+      },
+    }, 'group-conversion-only-transport')
+    expect(conversionOnly).toMatchObject({ kind: 'rejected', reason: 'group-conversion-evidence-required' })
+
+    const clearingOnly = await post(harness, {
+      action: 'create_event_group', operationId: 'group-clearing-only', group: {
+        groupId: 'group-clearing-only', clearingReference: 'clearing:only', currencyTotals: [
+          { currency: 'TWD', debit: '3200', credit: '3200' }, { currency: 'USD', debit: '100', credit: '100' },
+        ], legs: [
+          { txnId: '00000000-0000-4000-8000-000000000918', date: '2026-07-27', type: '轉帳', debitAccount: '銀行', creditAccount: '現金', amount: '3200', currency: 'TWD' },
+          { txnId: '00000000-0000-4000-8000-000000000919', date: '2026-07-27', type: '轉帳', debitAccount: '現金', creditAccount: '銀行', amount: '100', currency: 'USD' },
+        ],
+      },
+    }, 'group-clearing-only-transport')
+    expect(clearingOnly).toMatchObject({ kind: 'rejected', reason: 'group-conversion-evidence-required' })
   })
 
   it('posts the reviewed cutover difference and preserves the no-pre-cutover claim', async () => {
@@ -274,6 +340,7 @@ describe('E2 reviewed Personal operations', () => {
       action: 'opening_adjustment', operationId: 'opening-op', adjustment: {
         checkpointId: 'cutover-1', account: '現金', currency: 'TWD', date: '2026-07-27',
         representedBalance: '2000', acceptedBalance: '10000', evidenceIds: ['evidence-1'],
+        txnId: '00000000-0000-4000-8000-000000000920',
       },
     }, 'opening-op-transport')
     expect(adjustment).toMatchObject({ kind: 'committed' })
@@ -284,6 +351,7 @@ describe('E2 reviewed Personal operations', () => {
       checkpointId: 'cutover-1', adjustment: { amount: '8000', currency: 'TWD', account: '現金' },
       coverage: { kind: 'cutover-only', preCutoverCoverage: false, throughFinancialDate: '2026-07-27' },
     }))
+    expect(harness.spreadsheet.getSheetByName('對帳檢查點')!.getLastRow()).toBe(3)
   })
 
   it('resumes an opening adjustment after the checkpoint was durable but the journal write failed', async () => {
@@ -376,4 +444,10 @@ async function post(harness: FakeGasHarness, payload: Record<string, unknown>, n
   const envelope = await buildEnvelope(secret, { ...payload, contractVersion: CONTRACT_VERSION }, Math.floor(fixedNow.getTime() / 1000), nonce)
   const output: FakeTextOutput = harness.doPost({ postData: { contents: JSON.stringify(envelope) } })
   return JSON.parse(output.getContent()) as Record<string, unknown>
+}
+
+function journalRows(harness: FakeGasHarness): unknown[][] {
+  const journal = harness.spreadsheet.getSheetByName('日記帳')!
+  if (journal.getLastRow() < 2) return []
+  return journal.getRange(2, 1, journal.getLastRow() - 1, journalHeaders.length).getValues()
 }

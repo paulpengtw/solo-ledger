@@ -47,6 +47,12 @@ var OBSERVATION_HEADERS = ['observation_id', 'source_reference', 'content_digest
 var OBSERVATION_ID_HEADER = OBSERVATION_HEADERS[0];
 var IDENTITY_ADOPTION_PROPERTY_PREFIX = 'identity-adoption:';
 var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var E2_JOURNAL_TYPES = {
+  '支出': true,
+  '收入': true,
+  '轉帳': true,
+  '沖銷': true,
+};
 
 // E2 metadata is intentionally provisioned lazily. Existing Personal books
 // keep their original seven-tab bootstrap and can adopt the reviewed import
@@ -339,6 +345,9 @@ function route_(payload, nonce) {
   if (action === 'setMaintenance') {
     return setMaintenance_(payload, nonce);
   }
+  if (action === 'outcome') {
+    return outcome_(payload);
+  }
   requireFinancialOpen_(payload);
 
   if (action === 'enable_e2' || action === 'enable_integration_schema') {
@@ -368,9 +377,6 @@ function route_(payload, nonce) {
   }
   if (action === 'command') {
     return command_(payload, nonce);
-  }
-  if (action === 'outcome') {
-    return outcome_(payload);
   }
   if (action === 'create_event_group' || action === 'event_group') {
     return createEventGroup_(payload, nonce);
@@ -3093,6 +3099,43 @@ function validatePostingVocabulary_(posting, vocabulary) {
   );
 }
 
+function validateE2Posting_(posting, vocabulary, expectedSource) {
+  var txnId = String(posting && posting.txn_id || '').trim();
+  if (!UUID_PATTERN.test(txnId)) {
+    throw new Error('E2 txn_id must be an explicit UUID');
+  }
+  var source = String(posting && posting['來源'] || '').trim();
+  if (source !== String(expectedSource || 'import')) {
+    throw new Error('E2 posting source is invalid');
+  }
+  var type = String(posting && posting['類型'] || '').trim();
+  if (!E2_JOURNAL_TYPES[type]) {
+    throw new Error('E2 posting type is invalid');
+  }
+  var debit = String(posting && posting['借方帳戶'] || '').trim();
+  var credit = String(posting && posting['貸方帳戶'] || '').trim();
+  validateDistinctLegs_(debit, credit);
+  validatePostingVocabulary_(posting, vocabulary);
+
+  var category = String(posting && posting['分類'] || '').trim();
+  if (category === '尚未分類') {
+    throw new Error('E2 posting category is invalid');
+  }
+  if (type === '沖銷') {
+    if (category) throw new Error('E2 posting category is invalid');
+    return;
+  }
+  var nominal = nominalLeg_(debit, credit, vocabulary.accountTypes);
+  if (!nominal) {
+    if (category) throw new Error('E2 posting category is invalid');
+    return;
+  }
+  if (!category || category !== nominal) {
+    throw new Error('E2 posting category must match nominal leg');
+  }
+  validateOptionalVocabulary_(category, 'category', vocabulary, vocabulary.accountTypes[nominal]);
+}
+
 function findTxnRow_(journal, txnColumn, idempotencyKey) {
   var lastRow = journal.getLastRow();
   if (lastRow < 2) {
@@ -4428,12 +4471,59 @@ function e2OutcomeFromRow_(row) {
   return {
     kind: 'rejected', operationId: values.operation_id,
     reason: values.reason || 'rejected',
-    detail: values.detail || undefined,
+    detail: e2OutcomeDetailValue_(values.detail),
   };
 }
 
-function e2PersistOutcome_(spreadsheet, outcome, contentDigest, detail) {
-  var existing = e2OperationRow_(spreadsheet, outcome.operationId);
+function e2OutcomeDetailValue_(value) {
+  if (!value) return undefined;
+  var parsed = e2ParseJson_(value, null);
+  if (parsed && typeof parsed === 'object' &&
+      Object.prototype.hasOwnProperty.call(parsed, 'detail')) {
+    return parsed.detail || undefined;
+  }
+  return value;
+}
+
+function e2CommandActor_(payload, content) {
+  var actor = String(content && content.actor || payload && payload.actor || '').trim();
+  if (actor) return actor;
+  try {
+    actor = String(Session.getEffectiveUser().getEmail() || '').trim();
+  } catch (error) {
+    actor = '';
+  }
+  return actor || 'gas-verified-request';
+}
+
+function e2OutcomeDetail_(detail, actor) {
+  return e2Json_({ actor: String(actor || ''), detail: detail || '' });
+}
+
+function e2PersistActorMetadata_(spreadsheet, scope, id, revision, actor, operationId) {
+  var verifiedActor = String(actor || '').trim();
+  if (!verifiedActor) return;
+  var metadataId = String(scope || '') + ':' + String(id || '');
+  var data = {
+    actor: verifiedActor,
+    scope: String(scope || ''),
+    id: String(id || ''),
+    revision: String(revision || ''),
+    operationId: String(operationId || ''),
+  };
+  var existing = e2LatestRecord_(spreadsheet, 'actor-provenance', metadataId);
+  if (existing) {
+    var previous = e2ParseJson_(existing.values.data_json, {});
+    if (previous.actor === data.actor && previous.revision === data.revision &&
+        previous.operationId === data.operationId) return;
+  }
+  e2Append_(spreadsheet, '整合記錄', {
+    scope: 'actor-provenance', record_id: metadataId,
+    revision: e2Digest_(data), data_json: e2Json_(data), created_at: taipeiIsoNow_(),
+  });
+}
+
+function e2PersistOutcome_(spreadsheet, outcome, contentDigest, detail, actor) {
   var values = {
     operation_id: outcome.operationId,
     content_digest: contentDigest,
@@ -4442,10 +4532,9 @@ function e2PersistOutcome_(spreadsheet, outcome, contentDigest, detail) {
     conflicts_json: e2Json_(outcome.conflicts || []),
     destinations_json: e2Json_(outcome.destinations || []),
     committed_at: outcome.committedAt || '',
-    detail: detail || outcome.detail || '',
+    detail: e2OutcomeDetail_(detail || outcome.detail || '', actor),
   };
-  if (existing) e2Set_(spreadsheet, '整合操作', existing.sheetRow, values);
-  else e2Append_(spreadsheet, '整合操作', values);
+  e2Append_(spreadsheet, '整合操作', values);
   return outcome;
 }
 
@@ -4477,9 +4566,15 @@ function e2CurrentRevision_(spreadsheet, id) {
       }
     }
   }
-  var e2Records = snapshotE2Records_(spreadsheet, 'records');
-  for (var recordIndex = 0; recordIndex < e2Records.length; recordIndex += 1) {
-    if (e2Records[recordIndex].id === id) return e2Records[recordIndex].revision;
+  var e2Scopes = [
+    'groups', 'operations', 'claims', 'manifests', 'steps', 'evidence',
+    'links', 'checkpoints', 'settings', 'results', 'records',
+  ];
+  for (var scopeIndex = 0; scopeIndex < e2Scopes.length; scopeIndex += 1) {
+    var e2Records = snapshotE2Records_(spreadsheet, e2Scopes[scopeIndex]);
+    for (var recordIndex = 0; recordIndex < e2Records.length; recordIndex += 1) {
+      if (e2Records[recordIndex].id === id) return e2Records[recordIndex].revision;
+    }
   }
   return '';
 }
@@ -4525,12 +4620,14 @@ function e2CheckClaims_(spreadsheet, operationId, claims) {
   return null;
 }
 
-function e2PersistClaims_(spreadsheet, operationId, digest, claims) {
+function e2PersistClaims_(spreadsheet, operationId, digest, claims, actor) {
   for (var index = 0; index < (claims || []).length; index += 1) {
+    var claimId = String(claims[index]);
     e2Append_(spreadsheet, '觀察認領', {
-      claim_id: String(claims[index]), operation_id: operationId,
+      claim_id: claimId, operation_id: operationId,
       content_digest: digest, status: 'claimed', created_at: taipeiIsoNow_(),
     });
+    e2PersistActorMetadata_(spreadsheet, 'claim', claimId, digest, actor, operationId);
   }
 }
 
@@ -4638,7 +4735,8 @@ function snapshotE2Records_(spreadsheet, scope) {
     var values = rows[index].values;
     var id = e2RowIdentity_(tableName, values);
     var record = e2RecordForTableRow_(tableName, values, rows[index].sheetRow, spreadsheet);
-    if (tableName === '匯入步驟' || tableName === '匯入清單' || tableName === '跨簿連結' ||
+    if (tableName === '事件群組' || tableName === '整合操作' || tableName === '觀察認領' ||
+        tableName === '匯入步驟' || tableName === '匯入清單' || tableName === '跨簿連結' ||
         tableName === '設定版本' || tableName === '結果版本' || tableName === '對帳檢查點' ||
         tableName === '整合記錄') {
       latest[id] = record;
@@ -4717,6 +4815,10 @@ function e2RecordForTableRow_(tableName, values, sheetRow, spreadsheet) {
     var outcome = e2OutcomeFromRow_({ values: values });
     record.operationId = values.operation_id;
     record.contentDigest = values.content_digest;
+    record.detail = e2ParseJson_(values.detail, values.detail || '');
+    if (record.detail && typeof record.detail === 'object') {
+      record.actor = record.detail.actor || '';
+    }
     record.outcome = outcome;
     return record;
   }
@@ -4809,27 +4911,15 @@ function e2RecordForTableRow_(tableName, values, sheetRow, spreadsheet) {
   return record;
 }
 
-function e2ExecuteGenericWrites_(spreadsheet, operationId, content) {
-  var writes = content && content.writes;
-  if (writes !== undefined && !Array.isArray(writes)) throw new Error('content.writes must be an array');
+function e2ExecuteClaims_(spreadsheet, operationId, digest, content) {
+  if (!Array.isArray(content.claims) || content.claims.length === 0) {
+    return { rejected: e2Rejected_(operationId, 'claims-required') };
+  }
   var destinations = [];
-  for (var index = 0; index < (writes || []).length; index += 1) {
-    var write = writes[index];
-    if (!write || typeof write !== 'object') throw new Error('content.writes contains an invalid item');
-    var scope = String(write.scope || '').trim();
-    var id = String(write.id || '').trim();
-    if (!scope || !id) throw new Error('content.writes requires scope and id');
-    var existing = e2LatestRecord_(spreadsheet, scope, id);
-    if (existing && e2Digest_(write.data) !== e2Digest_(JSON.parse(existing.values.data_json || 'null'))) {
-      return { conflict: e2Conflict_(operationId, 'destination-content-conflict', [{
-        id: id, expected: String(write.contentDigest || ''), actual: existing.values.revision,
-      }]) };
-    }
-    if (existing) {
-      destinations.push({ id: id, revision: existing.values.revision });
-      continue;
-    }
-    destinations.push(e2WriteRecord_(spreadsheet, scope, id, write.data, operationId));
+  for (var index = 0; index < content.claims.length; index += 1) {
+    var claimId = String(content.claims[index] || '').trim();
+    if (!claimId) return { rejected: e2Rejected_(operationId, 'claim-id-required') };
+    destinations.push({ id: claimId, revision: digest });
   }
   return { destinations: destinations };
 }
@@ -4840,6 +4930,8 @@ function command_(payload, nonce) {
   if (!Array.isArray(payload.expectedRevisions)) throw new Error('expectedRevisions must be an array');
   if (!payload.content || typeof payload.content !== 'object') throw new Error('content is required');
   var content = payload.content;
+  var actor = e2CommandActor_(payload, content);
+  content.actor = actor;
   var digest = e2ContentDigest_(payload, content);
   var spreadsheet = e2Spreadsheet_();
   var previous = e2OperationRow_(spreadsheet, operationId);
@@ -4868,16 +4960,18 @@ function command_(payload, nonce) {
         spreadsheet,
         e2Conflict_(operationId, 'stale-expected-revision', expectedConflicts),
         digest,
+        undefined,
+        actor,
       );
     }
     var claimConflict = e2CheckClaims_(spreadsheet, operationId, content.claims);
-    if (claimConflict) return e2PersistOutcome_(spreadsheet, claimConflict, digest);
+    if (claimConflict) return e2PersistOutcome_(spreadsheet, claimConflict, digest, undefined, actor);
 
     if (content.pending === true || content.state === 'pending') {
       return e2PersistOutcome_(spreadsheet, {
         kind: 'pending', operationId: operationId,
         reason: String(content.pendingReason || 'still-running'),
-      }, digest);
+      }, digest, undefined, actor);
     }
 
     var execution;
@@ -4905,10 +4999,8 @@ function command_(payload, nonce) {
         execution = e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content);
       } else if (kind === 'correction') {
         execution = e2ExecuteCorrection_(spreadsheet, operationId, digest, content);
-      } else if (kind === 'record') {
-        // Explicitly scoped compatibility records are the only generic write
-        // surface.  Unknown command kinds must never become arbitrary rows.
-        execution = e2ExecuteGenericWrites_(spreadsheet, operationId, content);
+      } else if (kind === 'claims') {
+        execution = e2ExecuteClaims_(spreadsheet, operationId, digest, content);
       } else {
         execution = { rejected: e2Rejected_(operationId, 'unsupported-command-kind') };
       }
@@ -4917,24 +5009,24 @@ function command_(payload, nonce) {
         kind: 'unknown', operationId: operationId,
         reason: 'write-outcome-unknown',
       };
-      e2PersistOutcome_(spreadsheet, unknown, digest, String(error && error.message || error));
+      e2PersistOutcome_(spreadsheet, unknown, digest, String(error && error.message || error), actor);
       return unknown;
     }
     if (execution && execution.conflict) {
-      return e2PersistOutcome_(spreadsheet, execution.conflict, digest);
+      return e2PersistOutcome_(spreadsheet, execution.conflict, digest, undefined, actor);
     }
     if (execution && execution.rejected) {
-      return e2PersistOutcome_(spreadsheet, execution.rejected, digest);
+      return e2PersistOutcome_(spreadsheet, execution.rejected, digest, undefined, actor);
     }
     var destinations = execution && execution.destinations ? execution.destinations : [];
     if (destinations.length === 0) {
       destinations = [{ id: operationId + '-effect', revision: snapshotRevision_(readSnapshotSource_(spreadsheet)) }];
     }
-    e2PersistClaims_(spreadsheet, operationId, digest, content.claims || []);
+    e2PersistClaims_(spreadsheet, operationId, digest, content.claims || [], actor);
     return e2PersistOutcome_(spreadsheet, {
       kind: 'committed', operationId: operationId, destinations: destinations,
       committedAt: taipeiIsoNow_(),
-    }, digest);
+    }, digest, undefined, actor);
   } finally {
     lock.releaseLock();
   }
@@ -4973,6 +5065,7 @@ function createEventGroup_(payload, nonce) {
     expectedRevisions: e2ExpectedRevisions_(payload, group.groupId || group.group_id || ''),
     contentDigest: payload.contentDigest || e2Digest_(content),
     content: content,
+    actor: payload.actor || '',
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -4992,6 +5085,7 @@ function confirmEvent_(payload, nonce) {
     expectedRevisions: e2ExpectedRevisions_(payload, txnId),
     contentDigest: payload.contentDigest || e2Digest_(content),
     content: content,
+    actor: payload.actor || '',
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -5019,6 +5113,7 @@ function acceptImport_(payload, nonce) {
       steps: payload.steps || (payload.manifest && payload.manifest.steps) || [],
       actor: payload.actor || '',
     },
+    actor: payload.actor || '',
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -5031,7 +5126,9 @@ function resumeImport_(payload, nonce) {
     content: {
       kind: 'resume-import', manifestId: payload.manifestId,
       steps: payload.steps || [],
+      actor: payload.actor || '',
     },
+    actor: payload.actor || '',
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -5040,7 +5137,8 @@ function recordEvidence_(payload, nonce) {
   return command_({
     operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.evidenceId || ''),
     contentDigest: payload.contentDigest,
-    content: { kind: 'evidence', evidence: payload.evidence || e2PayloadContent_(payload) },
+    content: { kind: 'evidence', evidence: payload.evidence || e2PayloadContent_(payload), actor: payload.actor || '' },
+    actor: payload.actor || '',
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -5049,7 +5147,8 @@ function recordLink_(payload, nonce) {
   return command_({
     operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.linkId || ''),
     contentDigest: payload.contentDigest,
-    content: { kind: 'link', link: payload.link || e2PayloadContent_(payload) },
+    content: { kind: 'link', link: payload.link || e2PayloadContent_(payload), actor: payload.actor || '' },
+    actor: payload.actor || '',
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -5058,7 +5157,8 @@ function acceptCheckpoint_(payload, nonce) {
   return command_({
     operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.checkpointId || ''),
     contentDigest: payload.contentDigest,
-    content: { kind: 'checkpoint', checkpoint: payload.checkpoint || e2PayloadContent_(payload) },
+    content: { kind: 'checkpoint', checkpoint: payload.checkpoint || e2PayloadContent_(payload), actor: payload.actor || '' },
+    actor: payload.actor || '',
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -5067,7 +5167,8 @@ function setVersionedSetting_(payload, nonce) {
   return command_({
     operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.settingId || ''),
     contentDigest: payload.contentDigest,
-    content: { kind: 'setting', setting: payload.setting || e2PayloadContent_(payload) },
+    content: { kind: 'setting', setting: payload.setting || e2PayloadContent_(payload), actor: payload.actor || '' },
+    actor: payload.actor || '',
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -5076,7 +5177,8 @@ function publishResult_(payload, nonce) {
   return command_({
     operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.resultId || ''),
     contentDigest: payload.contentDigest,
-    content: { kind: 'result', result: payload.result || e2PayloadContent_(payload) },
+    content: { kind: 'result', result: payload.result || e2PayloadContent_(payload), actor: payload.actor || '' },
+    actor: payload.actor || '',
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -5085,7 +5187,8 @@ function openingAdjustment_(payload, nonce) {
   return command_({
     operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.checkpointId || ''),
     contentDigest: payload.contentDigest,
-    content: { kind: 'opening-adjustment', adjustment: payload.adjustment || e2PayloadContent_(payload) },
+    content: { kind: 'opening-adjustment', adjustment: payload.adjustment || e2PayloadContent_(payload), actor: payload.actor || '' },
+    actor: payload.actor || '',
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -5094,7 +5197,8 @@ function correctEvent_(payload, nonce) {
   return command_({
     operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, String(payload.txnId || payload.txn_id || '')),
     contentDigest: payload.contentDigest,
-    content: { kind: 'correction', correction: payload.correction || e2PayloadContent_(payload) },
+    content: { kind: 'correction', correction: payload.correction || e2PayloadContent_(payload), actor: payload.actor || '' },
+    actor: payload.actor || '',
     contractVersion: payload.contractVersion,
   }, nonce);
 }
@@ -5127,6 +5231,7 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
   var nativeCurrencies = Object.create(null);
   var feeLegIds = Object.create(null);
   var feeLegRecords = [];
+  var seenTxnIds = Object.create(null);
   for (var index = 0; index < legs.length; index += 1) {
     var leg = legs[index];
     if (!leg || typeof leg !== 'object') {
@@ -5139,6 +5244,14 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
     if (amount === '0' || amount.charAt(0) === '-') {
       return { rejected: e2Rejected_(operationId, 'group-amount-must-be-positive') };
     }
+    var txnId = String(leg.txnId || leg.txn_id || '').trim();
+    if (!UUID_PATTERN.test(txnId)) {
+      return { rejected: e2Rejected_(operationId, 'group-posting-invalid', 'E2 txn_id must be an explicit UUID') };
+    }
+    if (seenTxnIds[txnId]) {
+      return { rejected: e2Rejected_(operationId, 'group-duplicate-leg-id', txnId) };
+    }
+    seenTxnIds[txnId] = true;
     var currency = String(leg.currency || '').trim();
     var debitCurrency = String(leg.debitCurrency || leg.debit_currency || currency).trim();
     var creditCurrency = String(leg.creditCurrency || leg.credit_currency || currency).trim();
@@ -5173,7 +5286,6 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
     }
     var debit = String(leg.debitAccount || leg.debit_account || '').trim();
     var credit = String(leg.creditAccount || leg.credit_account || '').trim();
-    var txnId = String(leg.txnId || leg.txn_id || Utilities.getUuid()).trim();
     if (debit || credit) {
       if (!debit || !credit || debit === credit) {
         return { rejected: e2Rejected_(operationId, 'group-posting-legs-invalid') };
@@ -5192,15 +5304,20 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
       }
       var posting = postingRow_({
         date: leg.date || content.date || taipeiIsoNow_().slice(0, 10),
-        time: leg.time || '', type: leg.type || content.type || '複合',
+        time: leg.time || '', type: leg.type || content.type || '轉帳',
         debitAccount: debit, creditAccount: credit, amount: amount,
         currency: debitCurrency,
         category: leg.category || nominalLeg_(debit, credit, vocabulary.accountTypes),
         payee: leg.payee || leg.counterparty || '',
         description: leg.description || content.description || '',
         settlementStatus: leg.settlementStatus || '', reversalTxnId: leg.reversalTxnId || '',
-        txnId: txnId, source: leg.source || content.source || 'import', now: taipeiIsoNow_(),
+        txnId: txnId, source: 'import', now: taipeiIsoNow_(),
       });
+      try {
+        validateE2Posting_(posting, vocabulary, 'import');
+      } catch (error) {
+        return { rejected: e2Rejected_(operationId, 'group-posting-invalid', String(error.message || error)) };
+      }
       postings.push({ posting: posting, txnId: txnId, amount: amount, currency: debitCurrency,
         debitCurrency: debitCurrency, creditCurrency: creditCurrency,
         debitAmount: debitAmount, creditAmount: creditAmount });
@@ -5239,7 +5356,7 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
         if (conversionReference && clearingReference) break;
       }
     }
-    if (!conversionReference && !clearingReference) {
+    if (!conversionReference || !clearingReference) {
       return { rejected: e2Rejected_(operationId, 'group-conversion-evidence-required') };
     }
   }
@@ -5262,7 +5379,7 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
     var feeLeg = feeLegIds[feeIdValue];
     if (!feeLeg && !feeIdValue) {
       for (var feeLegIndex = 0; feeLegIndex < feeLegRecords.length; feeLegIndex += 1) {
-        if (feeLegRecords[feeLegIndex].amount === feeAmount && feeLegRecords[feeLegIndex].currency === feeCurrency) {
+        if (!feeLegRecords[feeLegIndex].matched && feeLegRecords[feeLegIndex].amount === feeAmount && feeLegRecords[feeLegIndex].currency === feeCurrency) {
           feeLeg = feeLegRecords[feeLegIndex];
           break;
         }
@@ -5270,6 +5387,12 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
     }
     if (!feeLeg || feeLeg.amount !== feeAmount || feeLeg.currency !== feeCurrency) {
       return { rejected: e2Rejected_(operationId, 'group-fee-leg-missing') };
+    }
+    feeLeg.matched = true;
+  }
+  for (var unmatchedFeeIndex = 0; unmatchedFeeIndex < feeLegRecords.length; unmatchedFeeIndex += 1) {
+    if (!feeLegRecords[unmatchedFeeIndex].matched) {
+      return { rejected: e2Rejected_(operationId, 'group-fee-metadata-required') };
     }
   }
   var declared = content.currencyTotals;
@@ -5376,23 +5499,13 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
   }
   var now = taipeiIsoNow_();
   var groupSheetRow;
-  if (existingGroup) {
-    groupSheetRow = existingGroup.sheetRow;
-    // A prior attempt may have left the group metadata row incomplete. Keep
-    // that durable marker while the retry fills only missing legs.
-    e2Set_(spreadsheet, '事件群組', groupSheetRow, {
-      group_id: groupId, status: 'incomplete', currency_totals_json: e2Json_(currencyTotals),
-      completion_marker: '', content_digest: digest,
-      created_at: existingGroup.values.created_at || now, updated_at: now,
-      source: content.source || 'import',
-    });
-  } else {
-    groupSheetRow = e2Append_(spreadsheet, '事件群組', {
-      group_id: groupId, status: 'incomplete', currency_totals_json: e2Json_(currencyTotals),
-      completion_marker: '', content_digest: digest, created_at: now, updated_at: now,
-      source: content.source || 'import',
-    });
-  }
+  groupSheetRow = e2Append_(spreadsheet, '事件群組', {
+    group_id: groupId, status: 'incomplete', currency_totals_json: e2Json_(currencyTotals),
+    completion_marker: '', content_digest: digest,
+    created_at: existingGroup && existingGroup.values.created_at ? existingGroup.values.created_at : now,
+    updated_at: now, source: 'import',
+  });
+  e2PersistActorMetadata_(spreadsheet, 'event-group', groupId, digest, content.actor, operationId);
   var destinations = [];
   try {
     for (var postingIndex = 0; postingIndex < postings.length; postingIndex += 1) {
@@ -5442,21 +5555,21 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
         credit_account: item.posting ? item.posting['貸方帳戶'] : '',
         content_digest: legDigest,
       });
+      e2PersistActorMetadata_(spreadsheet, 'event-group-leg', groupId + ':' + item.txnId, legDigest, content.actor, operationId);
       destinations.push({ id: item.txnId, revision: legDigest });
     }
-    e2Set_(spreadsheet, '事件群組', groupSheetRow, {
+    var completeRevision = e2Digest_({ groupId: groupId, digest: digest, status: 'complete' });
+    e2Append_(spreadsheet, '事件群組', {
       group_id: groupId, status: 'complete', currency_totals_json: e2Json_(currencyTotals),
       completion_marker: String(content.completionMarker || 'complete:' + digest),
       content_digest: digest,
       created_at: existingGroup && existingGroup.values.created_at ? existingGroup.values.created_at : now,
-      updated_at: taipeiIsoNow_(),
-      source: content.source || 'import',
+      updated_at: taipeiIsoNow_(), source: 'import',
     });
+    e2PersistActorMetadata_(spreadsheet, 'event-group', groupId, completeRevision, content.actor, operationId);
     var groupEvidenceId = groupId;
     var existingGroupEvidence = e2LatestRecord_(spreadsheet, 'event-group-evidence', groupEvidenceId);
-    if (!existingGroupEvidence && (content.actor || content.conversion || content.fx || content.exchange || content.fees || content.feeMetadata || content.fee_metadata ||
-        content.conversionReference || content.conversion_reference || content.fxReference || content.fx_reference ||
-        content.clearingReference || content.clearing_reference || content.clearingLink || content.clearing_link)) {
+    if (!existingGroupEvidence) {
       var groupEvidenceData = {
         groupId: groupId,
         actor: content.actor || '',
@@ -5471,14 +5584,17 @@ function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
         created_at: taipeiIsoNow_(),
       });
     }
+    e2PersistActorMetadata_(spreadsheet, 'event-group-evidence', groupEvidenceId, digest, content.actor, operationId);
   } catch (error) {
     if (groupSheetRow) {
-      e2Set_(spreadsheet, '事件群組', groupSheetRow, {
+      var incompleteRevision = e2Digest_({ groupId: groupId, digest: digest, status: 'incomplete' });
+      e2Append_(spreadsheet, '事件群組', {
         group_id: groupId, status: 'incomplete', currency_totals_json: e2Json_(currencyTotals),
         completion_marker: '', content_digest: digest,
         created_at: existingGroup && existingGroup.values.created_at ? existingGroup.values.created_at : now,
-        updated_at: taipeiIsoNow_(), source: content.source || 'import',
+        updated_at: taipeiIsoNow_(), source: 'import',
       });
+      e2PersistActorMetadata_(spreadsheet, 'event-group', groupId, incompleteRevision, content.actor, operationId);
     }
     throw error;
   }
@@ -5533,6 +5649,7 @@ function e2ExecuteConfirmation_(spreadsheet, operationId, digest, content) {
     txn_id: txnId, category: category, review_state: confirmed ? 'confirmed' : 'pending',
     revision: reviewRevision, operation_id: operationId, updated_at: taipeiIsoNow_(),
   });
+  e2PersistActorMetadata_(spreadsheet, 'event-review', txnId, reviewRevision, content.actor, operationId);
   var updatedSource = readSnapshotSource_(spreadsheet);
   var updatedEvents = snapshotEventRecords_(updatedSource);
   var updatedRevision = reviewRevision;
@@ -5711,6 +5828,7 @@ function e2ExecuteManifest_(spreadsheet, operationId, digest, content) {
     actor: String(content.actor || ''), approved_at: now,
     source_evidence_json: e2Json_(manifest.sourceEvidence || manifest.source_evidence || []), updated_at: now,
   });
+  e2PersistActorMetadata_(spreadsheet, 'manifest', manifestId, revision, content.actor, operationId);
   var destinations = [{ id: manifestId, revision: revision }];
   for (var stepIndex = 0; stepIndex < steps.length; stepIndex += 1) {
     var candidate = steps[stepIndex];
@@ -5730,6 +5848,7 @@ function e2ExecuteManifest_(spreadsheet, operationId, digest, content) {
       expected_revisions_json: e2Json_(candidate.expectedRevisions || candidate.expected_revisions || []),
       result_json: e2Json_(candidate.result || null), updated_at: now,
     });
+    e2PersistActorMetadata_(spreadsheet, 'manifest-step', manifestId + ':' + stepId, stepRevision, content.actor, operationId);
     destinations.push({ id: manifestId + ':' + stepId, revision: stepRevision });
   }
   return { destinations: destinations };
@@ -5790,6 +5909,7 @@ function e2ExecuteResumeImport_(spreadsheet, operationId, digest, content) {
       expected_revisions_json: e2Json_(candidate.expectedRevisions || candidate.expected_revisions || []),
       result_json: e2Json_(candidate.result || null), updated_at: taipeiIsoNow_(),
     });
+    e2PersistActorMetadata_(spreadsheet, 'manifest-step', manifestId + ':' + stepId, stepRevision, content.actor, operationId);
     destinations.push({ id: manifestId + ':' + stepId, revision: stepRevision });
     if (state !== 'completed' && state !== 'skipped') completed = false;
     if (state === 'conflicted' || state === 'conflicting' || state === 'rejected' || state === 'unknown') conflicting = true;
@@ -5802,6 +5922,7 @@ function e2ExecuteResumeImport_(spreadsheet, operationId, digest, content) {
     approved_at: manifest.values.approved_at,
     source_evidence_json: manifest.values.source_evidence_json, updated_at: taipeiIsoNow_(),
   });
+  e2PersistActorMetadata_(spreadsheet, 'manifest', manifestId, manifestRevision, content.actor, operationId);
   destinations[0] = { id: manifestId, revision: manifestRevision };
   return { destinations: destinations };
 }
@@ -5833,6 +5954,7 @@ function e2ExecuteEvidence_(spreadsheet, operationId, digest, content) {
     uploaded_at: String(evidence.uploadedAt || evidence.uploaded_at || taipeiIsoNow_()),
     fields_json: e2Json_(evidence.fields || evidence.originalFields || {}), revision: revision,
   });
+  e2PersistActorMetadata_(spreadsheet, 'evidence', evidenceId, revision, content.actor, operationId);
   return { destinations: [{ id: evidenceId, revision: revision }] };
 }
 
@@ -5861,6 +5983,7 @@ function e2ExecuteLink_(spreadsheet, operationId, digest, content) {
     content_digest: digest, status: String(link.status || 'active'),
     origin: String(link.origin || operationId), created_at: taipeiIsoNow_(),
   });
+  e2PersistActorMetadata_(spreadsheet, 'link', linkId, revision, content.actor, operationId);
   return { destinations: [{ id: linkId, revision: revision }] };
 }
 
@@ -5897,6 +6020,7 @@ function e2ExecuteCheckpoint_(spreadsheet, operationId, digest, content) {
     }),
     status: String(checkpoint.status || 'accepted'), revision: revision, created_at: taipeiIsoNow_(),
   });
+  e2PersistActorMetadata_(spreadsheet, 'checkpoint', checkpointId, revision, content.actor, operationId);
   return { destinations: [{ id: checkpointId, revision: revision }] };
 }
 
@@ -5911,6 +6035,7 @@ function e2ExecuteSetting_(spreadsheet, operationId, digest, content) {
     effective_date: String(setting.effectiveDate || setting.effective_date || ''),
     revision: revision, updated_at: taipeiIsoNow_(),
   });
+  e2PersistActorMetadata_(spreadsheet, 'setting', settingId, revision, content.actor, operationId);
   return { destinations: [{ id: settingId, revision: revision }] };
 }
 
@@ -5925,6 +6050,7 @@ function e2ExecuteResult_(spreadsheet, operationId, digest, content) {
     state: String(result.state || 'accepted'), value_json: e2Json_(result.value),
     created_at: taipeiIsoNow_(), revision: revision,
   });
+  e2PersistActorMetadata_(spreadsheet, 'result', resultId, revision, content.actor, operationId);
   return { destinations: [{ id: resultId, revision: revision }] };
 }
 
@@ -6037,7 +6163,12 @@ function e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content) 
       return { conflict: e2Conflict_(operationId, 'opening-evidence-content-changed', [{ id: evidenceId, expected: expectedEvidenceDigest, actual: evidenceFound.content_digest }]) };
     }
   }
-  if (difference !== '0' && !requestedTxnId) requestedTxnId = String(Utilities.getUuid()).trim();
+  if (difference !== '0' && !requestedTxnId) {
+    return { rejected: e2Rejected_(operationId, 'opening-txn-id-required') };
+  }
+  if (difference !== '0' && !UUID_PATTERN.test(requestedTxnId)) {
+    return { rejected: e2Rejected_(operationId, 'opening-txn-id-invalid') };
+  }
   var checkpointRevision = e2Digest_({ checkpointId: checkpointId, cutoff: date, accepted: acceptedText, represented: representedText, digest: digest });
   var checkpoint = {
     checkpointId: checkpointId, cutoff: date,
@@ -6058,6 +6189,7 @@ function e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content) 
       coverage_json: e2Json_(checkpoint.coverage), status: 'pending',
       revision: checkpointRevision, created_at: taipeiIsoNow_(),
     });
+    e2PersistActorMetadata_(spreadsheet, 'checkpoint', checkpointId, checkpointRevision, content.actor, operationId);
   }
   var destinations = [{ id: checkpointId, revision: checkpointRevision }];
   if (difference !== '0') {
@@ -6081,7 +6213,7 @@ function e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content) 
       description: String(adjustment.description || '期初調整-' + checkpointId),
       settlementStatus: '', reversalTxnId: '', txnId: txnId, source: '移轉', now: taipeiIsoNow_(),
     });
-    validatePostingVocabulary_(posting, vocabulary);
+    validateE2Posting_(posting, vocabulary, '移轉');
     var existingOpeningPosting = e2ExistingJournalPosting_(journal, columns, txnId);
     if (existingOpeningPosting && !e2JournalPostingMatches_(existingOpeningPosting.values, posting)) {
       return { conflict: e2Conflict_(operationId, 'opening-adjustment-id-reused-with-different-content', [{ id: txnId }]) };
@@ -6089,19 +6221,21 @@ function e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content) 
     if (!existingOpeningPosting) appendPosting_(journal, columns, posting);
     destinations.push({ id: txnId, revision: e2PostingRevision_(posting) });
   }
-  var checkpointRows = e2Rows_(spreadsheet, '對帳檢查點');
-  var checkpointRow = resumingCheckpoint;
-  if (!checkpointRow) {
-    checkpointRow = checkpointRows[checkpointRows.length - 1];
-  }
-  e2Set_(spreadsheet, '對帳檢查點', checkpointRow.sheetRow, {
+  var acceptedRevision = e2Digest_({
+    checkpointId: checkpointId, cutoff: date, accepted: acceptedText,
+    represented: representedText, digest: digest, status: 'accepted',
+  });
+  e2Append_(spreadsheet, '對帳檢查點', {
     checkpoint_id: checkpointId, cutoff: date, scope_version: checkpoint.scopeVersion,
     represented_balances_json: e2Json_(checkpoint.representedBalances),
     accepted_balances_json: e2Json_(checkpoint.acceptedBalances), adjustment_json: e2Json_(checkpoint.adjustment),
     evidence_ids_json: e2Json_(evidenceIds), coverage_json: e2Json_(checkpoint.coverage), status: 'accepted',
-    revision: checkpointRevision, created_at: checkpointRow.values.created_at,
+    revision: acceptedRevision,
+    created_at: resumingCheckpoint ? resumingCheckpoint.values.created_at : taipeiIsoNow_(),
   });
-  e2InvalidateResults_(spreadsheet, 'opening-adjustment:' + checkpointId, [checkpointId, account]);
+  e2PersistActorMetadata_(spreadsheet, 'checkpoint', checkpointId, acceptedRevision, content.actor, operationId);
+  e2InvalidateResults_(spreadsheet, 'opening-adjustment:' + checkpointId, [checkpointId, account], content.actor, operationId);
+  destinations[0] = { id: checkpointId, revision: acceptedRevision };
   return { destinations: destinations };
 }
 
@@ -6139,7 +6273,7 @@ function e2ExistingJournalPosting_(journal, columns, txnId) {
   return { row: rowNumber, values: values };
 }
 
-function e2InvalidateResults_(spreadsheet, reason, changedIds) {
+function e2InvalidateResults_(spreadsheet, reason, changedIds, actor, operationId) {
   var rows = snapshotE2Records_(spreadsheet, 'results');
   for (var index = 0; index < rows.length; index += 1) {
     var result = rows[index];
@@ -6165,6 +6299,7 @@ function e2InvalidateResults_(spreadsheet, reason, changedIds) {
       state: 'invalidated', value_json: e2Json_(result.value),
       created_at: taipeiIsoNow_(), revision: revision,
     });
+    e2PersistActorMetadata_(spreadsheet, 'result', result.resultId, revision, actor, operationId);
   }
 }
 
@@ -6182,15 +6317,21 @@ function e2ExecuteCorrection_(spreadsheet, operationId, digest, content) {
   var vocabulary = readAccountVocabulary_(spreadsheet);
   var journal = requiredSheet_(spreadsheet, '日記帳');
   var columns = resolveHeaders_(journal.getRange(1, 1, 1, journal.getLastColumn()).getDisplayValues()[0], JOURNAL_HEADERS);
-  var reversalId = String(correction.reversalTxnId || correction.reversal_txn_id || Utilities.getUuid()).trim();
+  var reversalId = String(correction.reversalTxnId || correction.reversal_txn_id || '').trim();
+  if (!UUID_PATTERN.test(reversalId)) {
+    return { rejected: e2Rejected_(operationId, 'reversal-txn-id-invalid') };
+  }
   var existingReversal = e2ExistingJournalPosting_(journal, columns, reversalId);
   var date = String(correction.date || '').trim();
   if (!date && existingReversal) date = String(existingReversal.values['日期'] || '').trim();
   if (!date) date = taipeiIsoNow_().slice(0, 10);
   var replacement = correction.replacement || correction.newPosting;
   var replacementId = replacement
-    ? String(correction.replacementTxnId || correction.replacement_txn_id || Utilities.getUuid()).trim()
+    ? String(correction.replacementTxnId || correction.replacement_txn_id || '').trim()
     : '';
+  if (replacement && !UUID_PATTERN.test(replacementId)) {
+    return { rejected: e2Rejected_(operationId, 'replacement-txn-id-invalid') };
+  }
   var existingReplacement = replacement
     ? e2ExistingJournalPosting_(journal, columns, replacementId)
     : null;
@@ -6214,7 +6355,7 @@ function e2ExecuteCorrection_(spreadsheet, operationId, digest, content) {
       description: replacement.description || '更正後-' + originalId, settlementStatus: replacement.settlementStatus || '',
       reversalTxnId: '', txnId: replacementId, source: 'import', now: taipeiIsoNow_(),
     });
-    try { validatePostingVocabulary_(replacementPosting, vocabulary); } catch (error) {
+    try { validateE2Posting_(replacementPosting, vocabulary, 'import'); } catch (error) {
       return { rejected: e2Rejected_(operationId, 'replacement-posting-invalid', String(error.message || error)) };
     }
   }
@@ -6225,7 +6366,9 @@ function e2ExecuteCorrection_(spreadsheet, operationId, digest, content) {
     description: String(correction.description || '更正-' + originalId), settlementStatus: '',
     reversalTxnId: originalId, txnId: reversalId, source: 'import', now: taipeiIsoNow_(),
   });
-  validatePostingVocabulary_(reversal, vocabulary);
+  try { validateE2Posting_(reversal, vocabulary, 'import'); } catch (error) {
+    return { rejected: e2Rejected_(operationId, 'reversal-posting-invalid', String(error.message || error)) };
+  }
   var existingCorrectionRecord = e2LatestRecord_(spreadsheet, 'corrections', originalId + ':' + reversalId);
   if (existingCorrectionRecord) {
     var existingCorrectionData = e2ParseJson_(existingCorrectionRecord.values.data_json, {});
@@ -6259,13 +6402,14 @@ function e2ExecuteCorrection_(spreadsheet, operationId, digest, content) {
         originalId: originalId, reversalId: reversalId, replacementId: replacementId,
         reversalRevision: e2PostingRevision_(reversal),
         replacementRevision: replacementPosting ? e2PostingRevision_(replacementPosting) : '',
-        contentDigest: digest,
+        contentDigest: digest, actor: content.actor || '',
       }),
       created_at: taipeiIsoNow_(),
     });
+    e2PersistActorMetadata_(spreadsheet, 'correction', originalId + ':' + reversalId, digest, content.actor, operationId);
   }
   if (appended) {
-    e2InvalidateResults_(spreadsheet, 'correction:' + originalId, [originalId, reversalId, replacementId]);
+    e2InvalidateResults_(spreadsheet, 'correction:' + originalId, [originalId, reversalId, replacementId], content.actor, operationId);
   }
   return { destinations: destinations };
 }

@@ -557,4 +557,32 @@ describe('handleAction', () => {
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ kind: 'rejected', reason: 'group-legs-required' })
   })
+
+  it('derives the command actor from verified Access and overwrites nested caller data', async () => {
+    const fetchFn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const envelope = JSON.parse(String(init?.body)) as { payload: string }
+      expect(decodePayload(envelope.payload)).toEqual(expect.objectContaining({
+        action: 'command',
+        actor: `access-exp:${NOW + 86_400}`,
+        content: expect.objectContaining({
+          kind: 'claims',
+          actor: `access-exp:${NOW + 86_400}`,
+        }),
+      }))
+      return new Response('{"kind":"committed"}', { status: 200 })
+    }) as unknown as typeof fetch
+
+    const response = await handleAction(
+      'command',
+      req({
+        operationId: 'actor-command', expectedRevisions: [], contentDigest: 'actor-command',
+        actor: 'forged-caller', content: { kind: 'claims', claims: ['observation:actor'], actor: 'forged-nested' },
+      }),
+      env,
+      deps(fetchFn),
+    )
+
+    expect(response.status).toBe(200)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
 })
