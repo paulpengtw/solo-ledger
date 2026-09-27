@@ -577,7 +577,7 @@ describe('E2 reviewed Personal operations', () => {
     const receipt = {
       operationId: 'receipt-operation', planId: 'plan-1', contractVersion: CONTRACT_VERSION,
       actor: 'cheng', acceptedAt: '2026-07-27T08:00:00.000Z', contentDigest: 'plan-digest',
-      steps: [{ stepId: 'step-1', book: 'personal', state: { kind: 'pending' } }],
+      steps: [{ stepId: 'step-1', kind: 'claim-observation', book: 'personal', expectedRevisions: [], dependsOn: [], state: { kind: 'pending' } }],
       state: { kind: 'accepted' },
     }
     const accepted = await post(harness, {
@@ -593,7 +593,7 @@ describe('E2 reviewed Personal operations', () => {
 
     const progress = {
       ...receipt,
-      steps: [{ stepId: 'step-1', book: 'personal', state: { kind: 'completed', destination: { id: 'event-1', revision: 'rev-1' }, completedAt: '2026-07-27T08:01:00.000Z' } }],
+      steps: [{ stepId: 'step-1', kind: 'claim-observation', book: 'personal', expectedRevisions: [], dependsOn: [], state: { kind: 'completed', destination: { id: 'event-1', revision: 'rev-1' }, completedAt: '2026-07-27T08:01:00.000Z' } }],
       state: { kind: 'completed', completedAt: '2026-07-27T08:01:00.000Z' },
     }
     const progressed = await post(harness, {
@@ -606,6 +606,251 @@ describe('E2 reviewed Personal operations', () => {
     expect(progressed).toMatchObject({ kind: 'committed', operationId: 'receipt-progress-operation' })
     expect((await post(harness, { action: 'snapshot', scope: 'results' }, 'receipt-results-progress')).records)
       .toEqual([expect.objectContaining({ id: 'receipt-operation', data: progress })])
+  })
+
+  it('uses one stable link revision for the write outcome, snapshot, and retry', async () => {
+    const payload = {
+      action: 'record_link', operationId: 'stable-link-first',
+      link: {
+        linkId: 'stable-link-1', sourceId: 'event-source-1', destinationId: 'partner-event-1',
+        destinationRevision: 'partner-revision-1', sourceRevision: 'personal-revision-1',
+        status: 'active', origin: 'stable-link-test',
+      },
+    }
+    const first = await post(harness, payload, 'stable-link-first-transport')
+    const links = await post(harness, { action: 'snapshot', scope: 'links' }, 'stable-link-snapshot')
+    const link = (links.records as Array<Record<string, unknown>>).find(record => record.id === 'stable-link-1')!
+
+    expect(first).toMatchObject({
+      kind: 'committed',
+      destinations: [{ id: 'stable-link-1', revision: link.revision }],
+    })
+
+    const retry = await post(harness, {
+      ...payload,
+      operationId: 'stable-link-retry',
+      expectedRevisions: [{ id: 'stable-link-1', revision: link.revision }],
+    }, 'stable-link-retry-transport')
+    expect(retry).toMatchObject({
+      kind: 'committed',
+      destinations: [{ id: 'stable-link-1', revision: link.revision }],
+    })
+  })
+
+  it('preserves an external nested expected-revision conflict on an unknown manifest retry', async () => {
+    const metric = await post(harness, {
+      action: 'publish_result', operationId: 'nested-revision-target-op', result: {
+        resultId: 'nested-revision-target', state: 'accepted', value: { total: '1' },
+      },
+    }, 'nested-revision-target-transport')
+    expect(metric).toMatchObject({ kind: 'committed' })
+    const initialResults = await post(harness, { action: 'snapshot', scope: 'results' }, 'nested-revision-target-snapshot')
+    const target = (initialResults.records as Array<Record<string, unknown>>).find(record => record.resultId === 'nested-revision-target')!
+    const payload = {
+      action: 'accept_import', operationId: 'nested-revision-manifest', manifest: {
+        manifestId: 'nested-revision-manifest', sourceEvidence: ['nested-revision-evidence'],
+      }, steps: [{
+        stepId: 'nested-step', disposition: 'create', state: 'completed',
+        destinationId: 'nested-destination', destinationRevision: 'nested-destination-revision',
+        expectedRevisions: [{ id: 'nested-revision-target', revision: target.revision }],
+      }],
+    }
+    harness.spreadsheet.getSheetByName('匯入步驟')!.failNextSetValues('nested manifest step failed')
+    expect(await post(harness, payload, 'nested-revision-first-transport')).toEqual({
+      kind: 'unknown', operationId: 'nested-revision-manifest', reason: 'write-outcome-unknown',
+    })
+
+    await post(harness, {
+      action: 'publish_result', operationId: 'nested-revision-target-change', result: {
+        resultId: 'nested-revision-target', state: 'accepted', value: { total: '2' },
+      },
+    }, 'nested-revision-target-change-transport')
+
+    const retry = await post(harness, payload, 'nested-revision-retry-transport')
+    expect(retry).toMatchObject({
+      kind: 'conflict', operationId: 'nested-revision-manifest', reason: 'stale-expected-revision',
+      conflicts: [expect.objectContaining({ id: 'nested-revision-target' })],
+    })
+  })
+
+  it('recovers a resume-import command with a manifest wrapper after a partial write', async () => {
+    await post(harness, {
+      action: 'accept_import', operationId: 'resume-wrapper-manifest', manifest: {
+        manifestId: 'resume-wrapper-manifest', sourceEvidence: ['resume-wrapper-evidence'],
+      }, steps: [{ stepId: 'pending', disposition: 'create', state: 'pending' }],
+    }, 'resume-wrapper-manifest-transport')
+    const payload = {
+      action: 'command', operationId: 'resume-wrapper-operation', expectedRevisions: [], content: {
+        kind: 'resume-import', manifest: {
+          manifestId: 'resume-wrapper-manifest', steps: [{
+            stepId: 'pending', state: 'completed', destinationId: 'resume-wrapper-destination',
+            destinationRevision: 'resume-wrapper-destination-revision',
+          }],
+        },
+      },
+    }
+    harness.spreadsheet.getSheetByName('匯入清單')!.failNextSetValues('resume manifest update failed')
+    expect(await post(harness, payload, 'resume-wrapper-first-transport')).toEqual({
+      kind: 'unknown', operationId: 'resume-wrapper-operation', reason: 'write-outcome-unknown',
+    })
+
+    const retry = await post(harness, payload, 'resume-wrapper-retry-transport')
+    expect(retry).toMatchObject({ kind: 'committed', operationId: 'resume-wrapper-operation' })
+    expect((await post(harness, { action: 'snapshot', scope: 'steps' }, 'resume-wrapper-step-snapshot')).records)
+      .toEqual([expect.objectContaining({ manifestId: 'resume-wrapper-manifest', stepId: 'pending', state: 'completed' })])
+  })
+
+  it('types receipt results and excludes them from metric result invalidation', async () => {
+    const receipt = {
+      kind: 'import-receipt', operationId: 'typed-receipt', planId: 'typed-plan', contractVersion: CONTRACT_VERSION,
+      actor: 'cheng', acceptedAt: '2026-07-27T08:00:00.000Z', contentDigest: 'typed-receipt-digest',
+      steps: [{ stepId: 'typed-step', kind: 'claim-observation', book: 'personal', expectedRevisions: [], dependsOn: [], state: { kind: 'pending' } }],
+      state: { kind: 'accepted' },
+    }
+    await post(harness, {
+      action: 'command', operationId: 'typed-receipt', expectedRevisions: [], content: {
+        kind: 'import-receipt', writes: [{ scope: 'results', id: 'typed-receipt', data: receipt }],
+      },
+    }, 'typed-receipt-transport')
+
+    const journal = harness.spreadsheet.getSheetByName('日記帳')!
+    journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
+      '2026-07-27', '12:00', '支出', '餐飲', '現金', '10', 'TWD', '餐飲',
+      'typed-receipt-shop', 'typed receipt test', '', '', '00000000-0000-4000-8000-000000000930', 'import', '2026-07-27T12:00:00+08:00',
+    ]])
+    await post(harness, {
+      action: 'publish_result', operationId: 'typed-metric', result: {
+        resultId: 'typed-metric', dependencies: [{ id: '00000000-0000-4000-8000-000000000930' }],
+        state: 'accepted', value: { total: '10' },
+      },
+    }, 'typed-metric-transport')
+    await post(harness, {
+      action: 'correct_event', operationId: 'typed-correction', txnId: '00000000-0000-4000-8000-000000000930',
+      reversalTxnId: '00000000-0000-4000-8000-000000000931',
+    }, 'typed-correction-transport')
+
+    const results = await post(harness, { action: 'snapshot', scope: 'results' }, 'typed-results-snapshot')
+    expect(results.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'typed-receipt', type: 'receipt', data: receipt }),
+      expect.objectContaining({ resultId: 'typed-metric', type: 'metric', state: 'invalidated' }),
+    ]))
+    expect((results.records as Array<Record<string, unknown>>).filter(record => record.id === 'typed-receipt')).toHaveLength(1)
+    expect(harness.spreadsheet.getSheetByName('結果版本')!.getLastRow()).toBe(3)
+  })
+
+  it('reserves receipt claims before attempting receipt result writes', async () => {
+    await post(harness, { action: 'enable_e2' }, 'receipt-claim-fence-enable')
+    harness.spreadsheet.getSheetByName('整合記錄')!.failNextSetValues('receipt result write failed')
+    const failed = await post(harness, {
+      action: 'command', operationId: 'receipt-claim-fence', expectedRevisions: [],
+      claims: ['observation:receipt-fence'], content: {
+        kind: 'import-receipt', claims: ['observation:receipt-fence'],
+        writes: [{ scope: 'results', id: 'receipt-fence', data: {
+          kind: 'import-receipt', operationId: 'receipt-fence', planId: 'fence-plan', contractVersion: CONTRACT_VERSION,
+          actor: 'cheng', acceptedAt: '2026-07-27T08:00:00.000Z', contentDigest: 'fence-receipt-digest',
+          steps: [{ stepId: 'fence-step', kind: 'claim-observation', book: 'personal', expectedRevisions: [], dependsOn: [], state: { kind: 'pending' } }],
+          state: { kind: 'accepted' },
+        } }],
+      },
+    }, 'receipt-claim-fence-transport')
+    expect(failed).toEqual({ kind: 'unknown', operationId: 'receipt-claim-fence', reason: 'write-outcome-unknown' })
+    expect((await post(harness, { action: 'snapshot', scope: 'claims' }, 'receipt-claim-fence-snapshot')).records)
+      .toEqual([expect.objectContaining({ claimId: 'observation:receipt-fence', operationId: 'receipt-claim-fence', status: 'claimed' })])
+  })
+
+  it('rejects malformed receipts and refuses progress that changes approved identity', async () => {
+    const malformed = await post(harness, {
+      action: 'command', operationId: 'malformed-receipt', expectedRevisions: [], content: {
+        kind: 'import-receipt',
+        writes: [{ scope: 'results', id: 'malformed-receipt', data: { operationId: 'malformed-receipt' } }],
+      },
+    }, 'malformed-receipt-transport')
+    expect(malformed).toMatchObject({ kind: 'rejected', reason: 'invalid-receipt' })
+    expect((await post(harness, { action: 'snapshot', scope: 'results' }, 'malformed-receipt-snapshot')).records).toEqual([])
+
+    const receipt = {
+      operationId: 'immutable-receipt', planId: 'immutable-plan', contractVersion: CONTRACT_VERSION,
+      actor: 'cheng', acceptedAt: '2026-07-27T08:00:00.000Z', contentDigest: 'immutable-digest',
+      steps: [{ stepId: 'immutable-step', kind: 'claim-observation', book: 'personal', expectedRevisions: [], dependsOn: [], state: { kind: 'pending' } }],
+      state: { kind: 'accepted' },
+    }
+    expect(await post(harness, {
+      action: 'command', operationId: 'immutable-receipt', expectedRevisions: [], content: {
+        kind: 'import-receipt', writes: [{ scope: 'results', id: 'immutable-receipt', data: receipt }],
+      },
+    }, 'immutable-receipt-first')).toMatchObject({ kind: 'committed' })
+    const changed = await post(harness, {
+      action: 'command', operationId: 'immutable-receipt-progress', expectedRevisions: [], content: {
+        kind: 'receipt-progress', writes: [{
+          scope: 'results', id: 'immutable-receipt', data: {
+            ...receipt, planId: 'different-plan', state: { kind: 'in-progress' },
+          },
+        }],
+      },
+    }, 'immutable-receipt-progress')
+    expect(changed).toMatchObject({ kind: 'rejected', reason: 'receipt-progress-regression' })
+
+    const definitionReceipt = {
+      operationId: 'definition-receipt', planId: 'definition-plan', contractVersion: CONTRACT_VERSION,
+      actor: 'cheng', acceptedAt: '2026-07-27T08:00:00.000Z', contentDigest: 'definition-digest',
+      steps: [{
+        stepId: 'definition-step', kind: 'claim-observation', book: 'personal',
+        expectedRevisions: [{ id: 'source-1', revision: 'rev-1' }], dependsOn: ['prior-step'],
+        state: { kind: 'pending' },
+      }],
+      state: { kind: 'accepted' },
+    }
+    expect(await post(harness, {
+      action: 'command', operationId: 'definition-receipt', expectedRevisions: [], content: {
+        kind: 'import-receipt', writes: [{ scope: 'results', id: 'definition-receipt', data: definitionReceipt }],
+      },
+    }, 'definition-receipt-first')).toMatchObject({ kind: 'committed' })
+    const definitionChanged = await post(harness, {
+      action: 'command', operationId: 'definition-receipt-progress', expectedRevisions: [], content: {
+        kind: 'receipt-progress', writes: [{
+          scope: 'results', id: 'definition-receipt', data: {
+            ...definitionReceipt,
+            steps: [{ ...definitionReceipt.steps[0], kind: 'create-event-group', state: { kind: 'unknown', reason: 'uncertain' } }],
+            state: { kind: 'in-progress' },
+          },
+        }],
+      },
+    }, 'definition-receipt-progress')
+    expect(definitionChanged).toMatchObject({ kind: 'rejected', reason: 'receipt-progress-regression' })
+
+    const incompleteReceipt = {
+      operationId: 'incomplete-receipt', planId: 'incomplete-plan', contractVersion: CONTRACT_VERSION,
+      actor: 'cheng', acceptedAt: '2026-07-27T08:00:00.000Z', contentDigest: 'incomplete-digest',
+      steps: [{
+        stepId: 'incomplete-step', kind: 'claim-observation', book: 'personal',
+        expectedRevisions: [], dependsOn: [], state: {
+          kind: 'unknown', reason: 'write-outcome-unknown', destinations: [
+            { id: 'destination-a', revision: 'revision-a' }, { id: 'destination-b', revision: 'revision-b' },
+          ],
+        },
+      }],
+      state: { kind: 'incomplete', reason: 'write-outcome-unknown' },
+    }
+    expect(await post(harness, {
+      action: 'command', operationId: 'incomplete-receipt', expectedRevisions: [], content: {
+        kind: 'import-receipt', writes: [{ scope: 'results', id: 'incomplete-receipt', data: incompleteReceipt }],
+      },
+    }, 'incomplete-receipt-first')).toMatchObject({ kind: 'committed' })
+    const incompleteDestinationDropped = await post(harness, {
+      action: 'command', operationId: 'incomplete-receipt-progress', expectedRevisions: [], content: {
+        kind: 'receipt-progress', writes: [{
+          scope: 'results', id: 'incomplete-receipt', data: {
+            ...incompleteReceipt,
+            steps: [{
+              ...incompleteReceipt.steps[0],
+              state: { kind: 'completed', destination: { id: 'destination-a', revision: 'revision-a' }, completedAt: '2026-07-27T08:02:00.000Z' },
+            }],
+            state: { kind: 'completed', completedAt: '2026-07-27T08:02:00.000Z' },
+          },
+        }],
+      },
+    }, 'incomplete-receipt-progress')
+    expect(incompleteDestinationDropped).toMatchObject({ kind: 'rejected', reason: 'receipt-progress-regression' })
   })
 
   it('includes durable E2 links in pinned lookup results', async () => {

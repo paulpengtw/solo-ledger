@@ -4610,7 +4610,14 @@ function e2CheckExpectedRevisions_(spreadsheet, expected) {
 // the manifest/group/step rows that this operation already appended. Keep
 // checking every other expected revision: a concurrent writer must still
 // turn the retry into a conflict rather than inherit stale content.
-function e2RecoveryOwnedIds_(spreadsheet, content, digest) {
+function e2RecoveryOwned_(spreadsheet, scope, id, operationId) {
+  var provenance = e2LatestRecord_(spreadsheet, 'actor-provenance', String(scope || '') + ':' + String(id || ''));
+  if (!provenance) return false;
+  var data = e2ParseJson_(provenance.values.data_json, null);
+  return !!data && String(data.operationId || '') === String(operationId || '');
+}
+
+function e2RecoveryOwnedIds_(spreadsheet, content, digest, operationId) {
   var owned = Object.create(null);
   var kind = String(content && content.kind || '');
   if (kind === 'event-group' || kind === 'compound-event-group') {
@@ -4618,7 +4625,9 @@ function e2RecoveryOwnedIds_(spreadsheet, content, digest) {
     var groups = snapshotE2Records_(spreadsheet, 'groups');
     for (var groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
       if (groups[groupIndex].id === groupId && groups[groupIndex].contentDigest === digest) {
-        owned[groupId] = true;
+        if (e2RecoveryOwned_(spreadsheet, 'event-group', groupId, operationId)) {
+          owned[groupId] = true;
+        }
         break;
       }
     }
@@ -4627,10 +4636,16 @@ function e2RecoveryOwnedIds_(spreadsheet, content, digest) {
 
   var manifest = content && (content.manifest || content);
   var manifestId = String(manifest && (manifest.manifestId || manifest.manifest_id || manifest.id) || '').trim();
-  if (kind === 'manifest' || kind === 'import') {
+  if (kind === 'manifest' || kind === 'import' || kind === 'resume-import') {
     var manifests = snapshotE2Records_(spreadsheet, 'manifests');
     for (var manifestIndex = 0; manifestIndex < manifests.length; manifestIndex += 1) {
-      if (manifests[manifestIndex].id === manifestId && manifests[manifestIndex].contentDigest === digest) {
+      var manifestMatchesContent = manifests[manifestIndex].contentDigest === digest;
+      var manifestMatchesRecovery = kind === 'resume-import' && e2RecoveryOwned_(
+        spreadsheet, 'manifest', manifestId, operationId,
+      );
+      if (manifests[manifestIndex].id === manifestId &&
+          (manifestMatchesContent || manifestMatchesRecovery) &&
+          e2RecoveryOwned_(spreadsheet, 'manifest', manifestId, operationId)) {
         owned[manifestId] = true;
         break;
       }
@@ -4649,9 +4664,27 @@ function e2RecoveryOwnedIds_(spreadsheet, content, digest) {
       var destinationId = manifestId + ':' + stepId;
       for (var storedIndex = 0; storedIndex < storedSteps.length; storedIndex += 1) {
         var stored = storedSteps[storedIndex];
-        if (stored.id === destinationId && stored.contentDigest === stepDigest && stored.state === stepState) {
+        if (stored.id === destinationId && stored.contentDigest === stepDigest && stored.state === stepState &&
+            e2RecoveryOwned_(spreadsheet, 'manifest-step', destinationId, operationId)) {
           owned[destinationId] = true;
           break;
+        }
+      }
+    }
+  }
+
+  if (kind === 'import-receipt' || kind === 'receipt-progress') {
+    var writes = content && content.writes;
+    if (Array.isArray(writes)) {
+      for (var writeIndex = 0; writeIndex < writes.length; writeIndex += 1) {
+        var write = writes[writeIndex] || {};
+        var writeScope = String(write.scope || '').trim();
+        var writeId = String(write.id || '').trim();
+        if (writeScope !== 'results' || !writeId || !Object.prototype.hasOwnProperty.call(write, 'data')) continue;
+        var storedResult = e2LatestRecord_(spreadsheet, writeScope, writeId);
+        if (storedResult && e2Digest_(e2ParseJson_(storedResult.values.data_json, null)) === e2Digest_(write.data) &&
+            e2RecoveryOwned_(spreadsheet, 'record', writeScope + ':' + writeId, operationId)) {
+          owned[writeId] = true;
         }
       }
     }
@@ -4659,8 +4692,8 @@ function e2RecoveryOwnedIds_(spreadsheet, content, digest) {
   return owned;
 }
 
-function e2ExpectedConflictsForRecovery_(spreadsheet, expected, content, digest) {
-  var owned = e2RecoveryOwnedIds_(spreadsheet, content, digest);
+function e2ExpectedConflictsForRecovery_(spreadsheet, expected, content, digest, operationId) {
+  var owned = e2RecoveryOwnedIds_(spreadsheet, content, digest, operationId);
   var externalExpected = [];
   for (var index = 0; index < expected.length; index += 1) {
     if (!owned[String(expected[index].id || '').trim()]) externalExpected.push(expected[index]);
@@ -4751,17 +4784,291 @@ function e2WriteRecord_(spreadsheet, scope, id, data, operationId) {
   return { id: recordId, revision: revision };
 }
 
-// Receipt and receipt-progress commands use the append-only generic record
-// table, while the scoped `results` snapshot exposes only the latest record
-// for each receipt id. A changed progress payload is a new durable revision;
-// an identical retry reuses the existing row instead of duplicating it.
-function e2ExecuteRecordWrites_(spreadsheet, operationId, content) {
+function e2ReceiptString_(value) {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+function e2ReceiptRevisionList_(value) {
+  if (!Array.isArray(value)) return { ok: false, detail: 'expectedRevisions must be an array' };
+  var seen = Object.create(null);
+  for (var index = 0; index < value.length; index += 1) {
+    var item = value[index];
+    var rawId = item && (item.id || item.recordId || item.record_id);
+    var rawRevision = item && (item.revision || item.expectedRevision || item.expected_revision);
+    var id = typeof rawId === 'string' ? rawId.trim() : '';
+    var revision = typeof rawRevision === 'string' ? rawRevision.trim() : '';
+    if (!item || typeof item !== 'object' || Array.isArray(item) || !id || !revision || seen[id]) {
+      return { ok: false, detail: 'expectedRevisions contains an invalid or duplicate id' };
+    }
+    seen[id] = true;
+  }
+  return { ok: true };
+}
+
+function e2ReceiptStepStateKind_(state) {
+  return String(state && state.kind || '').trim();
+}
+
+function e2ReceiptStepStateRank_(kind) {
+  if (kind === 'pending') return 0;
+  if (kind === 'conflicted' || kind === 'rejected' || kind === 'unknown') return 1;
+  if (kind === 'completed') return 2;
+  return -1;
+}
+
+function e2ReceiptStateRank_(kind) {
+  if (kind === 'accepted') return 0;
+  if (kind === 'in-progress' || kind === 'incomplete') return 1;
+  if (kind === 'conflicted') return 2;
+  if (kind === 'completed') return 3;
+  return -1;
+}
+
+function e2ReceiptStepKindAllowed_(kind) {
+  return [
+    'claim-observation', 'create-event-group', 'create-partner-agreement',
+    'adopt-partner-link', 'record-correction', 'complete-group',
+  ].indexOf(kind) !== -1;
+}
+
+function e2ReceiptBookAllowed_(book) {
+  return book === 'personal' || book === 'partner';
+}
+
+function e2ReceiptDestinations_(value, detail) {
+  if (!Array.isArray(value)) return { ok: false, detail: detail + ' must be an array' };
+  var destinations = [];
+  var seen = Object.create(null);
+  for (var index = 0; index < value.length; index += 1) {
+    var destination = value[index];
+    var id = destination && typeof destination.id === 'string' ? destination.id.trim() : '';
+    var revision = destination && typeof destination.revision === 'string' ? destination.revision.trim() : '';
+    if (!destination || typeof destination !== 'object' || Array.isArray(destination) ||
+        !id || !revision || seen[id + ':' + revision]) {
+      return { ok: false, detail: detail + ' contains an invalid or duplicate destination' };
+    }
+    seen[id + ':' + revision] = true;
+    destinations.push({ id: id, revision: revision });
+  }
+  return { ok: true, destinations: destinations };
+}
+
+function e2ReceiptStringListEqual_(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  for (var index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+function e2ReceiptRevisionListEqual_(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  for (var index = 0; index < left.length; index += 1) {
+    var leftItem = left[index] || {};
+    var rightItem = right[index] || {};
+    var leftId = leftItem.id || leftItem.recordId || leftItem.record_id;
+    var rightId = rightItem.id || rightItem.recordId || rightItem.record_id;
+    var leftRevision = leftItem.revision || leftItem.expectedRevision || leftItem.expected_revision;
+    var rightRevision = rightItem.revision || rightItem.expectedRevision || rightItem.expected_revision;
+    if (leftId !== rightId || leftRevision !== rightRevision) return false;
+  }
+  return true;
+}
+
+function e2ReceiptDestinationList_(state, detail) {
+  if (state && Object.prototype.hasOwnProperty.call(state, 'destinations')) {
+    return e2ReceiptDestinations_(state.destinations, detail);
+  }
+  if (state && state.destination !== undefined) {
+    return e2ReceiptDestinations_([state.destination], detail);
+  }
+  return { ok: false, detail: detail + ' is missing' };
+}
+
+function e2ReceiptDestinationsContain_(known, candidate) {
+  var candidateByKey = Object.create(null);
+  for (var candidateIndex = 0; candidateIndex < candidate.length; candidateIndex += 1) {
+    var candidateDestination = candidate[candidateIndex];
+    candidateByKey[candidateDestination.id + ':' + candidateDestination.revision] = true;
+  }
+  for (var knownIndex = 0; knownIndex < known.length; knownIndex += 1) {
+    var knownDestination = known[knownIndex];
+    if (!candidateByKey[knownDestination.id + ':' + knownDestination.revision]) return false;
+  }
+  return true;
+}
+
+function e2ValidateReceipt_(recordId, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, detail: 'receipt must be an object' };
+  }
+  if (!e2ReceiptString_(value.operationId) || String(value.operationId).trim() !== String(recordId)) {
+    return { ok: false, detail: 'receipt operationId must match its result id' };
+  }
+  if (!e2ReceiptString_(value.planId) || !e2ReceiptString_(value.contractVersion) ||
+      String(value.contractVersion) !== String(CONTRACT_VERSION) ||
+      !e2ReceiptString_(value.actor) || !e2ReceiptString_(value.acceptedAt) ||
+      !e2ReceiptString_(value.contentDigest)) {
+    return { ok: false, detail: 'receipt identity and provenance fields are required' };
+  }
+  if (!Array.isArray(value.steps)) return { ok: false, detail: 'receipt steps must be an array' };
+  var stepsById = Object.create(null);
+  for (var index = 0; index < value.steps.length; index += 1) {
+    var step = value.steps[index];
+    var hasGroupId = Object.prototype.hasOwnProperty.call(step || {}, 'groupId');
+    if (!step || typeof step !== 'object' || Array.isArray(step) ||
+        !e2ReceiptString_(step.stepId) || !e2ReceiptStepKindAllowed_(String(step.kind || '').trim()) ||
+        !e2ReceiptBookAllowed_(String(step.book || '').trim()) || (hasGroupId &&
+          (typeof step.groupId !== 'string' || step.groupId.trim() === '')) ||
+        stepsById[String(step.stepId).trim()]) {
+      return { ok: false, detail: 'receipt steps require unique stepId, kind, and book; groupId must be a nonblank string when present' };
+    }
+    var stepId = String(step.stepId).trim();
+    var expected = e2ReceiptRevisionList_(step.expectedRevisions);
+    if (!expected.ok) return { ok: false, detail: 'receipt step ' + stepId + ': ' + expected.detail };
+    if (!Array.isArray(step.dependsOn)) {
+      return { ok: false, detail: 'receipt step ' + stepId + ': dependsOn must be an array' };
+    }
+    var dependencyIds = Object.create(null);
+    for (var dependencyIndex = 0; dependencyIndex < step.dependsOn.length; dependencyIndex += 1) {
+      var dependencyId = String(step.dependsOn[dependencyIndex] || '').trim();
+      if (!dependencyId || dependencyIds[dependencyId]) {
+        return { ok: false, detail: 'receipt step ' + stepId + ': dependsOn contains an invalid id' };
+      }
+      dependencyIds[dependencyId] = true;
+    }
+    var stepState = step.state;
+    var stepStateKind = e2ReceiptStepStateKind_(stepState);
+    var stepRank = e2ReceiptStepStateRank_(stepStateKind);
+    if (!stepState || typeof stepState !== 'object' || Array.isArray(stepState) || stepRank < 0) {
+      return { ok: false, detail: 'receipt step ' + stepId + ': state is invalid' };
+    }
+    if (stepStateKind === 'completed') {
+      var destination = stepState.destination;
+      if (!destination || typeof destination !== 'object' || Array.isArray(destination) ||
+          !e2ReceiptString_(destination.id) || !e2ReceiptString_(destination.revision) ||
+          !e2ReceiptString_(stepState.completedAt)) {
+        return { ok: false, detail: 'receipt step ' + stepId + ': completed state needs destination and completedAt' };
+      }
+      if (Object.prototype.hasOwnProperty.call(stepState, 'destinations')) {
+        var completedDestinations = e2ReceiptDestinations_(stepState.destinations, 'receipt step ' + stepId + ': destinations');
+        if (!completedDestinations.ok || completedDestinations.destinations.length === 0) {
+          return { ok: false, detail: completedDestinations.detail || 'completed destinations are required' };
+        }
+      }
+    } else if (stepStateKind !== 'pending' &&
+               !e2ReceiptString_(stepState.reason)) {
+      return { ok: false, detail: 'receipt step ' + stepId + ': non-pending state needs a reason' };
+    }
+    if (stepStateKind === 'unknown' && Object.prototype.hasOwnProperty.call(stepState, 'destinations')) {
+      var unknownDestinations = e2ReceiptDestinations_(stepState.destinations, 'receipt step ' + stepId + ': destinations');
+      if (!unknownDestinations.ok) return { ok: false, detail: unknownDestinations.detail };
+    }
+    stepsById[stepId] = step;
+  }
+  var state = value.state;
+  var stateKind = String(state && state.kind || '').trim();
+  var stateRank = e2ReceiptStateRank_(stateKind);
+  if (!state || typeof state !== 'object' || Array.isArray(state) || stateRank < 0) {
+    return { ok: false, detail: 'receipt state is invalid' };
+  }
+  if (stateKind === 'completed' && !e2ReceiptString_(state.completedAt)) {
+    return { ok: false, detail: 'completed receipt state needs completedAt' };
+  }
+  if ((stateKind === 'incomplete' || stateKind === 'conflicted') && !e2ReceiptString_(state.reason)) {
+    return { ok: false, detail: 'incomplete or conflicted receipt state needs a reason' };
+  }
+  return { ok: true, stateKind: stateKind, stateRank: stateRank, stepsById: stepsById };
+}
+
+function e2ReceiptProgressConflict_(recordId, existingValue, nextValue) {
+  var existing = e2ValidateReceipt_(recordId, existingValue);
+  if (!existing.ok) return existing.detail;
+  var next = e2ValidateReceipt_(recordId, nextValue);
+  if (!next.ok) return next.detail;
+  var immutableFields = ['planId', 'contractVersion', 'actor', 'acceptedAt', 'contentDigest'];
+  for (var immutableIndex = 0; immutableIndex < immutableFields.length; immutableIndex += 1) {
+    var immutableField = immutableFields[immutableIndex];
+    if (String(existingValue[immutableField]) !== String(nextValue[immutableField])) {
+      return 'receipt ' + immutableField + ' cannot change';
+    }
+  }
+  if (next.stateRank < existing.stateRank) return 'receipt state cannot regress';
+  if (existing.stateKind === 'completed' && next.stateKind !== 'completed') {
+    return 'completed receipt state cannot regress';
+  }
+  if (existing.stateKind === 'completed' &&
+      String(existingValue.state.completedAt) !== String(nextValue.state.completedAt)) {
+    return 'completed receipt timestamp cannot change';
+  }
+  for (var stepId in existing.stepsById) {
+    if (!Object.prototype.hasOwnProperty.call(existing.stepsById, stepId)) continue;
+    var existingStep = existing.stepsById[stepId];
+    var nextStep = next.stepsById[stepId];
+    if (!nextStep) return 'completed or existing receipt steps cannot be dropped';
+    var existingStateKind = e2ReceiptStepStateKind_(existingStep.state);
+    var nextStateKind = e2ReceiptStepStateKind_(nextStep.state);
+    if (e2ReceiptStepStateRank_(nextStateKind) < e2ReceiptStepStateRank_(existingStateKind)) {
+      return 'receipt step state cannot regress: ' + stepId;
+    }
+    if (String(existingStep.kind) !== String(nextStep.kind) ||
+        String(existingStep.book) !== String(nextStep.book) ||
+        Object.prototype.hasOwnProperty.call(existingStep, 'groupId') !==
+          Object.prototype.hasOwnProperty.call(nextStep, 'groupId') ||
+        String(existingStep.groupId || '') !== String(nextStep.groupId || '') ||
+        !e2ReceiptRevisionListEqual_(existingStep.expectedRevisions, nextStep.expectedRevisions) ||
+        !e2ReceiptStringListEqual_(existingStep.dependsOn, nextStep.dependsOn)) {
+      return 'receipt step definition cannot change: ' + stepId;
+    }
+    if (existingStateKind === 'completed') {
+      var oldDestination = existingStep.state.destination;
+      var newDestination = nextStep.state.destination;
+      if (nextStateKind !== 'completed' || !newDestination ||
+          String(oldDestination.id) !== String(newDestination.id) ||
+          String(oldDestination.revision) !== String(newDestination.revision)) {
+        return 'completed receipt destination cannot change: ' + stepId;
+      }
+      if (String(existingStep.state.completedAt) !== String(nextStep.state.completedAt)) {
+        return 'completed step timestamp cannot change: ' + stepId;
+      }
+      if (existingStep.state.destinations !== undefined) {
+        var oldCompletedDestinations = e2ReceiptDestinationList_(existingStep.state, 'receipt step ' + stepId + ': destinations');
+        var newCompletedDestinations = e2ReceiptDestinationList_(nextStep.state, 'receipt step ' + stepId + ': destinations');
+        if (!oldCompletedDestinations.ok) return oldCompletedDestinations.detail;
+        if (!newCompletedDestinations.ok ||
+            !e2ReceiptDestinationsContain_(oldCompletedDestinations.destinations, newCompletedDestinations.destinations)) {
+          return 'completed receipt destinations cannot be dropped: ' + stepId;
+        }
+      }
+    }
+    if (existingStateKind === 'unknown' && existingStep.state.destinations !== undefined) {
+      var oldDestinations = e2ReceiptDestinations_(existingStep.state.destinations, 'receipt step ' + stepId + ': destinations');
+      if (!oldDestinations.ok) return oldDestinations.detail;
+      var newStateDestinations = nextStep.state.destinations;
+      if (nextStateKind === 'completed' && newStateDestinations === undefined) {
+        newStateDestinations = [nextStep.state.destination];
+      }
+      var newDestinations = e2ReceiptDestinations_(newStateDestinations, 'receipt step ' + stepId + ': destinations');
+      if (!newDestinations.ok) return newDestinations.detail;
+      if (!e2ReceiptDestinationsContain_(oldDestinations.destinations, newDestinations.destinations)) {
+        return 'known incomplete destination cannot be dropped: ' + stepId;
+      }
+    }
+  }
+  for (var nextStepId in next.stepsById) {
+    if (!Object.prototype.hasOwnProperty.call(next.stepsById, nextStepId) || existing.stepsById[nextStepId]) continue;
+    return 'receipt steps cannot be added during progress: ' + nextStepId;
+  }
+  return null;
+}
+
+function e2PrepareRecordWrites_(spreadsheet, operationId, content) {
   var writes = content && content.writes;
   if (!Array.isArray(writes) || writes.length === 0) {
     return { rejected: e2Rejected_(operationId, 'record-writes-required') };
   }
   var seen = Object.create(null);
-  var destinations = [];
+  var prepared = [];
   for (var index = 0; index < writes.length; index += 1) {
     var write = writes[index];
     if (!write || typeof write !== 'object') {
@@ -4773,13 +5080,36 @@ function e2ExecuteRecordWrites_(spreadsheet, operationId, content) {
       return { rejected: e2Rejected_(operationId, 'record-write-invalid') };
     }
     seen[id] = true;
+    var validation = e2ValidateReceipt_(id, write.data);
+    if (!validation.ok) return { rejected: e2Rejected_(operationId, 'invalid-receipt', validation.detail) };
     var existing = e2LatestRecord_(spreadsheet, scope, id);
-    if (existing) {
-      var existingData = e2ParseJson_(existing.values.data_json, null);
-      if (e2Digest_(existingData) === e2Digest_(write.data)) {
-        destinations.push({ id: id, revision: existing.values.revision });
-        continue;
-      }
+    var existingData = existing ? e2ParseJson_(existing.values.data_json, null) : null;
+    if (existing && e2Digest_(existingData) !== e2Digest_(write.data)) {
+      var progressConflict = e2ReceiptProgressConflict_(id, existingData, write.data);
+      if (progressConflict) return { rejected: e2Rejected_(operationId, 'receipt-progress-regression', progressConflict) };
+    }
+    prepared.push({ write: write, existing: existing });
+  }
+  return { prepared: prepared };
+}
+
+// Receipt and receipt-progress commands use the append-only generic record
+// table, while the scoped `results` snapshot exposes only the latest record
+// for each receipt id. A changed progress payload is a new durable revision;
+// an identical retry reuses the existing row instead of duplicating it.
+function e2ExecuteRecordWrites_(spreadsheet, operationId, content, prepared) {
+  var plan = prepared || e2PrepareRecordWrites_(spreadsheet, operationId, content);
+  if (plan.rejected) return plan;
+  var destinations = [];
+  for (var index = 0; index < plan.prepared.length; index += 1) {
+    var item = plan.prepared[index];
+    var write = item.write;
+    var scope = String(write.scope || '').trim();
+    var id = String(write.id || '').trim();
+    var existing = item.existing;
+    if (existing && e2Digest_(e2ParseJson_(existing.values.data_json, null)) === e2Digest_(write.data)) {
+      destinations.push({ id: id, revision: existing.values.revision });
+      continue;
     }
     var stored = e2WriteRecord_(spreadsheet, scope, id, write.data, operationId);
     e2PersistActorMetadata_(spreadsheet, 'record', scope + ':' + id, stored.revision, content.actor, operationId);
@@ -5060,6 +5390,7 @@ function e2RecordForTableRow_(tableName, values, sheetRow, spreadsheet) {
     return record;
   }
   if (tableName === '結果版本') {
+    record.type = 'metric';
     record.resultId = values.result_id;
     record.interval = e2ParseJson_(values.interval_json, null);
     record.dependencies = e2ParseJson_(values.dependency_revisions_json, []);
@@ -5068,6 +5399,7 @@ function e2RecordForTableRow_(tableName, values, sheetRow, spreadsheet) {
     return record;
   }
   record.scope = values.scope;
+  if (values.scope === 'results') record.type = 'receipt';
   record.data = e2ParseJson_(values.data_json, null);
   return record;
 }
@@ -5127,7 +5459,7 @@ function command_(payload, nonce) {
     // caller's pre-write revisions would mistake those owned writes for an
     // external race and prevent recovery of the same operation.
     var expectedConflicts = recoveringUnknown
-      ? e2ExpectedConflictsForRecovery_(spreadsheet, payload.expectedRevisions, content, digest)
+      ? e2ExpectedConflictsForRecovery_(spreadsheet, payload.expectedRevisions, content, digest, operationId)
       : e2CheckExpectedRevisions_(spreadsheet, payload.expectedRevisions);
     if (expectedConflicts.length > 0) {
       return e2PersistOutcome_(
@@ -5183,7 +5515,13 @@ function command_(payload, nonce) {
         reserveClaims();
         execution = e2ExecuteResult_(spreadsheet, operationId, digest, content);
       } else if (kind === 'import-receipt' || kind === 'receipt-progress') {
-        execution = e2ExecuteRecordWrites_(spreadsheet, operationId, content);
+        var recordWrites = e2PrepareRecordWrites_(spreadsheet, operationId, content);
+        if (recordWrites.rejected) {
+          execution = recordWrites;
+        } else {
+          reserveClaims();
+          execution = e2ExecuteRecordWrites_(spreadsheet, operationId, content, recordWrites);
+        }
       } else if (kind === 'opening-adjustment') {
         reserveClaims();
         execution = e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content);
@@ -5950,7 +6288,7 @@ function e2ExecuteManifest_(spreadsheet, operationId, digest, content, reserveCl
       normalizedPlanExpectedRevisions.push({ id: expectedRevisionId, revision: expectedRevisionValue });
     }
     var planRevisionConflicts = recoveringUnknown
-      ? e2ExpectedConflictsForRecovery_(spreadsheet, normalizedPlanExpectedRevisions, content, digest)
+      ? e2ExpectedConflictsForRecovery_(spreadsheet, normalizedPlanExpectedRevisions, content, digest, operationId)
       : e2CheckExpectedRevisions_(spreadsheet, normalizedPlanExpectedRevisions);
     if (planRevisionConflicts.length > 0) {
       return { conflict: e2Conflict_(operationId, 'stale-expected-revision', planRevisionConflicts) };
@@ -6025,7 +6363,7 @@ function e2ExecuteManifest_(spreadsheet, operationId, digest, content, reserveCl
       // An unknown retry must be allowed to observe the revisions written by
       // this same operation while it reconstructs missing receipt steps.
       var stepRevisionConflicts = recoveringUnknown
-        ? []
+        ? e2ExpectedConflictsForRecovery_(spreadsheet, normalizedStepExpectedRevisions, content, digest, operationId)
         : e2CheckExpectedRevisions_(spreadsheet, normalizedStepExpectedRevisions);
       if (stepRevisionConflicts.length > 0) {
         return { conflict: e2Conflict_(operationId, 'stale-expected-revision', stepRevisionConflicts) };
@@ -6113,7 +6451,8 @@ function e2ExecuteManifest_(spreadsheet, operationId, digest, content, reserveCl
 }
 
 function e2ExecuteResumeImport_(spreadsheet, operationId, digest, content, recoveringUnknown) {
-  var manifestId = String(content.manifestId || content.manifest_id || '').trim();
+  var manifestInput = content && (content.manifest || content);
+  var manifestId = String(manifestInput && (manifestInput.manifestId || manifestInput.manifest_id || manifestInput.id) || '').trim();
   if (!manifestId) return { rejected: e2Rejected_(operationId, 'manifest-id-required') };
   var manifestRows = e2Rows_(spreadsheet, '匯入清單');
   var manifest = null;
@@ -6121,7 +6460,7 @@ function e2ExecuteResumeImport_(spreadsheet, operationId, digest, content, recov
     if (manifestRows[index].values.manifest_id === manifestId) { manifest = manifestRows[index]; break; }
   }
   if (!manifest) return { rejected: e2Rejected_(operationId, 'unknown-manifest') };
-  var steps = content.steps;
+  var steps = content.steps || (manifestInput && manifestInput.steps);
   if (!Array.isArray(steps) || steps.length === 0) return { rejected: e2Rejected_(operationId, 'no-missing-steps') };
   var latest = snapshotE2Records_(spreadsheet, 'steps');
   var destinations = [{ id: manifestId, revision: manifest.values.revision }];
@@ -6166,7 +6505,7 @@ function e2ExecuteResumeImport_(spreadsheet, operationId, digest, content, recov
         normalizedStepExpectedRevisions.push({ id: expectedId, revision: expectedValue });
       }
       var stepExpectedConflicts = recoveringUnknown
-        ? e2ExpectedConflictsForRecovery_(spreadsheet, normalizedStepExpectedRevisions, content, digest)
+        ? e2ExpectedConflictsForRecovery_(spreadsheet, normalizedStepExpectedRevisions, content, digest, operationId)
         : e2CheckExpectedRevisions_(spreadsheet, normalizedStepExpectedRevisions);
       if (stepExpectedConflicts.length > 0) {
         return { conflict: e2Conflict_(operationId, 'stale-expected-revision', stepExpectedConflicts) };
@@ -6276,7 +6615,6 @@ function e2ExecuteLink_(spreadsheet, operationId, digest, content) {
     }
     return { destinations: [{ id: linkId, revision: values.content_digest }] };
   }
-  var revision = e2Digest_({ linkId: linkId, sourceId: sourceId, destinationId: destinationId, digest: digest });
   e2Append_(spreadsheet, '跨簿連結', {
     link_id: linkId, source_id: sourceId, destination_id: destinationId,
     destination_revision: String(link.destinationRevision || link.destination_revision || ''),
@@ -6284,8 +6622,11 @@ function e2ExecuteLink_(spreadsheet, operationId, digest, content) {
     content_digest: digest, status: String(link.status || 'active'),
     origin: String(link.origin || operationId), created_at: taipeiIsoNow_(),
   });
-  e2PersistActorMetadata_(spreadsheet, 'link', linkId, revision, content.actor, operationId);
-  return { destinations: [{ id: linkId, revision: revision }] };
+  // The link table's content_digest is its durable revision.  Return the same
+  // value that snapshots and idempotent retries use, so callers can safely
+  // feed a committed destination back into expectedRevisions.
+  e2PersistActorMetadata_(spreadsheet, 'link', linkId, digest, content.actor, operationId);
+  return { destinations: [{ id: linkId, revision: digest }] };
 }
 
 function e2ExecuteCheckpoint_(spreadsheet, operationId, digest, content) {
@@ -6578,6 +6919,7 @@ function e2InvalidateResults_(spreadsheet, reason, changedIds, actor, operationI
   var rows = snapshotE2Records_(spreadsheet, 'results');
   for (var index = 0; index < rows.length; index += 1) {
     var result = rows[index];
+    if (result.type !== 'metric') continue;
     if (result.state === 'invalidated' || result.state === 'unknown') continue;
     var dependencies = result.dependencies;
     var dependent = !Array.isArray(dependencies) || dependencies.length === 0;
