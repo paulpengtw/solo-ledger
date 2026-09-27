@@ -48,6 +48,73 @@ var OBSERVATION_ID_HEADER = OBSERVATION_HEADERS[0];
 var IDENTITY_ADOPTION_PROPERTY_PREFIX = 'identity-adoption:';
 var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// E2 metadata is intentionally provisioned lazily. Existing Personal books
+// keep their original seven-tab bootstrap and can adopt the reviewed import
+// surface when the first E2 operation is accepted. Every table below is
+// append-oriented; row identities and revisions are never inferred from a
+// process cache.
+var E2_TABLES = [
+  { name: '事件群組', headers: [
+    'group_id', 'status', 'currency_totals_json', 'completion_marker',
+    'content_digest', 'created_at', 'updated_at', 'source',
+  ] },
+  { name: '事件群組明細', headers: [
+    'group_id', 'txn_id', 'leg_index', 'amount', 'currency',
+    'debit_account', 'credit_account', 'content_digest',
+  ] },
+  { name: '事件審核', headers: [
+    'txn_id', 'category', 'review_state', 'revision', 'operation_id', 'updated_at',
+  ] },
+  { name: '整合操作', headers: [
+    'operation_id', 'content_digest', 'kind', 'reason', 'conflicts_json',
+    'destinations_json', 'committed_at', 'detail',
+  ] },
+  { name: '觀察認領', headers: [
+    'claim_id', 'operation_id', 'content_digest', 'status', 'created_at',
+  ] },
+  { name: '匯入清單', headers: [
+    'manifest_id', 'revision', 'status', 'content_digest', 'actor',
+    'approved_at', 'source_evidence_json', 'updated_at',
+  ] },
+  { name: '匯入步驟', headers: [
+    'manifest_id', 'step_id', 'state', 'destination_id', 'destination_revision',
+    'content_digest', 'expected_revisions_json', 'result_json', 'updated_at',
+  ] },
+  { name: '來源證據', headers: [
+    'evidence_id', 'source_reference', 'content_digest', 'effective_date',
+    'uploaded_at', 'fields_json', 'revision',
+  ] },
+  { name: '跨簿連結', headers: [
+    'link_id', 'source_id', 'destination_id', 'destination_revision',
+    'source_revision', 'content_digest', 'status', 'origin', 'created_at',
+  ] },
+  { name: '對帳檢查點', headers: [
+    'checkpoint_id', 'cutoff', 'scope_version', 'represented_balances_json',
+    'accepted_balances_json', 'adjustment_json', 'evidence_ids_json',
+    'coverage_json', 'status', 'revision', 'created_at',
+  ] },
+  { name: '設定版本', headers: [
+    'setting_id', 'setting_key', 'value_json', 'effective_date', 'revision',
+    'updated_at',
+  ] },
+  { name: '結果版本', headers: [
+    'result_id', 'interval_json', 'dependency_revisions_json', 'state',
+    'value_json', 'created_at', 'revision',
+  ] },
+  { name: '整合記錄', headers: [
+    'scope', 'record_id', 'revision', 'data_json', 'created_at',
+  ] },
+];
+
+var E2_CAPABILITIES = [
+  'content-conflict-detection',
+  'native-currency-groups',
+  'pending-confirmation-states',
+  'durable-operation-outcomes',
+  'link-metadata',
+  'reconciliation-metadata',
+];
+
 function stableIdentitySchemaAvailable_() {
   var spreadsheetId = PropertiesService.getScriptProperties().getProperty(
     'LEDGER_SPREADSHEET_ID',
@@ -63,6 +130,28 @@ function stableIdentitySchemaAvailable_() {
     return !persistedStableIdentityDuplicate_(spreadsheet);
   } catch (error) {
     return false;
+  }
+}
+
+function e2SchemaAvailable_(spreadsheet) {
+  for (var index = 0; index < E2_TABLES.length; index += 1) {
+    var table = E2_TABLES[index];
+    var sheet = spreadsheet.getSheetByName(table.name);
+    if (!sheet || !sheetHasHeaders_(sheet, table.headers)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function ensureE2Schema_(spreadsheet) {
+  for (var index = 0; index < E2_TABLES.length; index += 1) {
+    var table = E2_TABLES[index];
+    var sheet = getOrCreateSheet_(spreadsheet, table.name);
+    initializeBlankSheet_(sheet, [table.headers]);
+    if (!sheetHasHeaders_(sheet, table.headers)) {
+      throw new Error('invalid E2 metadata schema: ' + table.name);
+    }
   }
 }
 
@@ -162,6 +251,24 @@ function integrationState_() {
   if (stableIdentitySchemaAvailable_()) {
     capabilities.push('stable-identity');
   }
+  var spreadsheetId = PropertiesService.getScriptProperties().getProperty(
+    'LEDGER_SPREADSHEET_ID',
+  );
+  if (spreadsheetId) {
+    try {
+      var spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+      if (e2SchemaAvailable_(spreadsheet)) {
+        for (var capabilityIndex = 0;
+          capabilityIndex < E2_CAPABILITIES.length;
+          capabilityIndex += 1) {
+          capabilities.push(E2_CAPABILITIES[capabilityIndex]);
+        }
+      }
+    } catch (error) {
+      // A missing metadata table is an unavailable capability, never a
+      // reason to hide the base read surface.
+    }
+  }
   return {
     book: 'personal',
     identity: { contractVersion: CONTRACT_VERSION, appVersion: APP_VERSION },
@@ -234,6 +341,10 @@ function route_(payload, nonce) {
   }
   requireFinancialOpen_(payload);
 
+  if (action === 'enable_e2' || action === 'enable_integration_schema') {
+    return enableE2Schema_(payload);
+  }
+
   if (action === 'health') {
     return health_();
   }
@@ -254,6 +365,45 @@ function route_(payload, nonce) {
   }
   if (action === 'adopt_identity') {
     return adoptIdentity_(payload);
+  }
+  if (action === 'command') {
+    return command_(payload, nonce);
+  }
+  if (action === 'outcome') {
+    return outcome_(payload);
+  }
+  if (action === 'create_event_group' || action === 'event_group') {
+    return createEventGroup_(payload, nonce);
+  }
+  if (action === 'confirm_event' || action === 'review_event') {
+    return confirmEvent_(payload, nonce);
+  }
+  if (action === 'accept_import' || action === 'import_manifest') {
+    return acceptImport_(payload, nonce);
+  }
+  if (action === 'resume_import') {
+    return resumeImport_(payload, nonce);
+  }
+  if (action === 'record_evidence' || action === 'source_evidence') {
+    return recordEvidence_(payload, nonce);
+  }
+  if (action === 'record_link' || action === 'link_record') {
+    return recordLink_(payload, nonce);
+  }
+  if (action === 'accept_checkpoint' || action === 'checkpoint') {
+    return acceptCheckpoint_(payload, nonce);
+  }
+  if (action === 'set_versioned_setting') {
+    return setVersionedSetting_(payload, nonce);
+  }
+  if (action === 'publish_result') {
+    return publishResult_(payload, nonce);
+  }
+  if (action === 'opening_adjustment' || action === 'cutover_adjustment') {
+    return openingAdjustment_(payload, nonce);
+  }
+  if (action === 'correct_event' || action === 'append_correction') {
+    return correctEvent_(payload, nonce);
   }
   if (action === 'check_consistency') {
     return checkConsistency_(payload, nonce);
@@ -434,7 +584,8 @@ function snapshot_(payload) {
   if (!payload || (
     payload.scope !== 'accounts' &&
     payload.scope !== 'events' &&
-    payload.scope !== 'observations'
+    payload.scope !== 'observations' &&
+    !isE2SnapshotScope_(payload.scope)
   )) {
     throw new Error('snapshot scope must be accounts, events, or observations');
   }
@@ -448,6 +599,39 @@ function snapshot_(payload) {
   var spreadsheet = SpreadsheetApp.openById(
     requiredProp_('LEDGER_SPREADSHEET_ID'),
   );
+  if (isE2SnapshotScope_(payload.scope)) {
+    if (!e2SchemaAvailable_(spreadsheet)) {
+      return identityUnavailable_('e2-metadata-schema-unavailable');
+    }
+    var e2Records = snapshotE2Records_(spreadsheet, payload.scope);
+    var e2Revision = snapshotRevision_(readSnapshotSource_(spreadsheet));
+    if (
+      payload.snapshotRevision !== undefined &&
+      String(payload.snapshotRevision) !== e2Revision
+    ) {
+      return {
+        kind: 'revision-changed',
+        book: 'personal',
+        expected: String(payload.snapshotRevision),
+        actual: e2Revision,
+      };
+    }
+    var e2Offset = snapshotCursorOffset_(payload.cursor);
+    if (e2Offset > e2Records.length) {
+      throw new Error('snapshot cursor is outside the result');
+    }
+    var e2Page = e2Records.slice(e2Offset, e2Offset + MAX_SNAPSHOT_RECORDS);
+    var e2NextOffset = e2Offset + e2Page.length;
+    return {
+      scope: payload.scope,
+      snapshotRevision: e2Revision,
+      records: e2Page,
+      continuation: e2NextOffset < e2Records.length
+        ? { kind: 'cursor', cursor: String(e2NextOffset) }
+        : { kind: 'end' },
+      readAt: taipeiIsoNow_(),
+    };
+  }
   var source = readSnapshotSource_(spreadsheet);
   if (payload.scope === 'observations' && !source.observationSchemaAvailable) {
     return identityUnavailable_('stable-identity-schema-unavailable');
@@ -580,6 +764,13 @@ function snapshotRecordsForScope_(source, scope, revision) {
   if (scope === 'accounts') return snapshotAccountRecords_(source, revision);
   if (scope === 'events') return snapshotEventRecords_(source);
   return snapshotObservationRecords_(source);
+}
+
+function isE2SnapshotScope_(scope) {
+  return [
+    'groups', 'event-groups', 'operations', 'claims', 'manifests', 'steps',
+    'evidence', 'links', 'checkpoints', 'settings', 'results', 'records',
+  ].indexOf(String(scope || '')) !== -1;
 }
 
 function lookupRecordAcrossScopes_(recordsByScope, id) {
@@ -1223,6 +1414,9 @@ function readSnapshotSource_(spreadsheet) {
     journalColumns: journalColumns,
     observationRows: observationRows,
     observationSchemaAvailable: observationSchemaAvailable,
+    extendedRows: readE2TableRows_(spreadsheet),
+    groupByTxnId: readE2GroupIndex_(spreadsheet),
+    reviewByTxnId: readE2ReviewIndex_(spreadsheet),
   };
 }
 
@@ -1374,6 +1568,7 @@ function snapshotRevision_(source) {
     observations: source.observationRows.map(function (row) {
       return { sheetRow: row.sheetRow, cells: row.cells };
     }),
+    extended: source.extendedRows || [],
   };
   return digestHex_(Utilities.computeDigest(
     Utilities.DigestAlgorithm.SHA_256,
@@ -1420,6 +1615,11 @@ function snapshotAccountRecords_(source, revision) {
       financialCutoff = date;
     }
     for (var accountIndex = 0; accountIndex < accounts.length; accountIndex += 1) {
+      var rowTxnId = String(row.values.txn_id || '').trim();
+      var rowGroup = source.groupByTxnId && source.groupByTxnId[rowTxnId];
+      if (rowGroup && rowGroup.status !== 'complete') {
+        continue;
+      }
       applySnapshotBalanceRow_(accounts[accountIndex], row);
     }
   }
@@ -1501,6 +1701,25 @@ function snapshotEventRecords_(source) {
       contentDigest: identityContentDigest_('events', row),
       repairReference: identityRepairReference_('events', row),
     });
+    var group = source.groupByTxnId && source.groupByTxnId[txnId];
+    if (group) {
+      records[records.length - 1].groupId = group.groupId;
+      records[records.length - 1].groupCompletion = group.status;
+      records[records.length - 1].groupCurrency = group.currency;
+    }
+    var review = source.reviewByTxnId && source.reviewByTxnId[txnId];
+    if (review) {
+      if (review.category !== '') records[records.length - 1].category = review.category;
+      records[records.length - 1].reviewState = review.reviewState;
+      records[records.length - 1].review_state = review.reviewState;
+      records[records.length - 1].reviewRevision = review.revision;
+      records[records.length - 1].review = {
+        state: review.reviewState,
+        category: review.category,
+        updatedAt: review.updatedAt || null,
+        confirmedAt: review.reviewState === 'confirmed' ? (review.updatedAt || null) : null,
+      };
+    }
   }
   return records;
 }
@@ -4011,4 +4230,1589 @@ function validateDistinctLegs_(debitAccount, creditAccount) {
 
 function blank_(value) {
   return value === undefined || value === null ? '' : value;
+}
+
+/* ------------------------------------------------------------------------- *
+ * E2 reviewed integration surface
+ * ------------------------------------------------------------------------- */
+
+function e2Spreadsheet_() {
+  var spreadsheet = SpreadsheetApp.openById(requiredProp_('LEDGER_SPREADSHEET_ID'));
+  ensureE2Schema_(spreadsheet);
+  return spreadsheet;
+}
+
+function enableE2Schema_(payload) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(LOCK_WAIT_MILLISECONDS);
+  try {
+    var spreadsheet = SpreadsheetApp.openById(requiredProp_('LEDGER_SPREADSHEET_ID'));
+    ensureE2Schema_(spreadsheet);
+    return integrationState_();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function e2Table_(spreadsheet, name) {
+  var sheet = spreadsheet.getSheetByName(name);
+  if (!sheet) throw new Error('missing E2 metadata sheet: ' + name);
+  for (var index = 0; index < E2_TABLES.length; index += 1) {
+    if (E2_TABLES[index].name === name) return { sheet: sheet, headers: E2_TABLES[index].headers };
+  }
+  throw new Error('unknown E2 metadata sheet: ' + name);
+}
+
+function e2Rows_(spreadsheet, name) {
+  var table = e2Table_(spreadsheet, name);
+  var sheet = table.sheet;
+  if (sheet.getLastRow() < 2) return [];
+  var columns = resolveHeaders_(
+    sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0],
+    table.headers,
+  );
+  var displayed = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn())
+    .getDisplayValues();
+  var rows = [];
+  for (var rowIndex = 0; rowIndex < displayed.length; rowIndex += 1) {
+    if (!snapshotRowHasData_(displayed[rowIndex], displayed[rowIndex])) continue;
+    var values = {};
+    for (var headerIndex = 0; headerIndex < table.headers.length; headerIndex += 1) {
+      var header = table.headers[headerIndex];
+      values[header] = displayed[rowIndex][columns[header] - 1] || '';
+    }
+    rows.push({ sheetRow: rowIndex + 2, values: values, columns: columns });
+  }
+  return rows;
+}
+
+function readE2TableRows_(spreadsheet) {
+  if (!e2SchemaAvailable_(spreadsheet)) return [];
+  var rows = [];
+  for (var index = 0; index < E2_TABLES.length; index += 1) {
+    var tableRows = e2Rows_(spreadsheet, E2_TABLES[index].name);
+    for (var rowIndex = 0; rowIndex < tableRows.length; rowIndex += 1) {
+      rows.push({
+        table: E2_TABLES[index].name,
+        sheetRow: tableRows[rowIndex].sheetRow,
+        cells: tableRows[rowIndex].values,
+      });
+    }
+  }
+  return rows;
+}
+
+function e2Headers_(spreadsheet, name) {
+  return e2Table_(spreadsheet, name).headers;
+}
+
+function e2Append_(spreadsheet, name, values) {
+  var table = e2Table_(spreadsheet, name);
+  var row = [];
+  for (var index = 0; index < table.headers.length; index += 1) {
+    row.push(Object.prototype.hasOwnProperty.call(values, table.headers[index])
+      ? values[table.headers[index]]
+      : '');
+  }
+  table.sheet.getRange(table.sheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+  return table.sheet.getLastRow();
+}
+
+function e2Set_(spreadsheet, name, sheetRow, values) {
+  var table = e2Table_(spreadsheet, name);
+  var row = [];
+  for (var index = 0; index < table.headers.length; index += 1) {
+    row.push(Object.prototype.hasOwnProperty.call(values, table.headers[index])
+      ? values[table.headers[index]]
+      : '');
+  }
+  table.sheet.getRange(sheetRow, 1, 1, row.length).setValues([row]);
+}
+
+function e2Json_(value) {
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+function e2Digest_(value) {
+  return digestHex_(Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    canonicalJson_(value),
+  ));
+}
+
+function e2OperationId_(payload, fallback) {
+  var value = String(payload && (payload.operationId || payload.operation_id) || fallback || '').trim();
+  if (!value) throw new Error('operationId is required');
+  if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(value)) throw new Error('operationId is invalid');
+  return value;
+}
+
+function e2ContentDigest_(payload, content) {
+  var supplied = String(payload && payload.contentDigest || '').trim();
+  if (supplied && (supplied.length > 256 || !/^[A-Za-z0-9._:-]+$/.test(supplied))) {
+    throw new Error('contentDigest is invalid');
+  }
+  return supplied || e2Digest_(content);
+}
+
+function e2OperationRow_(spreadsheet, operationId) {
+  var rows = e2Rows_(spreadsheet, '整合操作');
+  for (var index = rows.length - 1; index >= 0; index -= 1) {
+    if (rows[index].values.operation_id === operationId) return rows[index];
+  }
+  return null;
+}
+
+function e2OutcomeFromRow_(row) {
+  if (!row) return null;
+  var values = row.values;
+  var kind = values.kind;
+  if (kind === 'committed') {
+    var destinations = [];
+    try { destinations = JSON.parse(values.destinations_json || '[]'); } catch (error) { destinations = []; }
+    return {
+      kind: 'committed',
+      operationId: values.operation_id,
+      destinations: destinations,
+      committedAt: values.committed_at,
+    };
+  }
+  if (kind === 'conflict') {
+    var conflicts = [];
+    try { conflicts = JSON.parse(values.conflicts_json || '[]'); } catch (error) { conflicts = []; }
+    return {
+      kind: 'conflict', operationId: values.operation_id,
+      reason: values.reason || 'conflict', conflicts: conflicts,
+    };
+  }
+  if (kind === 'pending') {
+    return { kind: 'pending', operationId: values.operation_id, reason: values.reason || 'still-running' };
+  }
+  if (kind === 'unknown') {
+    return { kind: 'unknown', operationId: values.operation_id, reason: values.reason || 'unknown' };
+  }
+  return {
+    kind: 'rejected', operationId: values.operation_id,
+    reason: values.reason || 'rejected',
+    detail: values.detail || undefined,
+  };
+}
+
+function e2PersistOutcome_(spreadsheet, outcome, contentDigest, detail) {
+  var existing = e2OperationRow_(spreadsheet, outcome.operationId);
+  var values = {
+    operation_id: outcome.operationId,
+    content_digest: contentDigest,
+    kind: outcome.kind,
+    reason: outcome.reason || '',
+    conflicts_json: e2Json_(outcome.conflicts || []),
+    destinations_json: e2Json_(outcome.destinations || []),
+    committed_at: outcome.committedAt || '',
+    detail: detail || outcome.detail || '',
+  };
+  if (existing) e2Set_(spreadsheet, '整合操作', existing.sheetRow, values);
+  else e2Append_(spreadsheet, '整合操作', values);
+  return outcome;
+}
+
+function e2Conflict_(operationId, reason, conflicts) {
+  return {
+    kind: 'conflict', operationId: operationId, reason: reason,
+    conflicts: conflicts || [],
+  };
+}
+
+function e2Rejected_(operationId, reason, detail) {
+  var result = { kind: 'rejected', operationId: operationId, reason: reason };
+  if (detail !== undefined) result.detail = detail;
+  return result;
+}
+
+function e2CurrentRevision_(spreadsheet, id) {
+  var source = readSnapshotSource_(spreadsheet);
+  var scopes = [
+    snapshotAccountRecords_(source, 'unneeded'),
+    snapshotEventRecords_(source),
+    snapshotObservationRecords_(source),
+  ];
+  for (var scopeIndex = 0; scopeIndex < scopes.length; scopeIndex += 1) {
+    var records = scopes[scopeIndex];
+    for (var index = 0; index < records.length; index += 1) {
+      if (records[index].id === id || records[index].persistedId === id || records[index].legacyId === id) {
+        return records[index].revision || records[index].contentDigest || '';
+      }
+    }
+  }
+  var e2Records = snapshotE2Records_(spreadsheet, 'records');
+  for (var recordIndex = 0; recordIndex < e2Records.length; recordIndex += 1) {
+    if (e2Records[recordIndex].id === id) return e2Records[recordIndex].revision;
+  }
+  return '';
+}
+
+function e2CheckExpectedRevisions_(spreadsheet, expected) {
+  var conflicts = [];
+  if (!Array.isArray(expected)) throw new Error('expectedRevisions must be an array');
+  for (var index = 0; index < expected.length; index += 1) {
+    var item = expected[index];
+    if (!item || typeof item !== 'object' || !String(item.id || '').trim() || !String(item.revision || '').trim()) {
+      throw new Error('expectedRevisions contains an invalid record');
+    }
+    var id = String(item.id).trim();
+    var actual = e2CurrentRevision_(spreadsheet, id);
+    if (actual !== String(item.revision)) {
+      conflicts.push({ id: id, expected: String(item.revision), actual: actual || 'missing' });
+    }
+  }
+  return conflicts;
+}
+
+function e2Claims_(spreadsheet) {
+  var result = Object.create(null);
+  var rows = e2Rows_(spreadsheet, '觀察認領');
+  for (var index = 0; index < rows.length; index += 1) {
+    var claim = rows[index].values;
+    if (claim.status === 'claimed' && claim.claim_id) result[claim.claim_id] = claim;
+  }
+  return result;
+}
+
+function e2CheckClaims_(spreadsheet, operationId, claims) {
+  if (claims === undefined) return null;
+  if (!Array.isArray(claims)) throw new Error('content.claims must be an array');
+  var existing = e2Claims_(spreadsheet);
+  for (var index = 0; index < claims.length; index += 1) {
+    var claimId = String(claims[index] || '').trim();
+    if (!claimId) throw new Error('content.claims contains a blank id');
+    if (existing[claimId] && existing[claimId].operation_id !== operationId) {
+      return e2Conflict_(operationId, 'observation-already-claimed', []);
+    }
+  }
+  return null;
+}
+
+function e2PersistClaims_(spreadsheet, operationId, digest, claims) {
+  for (var index = 0; index < (claims || []).length; index += 1) {
+    e2Append_(spreadsheet, '觀察認領', {
+      claim_id: String(claims[index]), operation_id: operationId,
+      content_digest: digest, status: 'claimed', created_at: taipeiIsoNow_(),
+    });
+  }
+}
+
+function e2WriteRecord_(spreadsheet, scope, id, data, operationId) {
+  var recordId = String(id || '').trim();
+  if (!recordId) throw new Error('write id is required');
+  var revision = e2Digest_({ id: recordId, data: data, operationId: operationId });
+  e2Append_(spreadsheet, '整合記錄', {
+    scope: scope, record_id: recordId, revision: revision,
+    data_json: e2Json_(data), created_at: taipeiIsoNow_(),
+  });
+  return { id: recordId, revision: revision };
+}
+
+function e2LatestRecord_(spreadsheet, scope, id) {
+  var rows = e2Rows_(spreadsheet, '整合記錄');
+  for (var index = rows.length - 1; index >= 0; index -= 1) {
+    if (rows[index].values.scope === scope && rows[index].values.record_id === id) return rows[index];
+  }
+  return null;
+}
+
+function readE2GroupIndex_(spreadsheet) {
+  var result = Object.create(null);
+  if (!e2SchemaAvailable_(spreadsheet)) return result;
+  var groups = e2Rows_(spreadsheet, '事件群組');
+  var details = e2Rows_(spreadsheet, '事件群組明細');
+  var byGroup = Object.create(null);
+  for (var groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+    var groupValues = groups[groupIndex].values;
+    byGroup[groupValues.group_id] = {
+      groupId: groupValues.group_id,
+      status: groupValues.status,
+      currencyTotals: e2ParseJson_(groupValues.currency_totals_json, []),
+      completionMarker: groupValues.completion_marker,
+      contentDigest: groupValues.content_digest,
+      createdAt: groupValues.created_at,
+      updatedAt: groupValues.updated_at,
+      legs: [],
+    };
+  }
+  for (var detailIndex = 0; detailIndex < details.length; detailIndex += 1) {
+    var detail = details[detailIndex].values;
+    var group = byGroup[detail.group_id];
+    if (!group) continue;
+    group.legs.push({
+      txnId: detail.txn_id, legIndex: Number(detail.leg_index),
+      amount: detail.amount, currency: detail.currency,
+      debitAccount: detail.debit_account, creditAccount: detail.credit_account,
+      contentDigest: detail.content_digest,
+    });
+  }
+  var groupIds = Object.keys(byGroup);
+  for (var index = 0; index < groupIds.length; index += 1) {
+    var groupId = groupIds[index];
+    var current = byGroup[groupId];
+    for (var legIndex = 0; legIndex < current.legs.length; legIndex += 1) {
+      var leg = current.legs[legIndex];
+      result[leg.txnId] = {
+        groupId: groupId,
+        status: current.status,
+        currency: leg.currency,
+      };
+    }
+  }
+  return result;
+}
+
+function e2ParseJson_(value, fallback) {
+  if (!value) return fallback;
+  try { return JSON.parse(value); } catch (error) { return fallback; }
+}
+
+function readE2ReviewIndex_(spreadsheet) {
+  var result = Object.create(null);
+  if (!e2SchemaAvailable_(spreadsheet)) return result;
+  var rows = e2Rows_(spreadsheet, '事件審核');
+  for (var index = 0; index < rows.length; index += 1) {
+    var values = rows[index].values;
+    result[values.txn_id] = {
+      category: values.category,
+      reviewState: values.review_state,
+      revision: values.revision,
+      operationId: values.operation_id,
+      updatedAt: values.updated_at,
+    };
+  }
+  return result;
+}
+
+function snapshotE2Records_(spreadsheet, scope) {
+  var canonicalScope = String(scope || '');
+  var tableName = {
+    groups: '事件群組', 'event-groups': '事件群組',
+    operations: '整合操作', claims: '觀察認領', manifests: '匯入清單',
+    steps: '匯入步驟', evidence: '來源證據', links: '跨簿連結',
+    checkpoints: '對帳檢查點', settings: '設定版本', results: '結果版本',
+    records: '整合記錄',
+  }[canonicalScope];
+  if (!tableName) return [];
+  var rows = e2Rows_(spreadsheet, tableName);
+  var latest = Object.create(null);
+  var records = [];
+  for (var index = 0; index < rows.length; index += 1) {
+    var values = rows[index].values;
+    var id = e2RowIdentity_(tableName, values);
+    var record = e2RecordForTableRow_(tableName, values, rows[index].sheetRow, spreadsheet);
+    if (tableName === '匯入步驟' || tableName === '匯入清單' || tableName === '跨簿連結' ||
+        tableName === '設定版本' || tableName === '結果版本' || tableName === '對帳檢查點' ||
+        tableName === '整合記錄') {
+      latest[id] = record;
+    } else {
+      records.push(record);
+    }
+  }
+  var latestIds = Object.keys(latest);
+  for (var latestIndex = 0; latestIndex < latestIds.length; latestIndex += 1) {
+    records.push(latest[latestIds[latestIndex]]);
+  }
+  records.sort(function (left, right) {
+    var leftId = String(left.id || '');
+    var rightId = String(right.id || '');
+    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+  });
+  return records;
+}
+
+function e2RowIdentity_(tableName, values) {
+  if (tableName === '事件群組') return values.group_id;
+  if (tableName === '整合操作') return values.operation_id;
+  if (tableName === '觀察認領') return values.claim_id;
+  if (tableName === '匯入清單') return values.manifest_id;
+  if (tableName === '匯入步驟') return values.manifest_id + ':' + values.step_id;
+  if (tableName === '來源證據') return values.evidence_id;
+  if (tableName === '跨簿連結') return values.link_id;
+  if (tableName === '對帳檢查點') return values.checkpoint_id;
+  if (tableName === '設定版本') return values.setting_id;
+  if (tableName === '結果版本') return values.result_id;
+  return values.scope + ':' + values.record_id;
+}
+
+function e2RecordForTableRow_(tableName, values, sheetRow, spreadsheet) {
+  var id = e2RowIdentity_(tableName, values);
+  var revision = values.revision || values.content_digest || e2Digest_(values);
+  var record = { id: id, revision: revision, sheetRow: sheetRow };
+  if (tableName === '事件群組') {
+    var index = readE2GroupIndex_(spreadsheet);
+    var group = index[values.group_id] || {
+      groupId: values.group_id, status: values.status,
+      currencyTotals: e2ParseJson_(values.currency_totals_json, []), legs: [],
+    };
+    // The index is keyed by txn id; rebuild the group legs from its table so
+    // group snapshots stay useful even when no journal leg has been written.
+    var detailRows = e2Rows_(spreadsheet, '事件群組明細');
+    var legs = [];
+    for (var detailIndex = 0; detailIndex < detailRows.length; detailIndex += 1) {
+      if (detailRows[detailIndex].values.group_id === values.group_id) {
+        var detail = detailRows[detailIndex].values;
+        legs.push({
+          txnId: detail.txn_id, amount: detail.amount, currency: detail.currency,
+          debitAccount: detail.debit_account, creditAccount: detail.credit_account,
+          legIndex: Number(detail.leg_index),
+        });
+      }
+    }
+    record.groupId = values.group_id;
+    record.status = values.status;
+    record.completion = values.status === 'complete'
+      ? { kind: 'complete', marker: values.completion_marker }
+      : { kind: 'incomplete', marker: values.completion_marker || null };
+    record.currencyTotals = e2ParseJson_(values.currency_totals_json, []);
+    record.legs = legs;
+    record.contentDigest = values.content_digest;
+    return record;
+  }
+  if (tableName === '整合操作') {
+    var outcome = e2OutcomeFromRow_({ values: values });
+    record.operationId = values.operation_id;
+    record.contentDigest = values.content_digest;
+    record.outcome = outcome;
+    return record;
+  }
+  if (tableName === '觀察認領') {
+    record.claimId = values.claim_id;
+    record.operationId = values.operation_id;
+    record.status = values.status;
+    record.contentDigest = values.content_digest;
+    return record;
+  }
+  if (tableName === '匯入清單') {
+    record.manifestId = values.manifest_id;
+    record.status = values.status;
+    record.contentDigest = values.content_digest;
+    record.actor = values.actor;
+    record.approvedAt = values.approved_at;
+    record.sourceEvidence = e2ParseJson_(values.source_evidence_json, []);
+    return record;
+  }
+  if (tableName === '匯入步驟') {
+    record.manifestId = values.manifest_id;
+    record.stepId = values.step_id;
+    record.state = values.state;
+    record.destination = values.destination_id
+      ? { id: values.destination_id, revision: values.destination_revision }
+      : null;
+    record.contentDigest = values.content_digest;
+    record.expectedRevisions = e2ParseJson_(values.expected_revisions_json, []);
+    record.result = e2ParseJson_(values.result_json, null);
+    return record;
+  }
+  if (tableName === '來源證據') {
+    record.evidenceId = values.evidence_id;
+    record.sourceReference = values.source_reference;
+    record.contentDigest = values.content_digest;
+    record.effectiveDate = values.effective_date;
+    record.uploadedAt = values.uploaded_at;
+    record.fields = e2ParseJson_(values.fields_json, {});
+    return record;
+  }
+  if (tableName === '跨簿連結') {
+    record.linkId = values.link_id;
+    record.sourceId = values.source_id;
+    record.destination = { id: values.destination_id, revision: values.destination_revision };
+    record.sourceRevision = values.source_revision;
+    record.contentDigest = values.content_digest;
+    record.status = values.status;
+    record.origin = values.origin;
+    return record;
+  }
+  if (tableName === '對帳檢查點') {
+    record.checkpointId = values.checkpoint_id;
+    record.cutoff = values.cutoff;
+    record.scopeVersion = values.scope_version;
+    record.representedBalances = e2ParseJson_(values.represented_balances_json, {});
+    record.acceptedBalances = e2ParseJson_(values.accepted_balances_json, {});
+    record.adjustment = e2ParseJson_(values.adjustment_json, null);
+    record.evidenceIds = e2ParseJson_(values.evidence_ids_json, []);
+    record.coverage = e2ParseJson_(values.coverage_json, {});
+    record.status = values.status;
+    return record;
+  }
+  if (tableName === '設定版本') {
+    record.settingId = values.setting_id;
+    record.key = values.setting_key;
+    record.value = e2ParseJson_(values.value_json, null);
+    record.effectiveDate = values.effective_date;
+    return record;
+  }
+  if (tableName === '結果版本') {
+    record.resultId = values.result_id;
+    record.interval = e2ParseJson_(values.interval_json, null);
+    record.dependencies = e2ParseJson_(values.dependency_revisions_json, []);
+    record.state = values.state;
+    record.value = e2ParseJson_(values.value_json, null);
+    return record;
+  }
+  record.scope = values.scope;
+  record.data = e2ParseJson_(values.data_json, null);
+  return record;
+}
+
+function e2ExecuteGenericWrites_(spreadsheet, operationId, content) {
+  var writes = content && content.writes;
+  if (writes !== undefined && !Array.isArray(writes)) throw new Error('content.writes must be an array');
+  var destinations = [];
+  for (var index = 0; index < (writes || []).length; index += 1) {
+    var write = writes[index];
+    if (!write || typeof write !== 'object') throw new Error('content.writes contains an invalid item');
+    var scope = String(write.scope || '').trim();
+    var id = String(write.id || '').trim();
+    if (!scope || !id) throw new Error('content.writes requires scope and id');
+    var existing = e2LatestRecord_(spreadsheet, scope, id);
+    if (existing && e2Digest_(write.data) !== e2Digest_(JSON.parse(existing.values.data_json || 'null'))) {
+      return { conflict: e2Conflict_(operationId, 'destination-content-conflict', [{
+        id: id, expected: String(write.contentDigest || ''), actual: existing.values.revision,
+      }]) };
+    }
+    if (existing) {
+      destinations.push({ id: id, revision: existing.values.revision });
+      continue;
+    }
+    destinations.push(e2WriteRecord_(spreadsheet, scope, id, write.data, operationId));
+  }
+  return { destinations: destinations };
+}
+
+function command_(payload, nonce) {
+  if (!payload || typeof payload !== 'object') throw new Error('payload is required');
+  var operationId = e2OperationId_(payload, nonce);
+  if (!Array.isArray(payload.expectedRevisions)) throw new Error('expectedRevisions must be an array');
+  if (!payload.content || typeof payload.content !== 'object') throw new Error('content is required');
+  var content = payload.content;
+  var digest = e2ContentDigest_(payload, content);
+  var spreadsheet = e2Spreadsheet_();
+  var previous = e2OperationRow_(spreadsheet, operationId);
+  if (previous) {
+    if (previous.values.content_digest !== digest) {
+      return e2Conflict_(operationId, 'operation-id-reused-with-different-content', []);
+    }
+    return e2OutcomeFromRow_(previous);
+  }
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(LOCK_WAIT_MILLISECONDS);
+  try {
+    requireFinancialOpen_(payload);
+    previous = e2OperationRow_(spreadsheet, operationId);
+    if (previous) {
+      if (previous.values.content_digest !== digest) {
+        return e2Conflict_(operationId, 'operation-id-reused-with-different-content', []);
+      }
+      return e2OutcomeFromRow_(previous);
+    }
+
+    var expectedConflicts = e2CheckExpectedRevisions_(spreadsheet, payload.expectedRevisions);
+    if (expectedConflicts.length > 0) {
+      return e2PersistOutcome_(
+        spreadsheet,
+        e2Conflict_(operationId, 'stale-expected-revision', expectedConflicts),
+        digest,
+      );
+    }
+    var claimConflict = e2CheckClaims_(spreadsheet, operationId, content.claims);
+    if (claimConflict) return e2PersistOutcome_(spreadsheet, claimConflict, digest);
+
+    if (content.pending === true || content.state === 'pending') {
+      return e2PersistOutcome_(spreadsheet, {
+        kind: 'pending', operationId: operationId,
+        reason: String(content.pendingReason || 'still-running'),
+      }, digest);
+    }
+
+    var execution;
+    try {
+      var kind = String(content.kind || 'generic');
+      if (kind === 'event-group' || kind === 'compound-event-group') {
+        execution = e2ExecuteEventGroup_(spreadsheet, operationId, digest, content);
+      } else if (kind === 'confirmation' || kind === 'review') {
+        execution = e2ExecuteConfirmation_(spreadsheet, operationId, digest, content);
+      } else if (kind === 'manifest' || kind === 'import') {
+        execution = e2ExecuteManifest_(spreadsheet, operationId, digest, content);
+      } else if (kind === 'resume-import') {
+        execution = e2ExecuteResumeImport_(spreadsheet, operationId, digest, content);
+      } else if (kind === 'evidence') {
+        execution = e2ExecuteEvidence_(spreadsheet, operationId, digest, content);
+      } else if (kind === 'link') {
+        execution = e2ExecuteLink_(spreadsheet, operationId, digest, content);
+      } else if (kind === 'checkpoint') {
+        execution = e2ExecuteCheckpoint_(spreadsheet, operationId, digest, content);
+      } else if (kind === 'setting') {
+        execution = e2ExecuteSetting_(spreadsheet, operationId, digest, content);
+      } else if (kind === 'result') {
+        execution = e2ExecuteResult_(spreadsheet, operationId, digest, content);
+      } else if (kind === 'opening-adjustment') {
+        execution = e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content);
+      } else if (kind === 'correction') {
+        execution = e2ExecuteCorrection_(spreadsheet, operationId, digest, content);
+      } else {
+        execution = e2ExecuteGenericWrites_(spreadsheet, operationId, content);
+      }
+    } catch (error) {
+      var unknown = {
+        kind: 'unknown', operationId: operationId,
+        reason: 'write-outcome-unknown',
+      };
+      e2PersistOutcome_(spreadsheet, unknown, digest, String(error && error.message || error));
+      return unknown;
+    }
+    if (execution && execution.conflict) {
+      return e2PersistOutcome_(spreadsheet, execution.conflict, digest);
+    }
+    if (execution && execution.rejected) {
+      return e2PersistOutcome_(spreadsheet, execution.rejected, digest);
+    }
+    var destinations = execution && execution.destinations ? execution.destinations : [];
+    if (destinations.length === 0) {
+      destinations = [{ id: operationId + '-effect', revision: snapshotRevision_(readSnapshotSource_(spreadsheet)) }];
+    }
+    e2PersistClaims_(spreadsheet, operationId, digest, content.claims || []);
+    return e2PersistOutcome_(spreadsheet, {
+      kind: 'committed', operationId: operationId, destinations: destinations,
+      committedAt: taipeiIsoNow_(),
+    }, digest);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function outcome_(payload) {
+  if (!payload || typeof payload !== 'object') throw new Error('payload is required');
+  var operationId = e2OperationId_(payload);
+  var spreadsheet = SpreadsheetApp.openById(requiredProp_('LEDGER_SPREADSHEET_ID'));
+  if (!e2SchemaAvailable_(spreadsheet)) {
+    return { kind: 'unavailable', book: 'personal', reason: 'no-such-operation' };
+  }
+  var row = e2OperationRow_(spreadsheet, operationId);
+  if (!row) return { kind: 'unavailable', book: 'personal', reason: 'no-such-operation' };
+  return e2OutcomeFromRow_(row);
+}
+
+function createEventGroup_(payload, nonce) {
+  var group = payload && (payload.group || payload.eventGroup || payload);
+  var operationId = e2OperationId_(payload, nonce);
+  var content = {
+    kind: 'event-group',
+    groupId: String(group.groupId || group.group_id || operationId),
+    completionMarker: group.completionMarker || group.completion_marker,
+    legs: group.legs || group.entries || [],
+    currencyTotals: group.currencyTotals || group.currency_totals,
+    source: group.source || 'integration',
+  };
+  return command_({
+    operationId: operationId,
+    expectedRevisions: e2ExpectedRevisions_(payload, group.groupId || group.group_id || ''),
+    contentDigest: payload.contentDigest || e2Digest_(content),
+    content: content,
+    contractVersion: payload.contractVersion,
+  }, nonce);
+}
+
+function confirmEvent_(payload, nonce) {
+  var operationId = e2OperationId_(payload, nonce);
+  var txnId = String(payload.txnId || payload.txn_id || '').trim();
+  if (!txnId) throw new Error('txnId is required');
+  var content = {
+    kind: 'confirmation', txnId: txnId,
+    category: Object.prototype.hasOwnProperty.call(payload, 'category') ? payload.category : undefined,
+    confirmed: payload.confirmed === true,
+    pendingTransition: payload.pendingTransition === true || payload.state === 'pending',
+  };
+  return command_({
+    operationId: operationId,
+    expectedRevisions: e2ExpectedRevisions_(payload, txnId),
+    contentDigest: payload.contentDigest || e2Digest_(content),
+    content: content,
+    contractVersion: payload.contractVersion,
+  }, nonce);
+}
+
+function acceptImport_(payload, nonce) {
+  return command_({
+    operationId: e2OperationId_(payload, nonce),
+    expectedRevisions: e2ExpectedRevisions_(payload, payload.manifestId || ''),
+    contentDigest: payload.contentDigest,
+    content: {
+      kind: 'manifest', manifest: payload.manifest || payload,
+      steps: payload.steps || (payload.manifest && payload.manifest.steps) || [],
+      actor: payload.actor || '',
+    },
+    contractVersion: payload.contractVersion,
+  }, nonce);
+}
+
+function resumeImport_(payload, nonce) {
+  return command_({
+    operationId: e2OperationId_(payload, nonce),
+    expectedRevisions: e2ExpectedRevisions_(payload, payload.manifestId || ''),
+    contentDigest: payload.contentDigest,
+    content: {
+      kind: 'resume-import', manifestId: payload.manifestId,
+      steps: payload.steps || [],
+    },
+    contractVersion: payload.contractVersion,
+  }, nonce);
+}
+
+function recordEvidence_(payload, nonce) {
+  return command_({
+    operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.evidenceId || ''),
+    contentDigest: payload.contentDigest,
+    content: { kind: 'evidence', evidence: payload.evidence || payload },
+    contractVersion: payload.contractVersion,
+  }, nonce);
+}
+
+function recordLink_(payload, nonce) {
+  return command_({
+    operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.linkId || ''),
+    contentDigest: payload.contentDigest,
+    content: { kind: 'link', link: payload.link || payload },
+    contractVersion: payload.contractVersion,
+  }, nonce);
+}
+
+function acceptCheckpoint_(payload, nonce) {
+  return command_({
+    operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.checkpointId || ''),
+    contentDigest: payload.contentDigest,
+    content: { kind: 'checkpoint', checkpoint: payload.checkpoint || payload },
+    contractVersion: payload.contractVersion,
+  }, nonce);
+}
+
+function setVersionedSetting_(payload, nonce) {
+  return command_({
+    operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.settingId || ''),
+    contentDigest: payload.contentDigest,
+    content: { kind: 'setting', setting: payload.setting || payload },
+    contractVersion: payload.contractVersion,
+  }, nonce);
+}
+
+function publishResult_(payload, nonce) {
+  return command_({
+    operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.resultId || ''),
+    contentDigest: payload.contentDigest,
+    content: { kind: 'result', result: payload.result || payload },
+    contractVersion: payload.contractVersion,
+  }, nonce);
+}
+
+function openingAdjustment_(payload, nonce) {
+  return command_({
+    operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, payload.checkpointId || ''),
+    contentDigest: payload.contentDigest,
+    content: { kind: 'opening-adjustment', adjustment: payload.adjustment || payload },
+    contractVersion: payload.contractVersion,
+  }, nonce);
+}
+
+function correctEvent_(payload, nonce) {
+  return command_({
+    operationId: e2OperationId_(payload, nonce), expectedRevisions: e2ExpectedRevisions_(payload, String(payload.txnId || payload.txn_id || '')),
+    contentDigest: payload.contentDigest,
+    content: { kind: 'correction', correction: payload.correction || payload },
+    contractVersion: payload.contractVersion,
+  }, nonce);
+}
+
+function expectedRevisionInput_(payload, id) {
+  if (payload && payload.expectedRevision && id) {
+    return [{ id: id, revision: String(payload.expectedRevision) }];
+  }
+  return [];
+}
+
+function e2ExpectedRevisions_(payload, fallbackId) {
+  if (payload && Array.isArray(payload.expectedRevisions)) return payload.expectedRevisions;
+  if (payload && payload.expectedSnapshotRevision && fallbackId) {
+    return [{ id: String(fallbackId), revision: String(payload.expectedSnapshotRevision) }];
+  }
+  return expectedRevisionInput_(payload, fallbackId);
+}
+
+function e2ExecuteEventGroup_(spreadsheet, operationId, digest, content) {
+  var groupId = String(content.groupId || operationId).trim();
+  if (!groupId) return { rejected: e2Rejected_(operationId, 'group-id-required') };
+  var legs = content.legs;
+  if (!Array.isArray(legs) || legs.length === 0) {
+    return { rejected: e2Rejected_(operationId, 'group-legs-required') };
+  }
+  var byCurrency = Object.create(null);
+  var postings = [];
+  var vocabulary = readAccountVocabulary_(spreadsheet);
+  for (var index = 0; index < legs.length; index += 1) {
+    var leg = legs[index];
+    if (!leg || typeof leg !== 'object') {
+      return { rejected: e2Rejected_(operationId, 'group-leg-invalid') };
+    }
+    var amount;
+    try { amount = canonicalDecimal_(leg.amount, index + 1); } catch (error) {
+      return { rejected: e2Rejected_(operationId, 'group-amount-invalid') };
+    }
+    if (amount === '0' || amount.charAt(0) === '-') {
+      return { rejected: e2Rejected_(operationId, 'group-amount-must-be-positive') };
+    }
+    var currency = String(leg.currency || '').trim();
+    if (!/^[A-Z]{3}$/.test(currency)) {
+      return { rejected: e2Rejected_(operationId, 'group-currency-invalid') };
+    }
+    var debit = String(leg.debitAccount || leg.debit_account || '').trim();
+    var credit = String(leg.creditAccount || leg.credit_account || '').trim();
+    var txnId = String(leg.txnId || leg.txn_id || Utilities.getUuid()).trim();
+    if (debit || credit) {
+      if (!debit || !credit || debit === credit) {
+        return { rejected: e2Rejected_(operationId, 'group-posting-legs-invalid') };
+      }
+      try {
+        validateOptionalVocabulary_(debit, 'debit account', vocabulary, null);
+        validateOptionalVocabulary_(credit, 'credit account', vocabulary, null);
+      } catch (error) {
+        return { rejected: e2Rejected_(operationId, 'group-account-invalid', String(error.message || error)) };
+      }
+      var posting = postingRow_({
+        date: leg.date || content.date || taipeiIsoNow_().slice(0, 10),
+        time: leg.time || '', type: leg.type || content.type || '複合',
+        debitAccount: debit, creditAccount: credit, amount: amount,
+        currency: currency,
+        category: leg.category || nominalLeg_(debit, credit, vocabulary.accountTypes),
+        payee: leg.payee || leg.counterparty || '',
+        description: leg.description || content.description || '',
+        settlementStatus: leg.settlementStatus || '', reversalTxnId: leg.reversalTxnId || '',
+        txnId: txnId, source: leg.source || content.source || 'integration', now: taipeiIsoNow_(),
+      });
+      postings.push({ posting: posting, txnId: txnId, amount: amount, currency: currency });
+    } else {
+      // A metadata-only leg is allowed for a clearing representation that is
+      // posted by another book. It still participates in per-currency proof.
+      postings.push({ posting: null, txnId: txnId, amount: amount, currency: currency });
+    }
+    if (!byCurrency[currency]) byCurrency[currency] = { currency: currency, debit: '0', credit: '0' };
+    // A journal leg is itself a balanced pair. Abstract legs may provide
+    // explicit debit/credit amounts; otherwise its amount balances both sides.
+    var debitAmount = Object.prototype.hasOwnProperty.call(leg, 'debitAmount') ? leg.debitAmount : amount;
+    var creditAmount = Object.prototype.hasOwnProperty.call(leg, 'creditAmount') ? leg.creditAmount : amount;
+    try {
+      byCurrency[currency].debit = addDecimalStrings_(byCurrency[currency].debit, canonicalDecimal_(debitAmount, index + 1));
+      byCurrency[currency].credit = addDecimalStrings_(byCurrency[currency].credit, canonicalDecimal_(creditAmount, index + 1));
+    } catch (error) {
+      return { rejected: e2Rejected_(operationId, 'group-currency-total-invalid') };
+    }
+  }
+  var declared = content.currencyTotals;
+  if (declared && typeof declared === 'object' && !Array.isArray(declared)) {
+    var declaredList = [];
+    var declaredCurrencies = Object.keys(declared).sort();
+    for (var declaredIndex = 0; declaredIndex < declaredCurrencies.length; declaredIndex += 1) {
+      var declaredCurrency = declaredCurrencies[declaredIndex];
+      var declaredValue = declared[declaredCurrency];
+      if (declaredValue && typeof declaredValue === 'object') {
+        declaredList.push({ currency: declaredCurrency, debit: String(declaredValue.debit || '0'), credit: String(declaredValue.credit || '0') });
+      } else {
+        declaredList.push({ currency: declaredCurrency, debit: String(declaredValue || '0'), credit: String(declaredValue || '0') });
+      }
+    }
+    declared = declaredList;
+  }
+  var currencyTotals = Array.isArray(declared) ? declared : [];
+  if (currencyTotals.length === 0) {
+    var currencies = Object.keys(byCurrency).sort();
+    for (var currencyIndex = 0; currencyIndex < currencies.length; currencyIndex += 1) {
+      currencyTotals.push(byCurrency[currencies[currencyIndex]]);
+    }
+  }
+  var declaredByCurrency = Object.create(null);
+  for (var totalIndex = 0; totalIndex < currencyTotals.length; totalIndex += 1) {
+    var total = currencyTotals[totalIndex];
+    var totalCurrency = String(total.currency || '').trim();
+    if (!/^[A-Z]{3}$/.test(totalCurrency)) {
+      return { rejected: e2Rejected_(operationId, 'group-currency-invalid') };
+    }
+    if (declaredByCurrency[totalCurrency]) {
+      return { rejected: e2Rejected_(operationId, 'group-currency-total-duplicate', totalCurrency) };
+    }
+    var debitTotal;
+    var creditTotal;
+    try {
+      debitTotal = canonicalDecimal_(total.debit, 0);
+      creditTotal = canonicalDecimal_(total.credit, 0);
+    } catch (error) {
+      return { rejected: e2Rejected_(operationId, 'group-currency-total-invalid') };
+    }
+    if (debitTotal !== creditTotal) {
+      return { rejected: e2Rejected_(operationId, 'group-not-balanced-within-currency', totalCurrency) };
+    }
+    declaredByCurrency[totalCurrency] = { debit: debitTotal, credit: creditTotal };
+  }
+  var actualCurrencies = Object.keys(byCurrency);
+  for (var actualCurrencyIndex = 0; actualCurrencyIndex < actualCurrencies.length; actualCurrencyIndex += 1) {
+    var actualCurrency = actualCurrencies[actualCurrencyIndex];
+    var declaredTotal = declaredByCurrency[actualCurrency];
+    if (!declaredTotal || declaredTotal.debit !== byCurrency[actualCurrency].debit ||
+        declaredTotal.credit !== byCurrency[actualCurrency].credit) {
+      return { rejected: e2Rejected_(operationId, 'group-currency-total-mismatch', actualCurrency) };
+    }
+  }
+  var existingGroups = e2Rows_(spreadsheet, '事件群組');
+  var existingGroup = null;
+  for (var existingIndex = existingGroups.length - 1; existingIndex >= 0; existingIndex -= 1) {
+    if (existingGroups[existingIndex].values.group_id === groupId) {
+      existingGroup = existingGroups[existingIndex];
+      if (existingGroup.values.content_digest !== digest) {
+        return { conflict: e2Conflict_(operationId, 'group-id-reused-with-different-content', []) };
+      }
+      break;
+    }
+  }
+  var existingDetailByTxnId = Object.create(null);
+  var existingDetailRows = e2Rows_(spreadsheet, '事件群組明細');
+  for (var existingLegIndex = 0; existingLegIndex < existingDetailRows.length; existingLegIndex += 1) {
+    var existingDetail = existingDetailRows[existingLegIndex].values;
+    if (existingDetail.group_id === groupId && !existingDetailByTxnId[existingDetail.txn_id]) {
+      existingDetailByTxnId[existingDetail.txn_id] = existingDetail;
+    }
+  }
+  var expectedLegDigests = Object.create(null);
+  var expectedLegsComplete = true;
+  for (var expectedLegIndex = 0; expectedLegIndex < postings.length; expectedLegIndex += 1) {
+    var expectedLeg = postings[expectedLegIndex];
+    var expectedDigest = e2Digest_({
+      groupId: groupId, txnId: expectedLeg.txnId,
+      amount: expectedLeg.amount, currency: expectedLeg.currency,
+    });
+    expectedLegDigests[expectedLeg.txnId] = expectedDigest;
+    if (!existingDetailByTxnId[expectedLeg.txnId] ||
+        existingDetailByTxnId[expectedLeg.txnId].content_digest !== expectedDigest) {
+      expectedLegsComplete = false;
+    }
+  }
+  if (existingGroup && existingGroup.values.status === 'complete' && expectedLegsComplete) {
+    var existingDestinations = [];
+    for (var completeLegIndex = 0; completeLegIndex < postings.length; completeLegIndex += 1) {
+      var completeLeg = postings[completeLegIndex];
+      existingDestinations.push({ id: completeLeg.txnId, revision: expectedLegDigests[completeLeg.txnId] });
+    }
+    existingDestinations.push({ id: groupId, revision: existingGroup.values.content_digest || digest });
+    return { destinations: existingDestinations };
+  }
+  var now = taipeiIsoNow_();
+  var groupSheetRow;
+  if (existingGroup) {
+    groupSheetRow = existingGroup.sheetRow;
+    // A prior attempt may have left the group metadata row incomplete. Keep
+    // that durable marker while the retry fills only missing legs.
+    e2Set_(spreadsheet, '事件群組', groupSheetRow, {
+      group_id: groupId, status: 'incomplete', currency_totals_json: e2Json_(currencyTotals),
+      completion_marker: '', content_digest: digest,
+      created_at: existingGroup.values.created_at || now, updated_at: now,
+      source: content.source || 'integration',
+    });
+  } else {
+    groupSheetRow = e2Append_(spreadsheet, '事件群組', {
+      group_id: groupId, status: 'incomplete', currency_totals_json: e2Json_(currencyTotals),
+      completion_marker: '', content_digest: digest, created_at: now, updated_at: now,
+      source: content.source || 'integration',
+    });
+  }
+  var destinations = [];
+  try {
+    for (var postingIndex = 0; postingIndex < postings.length; postingIndex += 1) {
+      var item = postings[postingIndex];
+      var legDigest = expectedLegDigests[item.txnId];
+      var existingDetailForLeg = existingDetailByTxnId[item.txnId];
+      if (existingDetailForLeg) {
+        if (existingDetailForLeg.content_digest !== legDigest) {
+          return { conflict: e2Conflict_(operationId, 'group-leg-content-conflict', [{ id: item.txnId }]) };
+        }
+        destinations.push({ id: item.txnId, revision: legDigest });
+        continue;
+      }
+      if (item.posting) {
+        var journal = requiredSheet_(spreadsheet, '日記帳');
+        var headers = journal.getRange(1, 1, 1, journal.getLastColumn()).getDisplayValues()[0];
+        var columns = resolveHeaders_(headers, JOURNAL_HEADERS);
+        validatePostingVocabulary_(item.posting, vocabulary);
+        var existingTxnRow = findTxnRow_(journal, columns.txn_id, item.txnId);
+        if (existingTxnRow !== null) {
+          if (!existingGroup) {
+            return { conflict: e2Conflict_(operationId, 'txn-id-already-exists', [{ id: item.txnId }]) };
+          }
+          for (var linkedGroupIndex = 0; linkedGroupIndex < existingDetailRows.length; linkedGroupIndex += 1) {
+            var linkedGroupValues = existingDetailRows[linkedGroupIndex].values;
+            if (linkedGroupValues.txn_id === item.txnId && linkedGroupValues.group_id !== groupId) {
+              return { conflict: e2Conflict_(operationId, 'txn-id-already-linked', [{ id: item.txnId }]) };
+            }
+          }
+          var existingJournalValues = journal.getRange(existingTxnRow, 1, 1, journal.getLastColumn()).getDisplayValues()[0];
+          var existingAmount;
+          try { existingAmount = canonicalDecimal_(existingJournalValues[columns['金額'] - 1], existingTxnRow); } catch (error) { existingAmount = ''; }
+          if (existingAmount !== item.amount ||
+              String(existingJournalValues[columns['幣別'] - 1] || '').trim() !== item.currency ||
+              String(existingJournalValues[columns['借方帳戶'] - 1] || '').trim() !== item.posting['借方帳戶'] ||
+              String(existingJournalValues[columns['貸方帳戶'] - 1] || '').trim() !== item.posting['貸方帳戶']) {
+            return { conflict: e2Conflict_(operationId, 'group-leg-content-conflict', [{ id: item.txnId }]) };
+          }
+        } else {
+          appendPosting_(journal, columns, item.posting);
+        }
+      }
+      e2Append_(spreadsheet, '事件群組明細', {
+        group_id: groupId, txn_id: item.txnId, leg_index: postingIndex,
+        amount: item.amount, currency: item.currency,
+        debit_account: item.posting ? item.posting['借方帳戶'] : '',
+        credit_account: item.posting ? item.posting['貸方帳戶'] : '',
+        content_digest: legDigest,
+      });
+      destinations.push({ id: item.txnId, revision: legDigest });
+    }
+    e2Set_(spreadsheet, '事件群組', groupSheetRow, {
+      group_id: groupId, status: 'complete', currency_totals_json: e2Json_(currencyTotals),
+      completion_marker: String(content.completionMarker || 'complete:' + digest),
+      content_digest: digest,
+      created_at: existingGroup && existingGroup.values.created_at ? existingGroup.values.created_at : now,
+      updated_at: taipeiIsoNow_(),
+      source: content.source || 'integration',
+    });
+  } catch (error) {
+    if (groupSheetRow) {
+      e2Set_(spreadsheet, '事件群組', groupSheetRow, {
+        group_id: groupId, status: 'incomplete', currency_totals_json: e2Json_(currencyTotals),
+        completion_marker: '', content_digest: digest,
+        created_at: existingGroup && existingGroup.values.created_at ? existingGroup.values.created_at : now,
+        updated_at: taipeiIsoNow_(), source: content.source || 'integration',
+      });
+    }
+    throw error;
+  }
+  destinations.push({ id: groupId, revision: digest });
+  return { destinations: destinations };
+}
+
+function e2ExecuteConfirmation_(spreadsheet, operationId, digest, content) {
+  var txnId = String(content.txnId || '').trim();
+  if (!txnId) return { rejected: e2Rejected_(operationId, 'txn-id-required') };
+  var source = readSnapshotSource_(spreadsheet);
+  var target = null;
+  for (var index = 0; index < source.journalRows.length; index += 1) {
+    var row = source.journalRows[index];
+    if (String(row.values.txn_id || '').trim() === txnId) {
+      target = row;
+      break;
+    }
+  }
+  if (!target) return { rejected: e2Rejected_(operationId, 'unknown-txn-id') };
+  var category = Object.prototype.hasOwnProperty.call(content, 'category') && content.category !== undefined
+    ? String(content.category || '').trim()
+    : String(target.values['分類'] || '').trim();
+  var confirmed = content.confirmed === true;
+  var pendingTransition = content.pendingTransition === true;
+  var priorReview = source.reviewByTxnId && source.reviewByTxnId[txnId];
+  if (priorReview && priorReview.reviewState === 'confirmed' && category === '尚未分類' && !pendingTransition) {
+    return { rejected: e2Rejected_(operationId, 'pending-transition-required') };
+  }
+  if (confirmed && (!category || category === '尚未分類')) {
+    return { rejected: e2Rejected_(operationId, 'confirmation-requires-category') };
+  }
+  if (!confirmed && !pendingTransition && Object.prototype.hasOwnProperty.call(content, 'category') && category !== '') {
+    // Choosing a category is a review edit, not a confirmation transition.
+    confirmed = false;
+  }
+  var vocabulary = readAccountVocabulary_(spreadsheet);
+  if (category && category !== '尚未分類' &&
+      (!Object.prototype.hasOwnProperty.call(vocabulary.accountTypes, category) ||
+       (vocabulary.accountTypes[category] !== '支出' && vocabulary.accountTypes[category] !== '收入'))) {
+    return { rejected: e2Rejected_(operationId, 'confirmation-category-invalid') };
+  }
+  var journal = requiredSheet_(spreadsheet, '日記帳');
+  var columns = resolveHeaders_(
+    journal.getRange(1, 1, 1, journal.getLastColumn()).getDisplayValues()[0],
+    JOURNAL_HEADERS,
+  );
+  // All resulting-state checks occur before this first mutation.
+  journal.getRange(target.sheetRow, columns['分類']).setValues([[category]]);
+  var reviewRevision = e2Digest_({ txnId: txnId, category: category, state: confirmed ? 'confirmed' : 'pending', operationId: operationId });
+  e2Append_(spreadsheet, '事件審核', {
+    txn_id: txnId, category: category, review_state: confirmed ? 'confirmed' : 'pending',
+    revision: reviewRevision, operation_id: operationId, updated_at: taipeiIsoNow_(),
+  });
+  var updatedSource = readSnapshotSource_(spreadsheet);
+  var updatedEvents = snapshotEventRecords_(updatedSource);
+  var updatedRevision = reviewRevision;
+  for (var eventIndex = 0; eventIndex < updatedEvents.length; eventIndex += 1) {
+    if (updatedEvents[eventIndex].id === txnId) {
+      updatedRevision = updatedEvents[eventIndex].contentDigest;
+      break;
+    }
+  }
+  return { destinations: [{ id: txnId, revision: updatedRevision }] };
+}
+
+function e2ManifestId_(manifest) {
+  var id = String(manifest && (manifest.manifestId || manifest.manifest_id || manifest.id) || '').trim();
+  if (!id) throw new Error('manifestId is required');
+  if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(id)) throw new Error('manifestId is invalid');
+  return id;
+}
+
+function e2ExecuteManifest_(spreadsheet, operationId, digest, content) {
+  var manifest = content.manifest || content;
+  var manifestId;
+  try { manifestId = e2ManifestId_(manifest); } catch (error) {
+    return { rejected: e2Rejected_(operationId, 'manifest-id-required') };
+  }
+  var steps = content.steps || manifest.steps;
+  if (!Array.isArray(steps) || steps.length === 0) {
+    return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'steps are required') };
+  }
+  for (var index = 0; index < steps.length; index += 1) {
+    var step = steps[index];
+    if (!step || typeof step !== 'object' || !String(step.stepId || step.step_id || step.id || '').trim()) {
+      return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'every step needs an id') };
+    }
+    var disposition = String(step.disposition || step.action || '').trim();
+    var state = String(step.state || step.status || '').trim();
+    if (!disposition && !state) {
+      return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'every step needs a disposition') };
+    }
+    if (disposition && ['create', 'link', 'already-imported', 'skip'].indexOf(disposition) === -1) {
+      return { rejected: e2Rejected_(operationId, 'plan-incomplete', 'unsupported step disposition') };
+    }
+  }
+  var existingRows = e2Rows_(spreadsheet, '匯入清單');
+  for (var existingIndex = existingRows.length - 1; existingIndex >= 0; existingIndex -= 1) {
+    if (existingRows[existingIndex].values.manifest_id === manifestId) {
+      if (existingRows[existingIndex].values.content_digest !== digest) {
+        return { conflict: e2Conflict_(operationId, 'manifest-id-reused-with-different-content', []) };
+      }
+      var existingManifestDestinations = [{ id: manifestId, revision: existingRows[existingIndex].values.revision }];
+      var existingManifestSteps = snapshotE2Records_(spreadsheet, 'steps');
+      for (var existingStepIndex = 0; existingStepIndex < existingManifestSteps.length; existingStepIndex += 1) {
+        if (existingManifestSteps[existingStepIndex].manifestId === manifestId) {
+          existingManifestDestinations.push({
+            id: manifestId + ':' + existingManifestSteps[existingStepIndex].stepId,
+            revision: existingManifestSteps[existingStepIndex].revision,
+          });
+        }
+      }
+      return { destinations: existingManifestDestinations };
+    }
+  }
+  var revision = e2Digest_({ manifestId: manifestId, digest: digest, operationId: operationId });
+  var now = taipeiIsoNow_();
+  e2Append_(spreadsheet, '匯入清單', {
+    manifest_id: manifestId, revision: revision, status: 'accepted', content_digest: digest,
+    actor: String(content.actor || ''), approved_at: now,
+    source_evidence_json: e2Json_(manifest.sourceEvidence || manifest.source_evidence || []), updated_at: now,
+  });
+  var destinations = [{ id: manifestId, revision: revision }];
+  for (var stepIndex = 0; stepIndex < steps.length; stepIndex += 1) {
+    var candidate = steps[stepIndex];
+    var stepId = String(candidate.stepId || candidate.step_id || candidate.id).trim();
+    var stepDigest = String(candidate.contentDigest || '').trim() || e2Digest_(candidate);
+    var stepState = String(candidate.state || candidate.status || '').trim() || 'pending';
+    if (['pending', 'completed', 'conflicted', 'conflicting', 'rejected', 'unknown', 'skipped'].indexOf(stepState) === -1) stepState = 'pending';
+    var destinationId = String(candidate.destinationId || candidate.destination_id || '').trim();
+    var destinationRevision = String(candidate.destinationRevision || candidate.destination_revision || '').trim();
+    var stepRevision = e2Digest_({ manifestId: manifestId, stepId: stepId, digest: stepDigest, state: stepState });
+    e2Append_(spreadsheet, '匯入步驟', {
+      manifest_id: manifestId, step_id: stepId, state: stepState,
+      destination_id: destinationId, destination_revision: destinationRevision,
+      content_digest: stepDigest,
+      expected_revisions_json: e2Json_(candidate.expectedRevisions || candidate.expected_revisions || []),
+      result_json: e2Json_(candidate.result || null), updated_at: now,
+    });
+    destinations.push({ id: manifestId + ':' + stepId, revision: stepRevision });
+  }
+  return { destinations: destinations };
+}
+
+function e2ExecuteResumeImport_(spreadsheet, operationId, digest, content) {
+  var manifestId = String(content.manifestId || content.manifest_id || '').trim();
+  if (!manifestId) return { rejected: e2Rejected_(operationId, 'manifest-id-required') };
+  var manifestRows = e2Rows_(spreadsheet, '匯入清單');
+  var manifest = null;
+  for (var index = manifestRows.length - 1; index >= 0; index -= 1) {
+    if (manifestRows[index].values.manifest_id === manifestId) { manifest = manifestRows[index]; break; }
+  }
+  if (!manifest) return { rejected: e2Rejected_(operationId, 'unknown-manifest') };
+  var steps = content.steps;
+  if (!Array.isArray(steps) || steps.length === 0) return { rejected: e2Rejected_(operationId, 'no-missing-steps') };
+  var latest = snapshotE2Records_(spreadsheet, 'steps');
+  var destinations = [{ id: manifestId, revision: manifest.values.revision }];
+  var completed = true;
+  var conflicting = false;
+  for (var stepIndex = 0; stepIndex < steps.length; stepIndex += 1) {
+    var candidate = steps[stepIndex];
+    var stepId = String(candidate.stepId || candidate.step_id || candidate.id || '').trim();
+    if (!stepId) return { rejected: e2Rejected_(operationId, 'step-id-required') };
+    var existing = null;
+    for (var latestIndex = 0; latestIndex < latest.length; latestIndex += 1) {
+      if (latest[latestIndex].manifestId === manifestId && latest[latestIndex].stepId === stepId) {
+        existing = latest[latestIndex]; break;
+      }
+    }
+    var state = String(candidate.state || candidate.status || '').trim() || 'pending';
+    var stepDigest = String(candidate.contentDigest || '').trim() || e2Digest_(candidate);
+    if (existing && (existing.state === 'completed' || existing.state === 'skipped') &&
+        (state !== existing.state || stepDigest !== existing.contentDigest)) {
+      return { conflict: e2Conflict_(operationId, 'completed-step-cannot-regress', [{
+        id: manifestId + ':' + stepId, expected: existing.contentDigest, actual: stepDigest,
+      }]) };
+    }
+    if (existing && (existing.state === 'completed' || existing.state === 'skipped') &&
+        state === existing.state && stepDigest === existing.contentDigest) {
+      destinations.push({ id: manifestId + ':' + stepId, revision: existing.revision });
+      continue;
+    }
+    if (existing && existing.contentDigest && existing.contentDigest !== stepDigest && existing.state === 'completed') {
+      return { conflict: e2Conflict_(operationId, 'completed-step-content-conflict', [{
+        id: manifestId + ':' + stepId, expected: stepDigest, actual: existing.contentDigest,
+      }]) };
+    }
+    var stepRevision = e2Digest_({ manifestId: manifestId, stepId: stepId, digest: stepDigest, state: state, operationId: operationId });
+    e2Append_(spreadsheet, '匯入步驟', {
+      manifest_id: manifestId, step_id: stepId, state: state,
+      destination_id: String(candidate.destinationId || candidate.destination_id || (existing && existing.destination && existing.destination.id) || ''),
+      destination_revision: String(candidate.destinationRevision || candidate.destination_revision || (existing && existing.destination && existing.destination.revision) || ''),
+      content_digest: stepDigest,
+      expected_revisions_json: e2Json_(candidate.expectedRevisions || candidate.expected_revisions || []),
+      result_json: e2Json_(candidate.result || null), updated_at: taipeiIsoNow_(),
+    });
+    destinations.push({ id: manifestId + ':' + stepId, revision: stepRevision });
+    if (state !== 'completed' && state !== 'skipped') completed = false;
+    if (state === 'conflicted' || state === 'conflicting' || state === 'rejected' || state === 'unknown') conflicting = true;
+  }
+  var manifestState = conflicting ? 'conflicting' : completed ? 'completed' : 'pending';
+  var manifestRevision = e2Digest_({ manifestId: manifestId, state: manifestState, operationId: operationId, digest: digest });
+  e2Append_(spreadsheet, '匯入清單', {
+    manifest_id: manifestId, revision: manifestRevision, status: manifestState,
+    content_digest: manifest.values.content_digest, actor: manifest.values.actor,
+    approved_at: manifest.values.approved_at,
+    source_evidence_json: manifest.values.source_evidence_json, updated_at: taipeiIsoNow_(),
+  });
+  destinations[0] = { id: manifestId, revision: manifestRevision };
+  return { destinations: destinations };
+}
+
+function e2ExecuteEvidence_(spreadsheet, operationId, digest, content) {
+  var evidence = content.evidence || content;
+  var evidenceId = String(evidence.evidenceId || evidence.evidence_id || evidence.id || '').trim();
+  var sourceReference = String(evidence.sourceReference || evidence.source_reference || '').trim();
+  var contentDigest = String(evidence.contentDigest || evidence.content_digest || '').trim();
+  if (!evidenceId || !sourceReference || !/^[0-9a-f]{64}$/i.test(contentDigest)) {
+    return { rejected: e2Rejected_(operationId, 'invalid-source-evidence') };
+  }
+  var rows = e2Rows_(spreadsheet, '來源證據');
+  for (var index = rows.length - 1; index >= 0; index -= 1) {
+    if (rows[index].values.evidence_id === evidenceId) {
+      var existingDigest = rows[index].values.content_digest;
+      if (existingDigest !== contentDigest || rows[index].values.source_reference !== sourceReference) {
+        return { conflict: e2Conflict_(operationId, 'evidence-id-reused-with-different-content', [{
+          id: evidenceId, expected: contentDigest, actual: existingDigest,
+        }]) };
+      }
+      return { destinations: [{ id: evidenceId, revision: rows[index].values.revision || existingDigest }] };
+    }
+  }
+  var revision = e2Digest_({ evidenceId: evidenceId, sourceReference: sourceReference, contentDigest: contentDigest, fields: evidence.fields || {} });
+  e2Append_(spreadsheet, '來源證據', {
+    evidence_id: evidenceId, source_reference: sourceReference, content_digest: contentDigest,
+    effective_date: String(evidence.effectiveDate || evidence.effective_date || ''),
+    uploaded_at: String(evidence.uploadedAt || evidence.uploaded_at || taipeiIsoNow_()),
+    fields_json: e2Json_(evidence.fields || evidence.originalFields || {}), revision: revision,
+  });
+  return { destinations: [{ id: evidenceId, revision: revision }] };
+}
+
+function e2ExecuteLink_(spreadsheet, operationId, digest, content) {
+  var link = content.link || content;
+  var linkId = String(link.linkId || link.link_id || link.id || '').trim();
+  var sourceId = String(link.sourceId || link.source_id || '').trim();
+  var destinationId = String(link.destinationId || link.destination_id || '').trim();
+  if (!linkId || !sourceId || !destinationId) return { rejected: e2Rejected_(operationId, 'invalid-link') };
+  var rows = e2Rows_(spreadsheet, '跨簿連結');
+  for (var index = rows.length - 1; index >= 0; index -= 1) {
+    var values = rows[index].values;
+    if (values.link_id !== linkId) continue;
+    if (values.content_digest !== digest) {
+      return { conflict: e2Conflict_(operationId, 'link-id-reused-with-different-content', [{
+        id: linkId, expected: digest, actual: values.content_digest,
+      }]) };
+    }
+    return { destinations: [{ id: linkId, revision: values.content_digest }] };
+  }
+  var revision = e2Digest_({ linkId: linkId, sourceId: sourceId, destinationId: destinationId, digest: digest });
+  e2Append_(spreadsheet, '跨簿連結', {
+    link_id: linkId, source_id: sourceId, destination_id: destinationId,
+    destination_revision: String(link.destinationRevision || link.destination_revision || ''),
+    source_revision: String(link.sourceRevision || link.source_revision || ''),
+    content_digest: digest, status: String(link.status || 'active'),
+    origin: String(link.origin || operationId), created_at: taipeiIsoNow_(),
+  });
+  return { destinations: [{ id: linkId, revision: revision }] };
+}
+
+function e2ExecuteCheckpoint_(spreadsheet, operationId, digest, content) {
+  var checkpoint = content.checkpoint || content;
+  var checkpointId = String(checkpoint.checkpointId || checkpoint.checkpoint_id || checkpoint.id || operationId).trim();
+  var cutoff = String(checkpoint.cutoff || checkpoint.effectiveDate || checkpoint.effective_date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(cutoff) || !snapshotFinancialDateIsValid_(cutoff)) {
+    return { rejected: e2Rejected_(operationId, 'invalid-checkpoint-cutoff') };
+  }
+  var evidenceIds = checkpoint.evidenceIds || checkpoint.evidence_ids || [];
+  if (!Array.isArray(evidenceIds)) return { rejected: e2Rejected_(operationId, 'invalid-checkpoint-evidence') };
+  var rows = e2Rows_(spreadsheet, '對帳檢查點');
+  for (var index = rows.length - 1; index >= 0; index -= 1) {
+    if (rows[index].values.checkpoint_id === checkpointId) {
+      var expectedRevision = e2Digest_({ checkpointId: checkpointId, cutoff: cutoff, digest: digest });
+      if (rows[index].values.revision !== expectedRevision) {
+        return { conflict: e2Conflict_(operationId, 'checkpoint-id-reused-with-different-content', [{
+          id: checkpointId, expected: expectedRevision, actual: rows[index].values.revision,
+        }]) };
+      }
+      return { destinations: [{ id: checkpointId, revision: rows[index].values.revision }] };
+    }
+  }
+  var revision = e2Digest_({ checkpointId: checkpointId, cutoff: cutoff, digest: digest });
+  e2Append_(spreadsheet, '對帳檢查點', {
+    checkpoint_id: checkpointId, cutoff: cutoff,
+    scope_version: String(checkpoint.scopeVersion || checkpoint.scope_version || ''),
+    represented_balances_json: e2Json_(checkpoint.representedBalances || checkpoint.represented_balances || {}),
+    accepted_balances_json: e2Json_(checkpoint.acceptedBalances || checkpoint.accepted_balances || {}),
+    adjustment_json: e2Json_(checkpoint.adjustment || null), evidence_ids_json: e2Json_(evidenceIds),
+    coverage_json: e2Json_(checkpoint.coverage || {
+      kind: 'cutover-only', preCutoverCoverage: false, throughFinancialDate: cutoff,
+    }),
+    status: String(checkpoint.status || 'accepted'), revision: revision, created_at: taipeiIsoNow_(),
+  });
+  return { destinations: [{ id: checkpointId, revision: revision }] };
+}
+
+function e2ExecuteSetting_(spreadsheet, operationId, digest, content) {
+  var setting = content.setting || content;
+  var settingId = String(setting.settingId || setting.setting_id || setting.id || operationId).trim();
+  var key = String(setting.key || setting.settingKey || setting.setting_key || '').trim();
+  if (!settingId || !key) return { rejected: e2Rejected_(operationId, 'invalid-setting') };
+  var revision = e2Digest_({ settingId: settingId, key: key, value: setting.value, effectiveDate: setting.effectiveDate || setting.effective_date, digest: digest });
+  e2Append_(spreadsheet, '設定版本', {
+    setting_id: settingId, setting_key: key, value_json: e2Json_(setting.value),
+    effective_date: String(setting.effectiveDate || setting.effective_date || ''),
+    revision: revision, updated_at: taipeiIsoNow_(),
+  });
+  return { destinations: [{ id: settingId, revision: revision }] };
+}
+
+function e2ExecuteResult_(spreadsheet, operationId, digest, content) {
+  var result = content.result || content;
+  var resultId = String(result.resultId || result.result_id || result.id || operationId).trim();
+  if (!resultId) return { rejected: e2Rejected_(operationId, 'invalid-result') };
+  var revision = e2Digest_({ resultId: resultId, digest: digest, value: result.value });
+  e2Append_(spreadsheet, '結果版本', {
+    result_id: resultId, interval_json: e2Json_(result.interval || {}),
+    dependency_revisions_json: e2Json_(result.dependencies || result.dependencyRevisions || []),
+    state: String(result.state || 'accepted'), value_json: e2Json_(result.value),
+    created_at: taipeiIsoNow_(), revision: revision,
+  });
+  return { destinations: [{ id: resultId, revision: revision }] };
+}
+
+function e2ExecuteOpeningAdjustment_(spreadsheet, operationId, digest, content) {
+  var adjustment = content.adjustment || content;
+  var account = String(adjustment.account || '').trim();
+  var currency = String(adjustment.currency || '').trim();
+  var date = String(adjustment.date || adjustment.cutoff || '').trim();
+  var acceptedText;
+  var representedText;
+  try {
+    var acceptedInput = hasField_(adjustment, 'acceptedBalance') ? adjustment.acceptedBalance : adjustment.accepted_balance;
+    var representedInput = hasField_(adjustment, 'representedBalance') ? adjustment.representedBalance : adjustment.represented_balance;
+    acceptedText = canonicalDecimal_(acceptedInput, 0);
+    representedText = canonicalDecimal_(representedInput, 0);
+  } catch (error) {
+    return { rejected: e2Rejected_(operationId, 'invalid-opening-balance') };
+  }
+  if (!account || !/^[A-Z]{3}$/.test(currency) || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !snapshotFinancialDateIsValid_(date)) {
+    return { rejected: e2Rejected_(operationId, 'invalid-opening-adjustment') };
+  }
+  var difference = addDecimalStrings_(acceptedText, negateDecimal_(representedText));
+  var vocabulary = readAccountVocabulary_(spreadsheet);
+  try { validateOptionalVocabulary_(account, 'account', vocabulary, null); } catch (error) {
+    return { rejected: e2Rejected_(operationId, 'invalid-opening-account') };
+  }
+  var postingAccountType = vocabulary.accountTypes[account];
+  if (postingAccountType !== '資產' && postingAccountType !== '負債') {
+    return { rejected: e2Rejected_(operationId, 'opening-account-must-be-asset-or-liability') };
+  }
+  var checkpointId = String(adjustment.checkpointId || adjustment.checkpoint_id || operationId).trim();
+  var evidenceIds = adjustment.evidenceIds || adjustment.evidence_ids || [];
+  if (!Array.isArray(evidenceIds) || evidenceIds.length === 0) {
+    return { rejected: e2Rejected_(operationId, 'opening-adjustment-evidence-required') };
+  }
+  var source = readSnapshotSource_(spreadsheet);
+  var accounts = snapshotAccountRecords_(source, snapshotRevision_(source));
+  var accountRecord = null;
+  for (var accountIndex = 0; accountIndex < accounts.length; accountIndex += 1) {
+    if (accounts[accountIndex].name === account || accounts[accountIndex].id === account) {
+      accountRecord = accounts[accountIndex];
+      break;
+    }
+  }
+  var representedCurrent = '0';
+  if (accountRecord) {
+    for (var balanceIndex = 0; balanceIndex < accountRecord.balances.length; balanceIndex += 1) {
+      if (accountRecord.balances[balanceIndex].currency === currency) {
+        representedCurrent = accountRecord.balances[balanceIndex].amount;
+        break;
+      }
+    }
+  }
+  if (representedCurrent !== representedText) {
+    return { conflict: e2Conflict_(operationId, 'represented-balance-changed', [{
+      id: account, expected: representedText, actual: representedCurrent,
+    }]) };
+  }
+  var evidenceRows = e2Rows_(spreadsheet, '來源證據');
+  for (var evidenceIndex = 0; evidenceIndex < evidenceIds.length; evidenceIndex += 1) {
+    var evidenceId = String(evidenceIds[evidenceIndex] || '').trim();
+    var evidenceFound = null;
+    for (var evidenceRowIndex = evidenceRows.length - 1; evidenceRowIndex >= 0; evidenceRowIndex -= 1) {
+      if (evidenceRows[evidenceRowIndex].values.evidence_id === evidenceId) {
+        evidenceFound = evidenceRows[evidenceRowIndex].values;
+        break;
+      }
+    }
+    if (!evidenceFound) return { rejected: e2Rejected_(operationId, 'opening-evidence-not-found', evidenceId) };
+    if (evidenceFound.effective_date && evidenceFound.effective_date !== date) {
+      return { rejected: e2Rejected_(operationId, 'opening-evidence-cutoff-mismatch', evidenceId) };
+    }
+  }
+  var checkpointRevision = e2Digest_({ checkpointId: checkpointId, cutoff: date, accepted: acceptedText, represented: representedText, digest: digest });
+  var checkpoint = {
+    checkpointId: checkpointId, cutoff: date,
+    scopeVersion: String(adjustment.scopeVersion || adjustment.scope_version || ''),
+    representedBalances: adjustment.representedBalances || { [currency]: representedText },
+    acceptedBalances: adjustment.acceptedBalances || { [currency]: acceptedText },
+    adjustment: { amount: difference, currency: currency, account: account },
+    evidenceIds: evidenceIds,
+    coverage: { kind: 'cutover-only', preCutoverCoverage: false, throughFinancialDate: date },
+    status: 'pending',
+  };
+  e2Append_(spreadsheet, '對帳檢查點', {
+    checkpoint_id: checkpointId, cutoff: date, scope_version: checkpoint.scopeVersion,
+    represented_balances_json: e2Json_(checkpoint.representedBalances),
+    accepted_balances_json: e2Json_(checkpoint.acceptedBalances),
+    adjustment_json: e2Json_(checkpoint.adjustment), evidence_ids_json: e2Json_(evidenceIds),
+    coverage_json: e2Json_(checkpoint.coverage), status: 'pending',
+    revision: checkpointRevision, created_at: taipeiIsoNow_(),
+  });
+  var destinations = [{ id: checkpointId, revision: checkpointRevision }];
+  if (difference !== '0') {
+    var debitAccount;
+    var creditAccount;
+    var amount = difference.charAt(0) === '-' ? negateDecimal_(difference) : difference;
+    if (postingAccountType === '資產') {
+      debitAccount = difference.charAt(0) === '-' ? '期初餘額' : account;
+      creditAccount = difference.charAt(0) === '-' ? account : '期初餘額';
+    } else if (postingAccountType === '負債') {
+      debitAccount = difference.charAt(0) === '-' ? account : '期初餘額';
+      creditAccount = difference.charAt(0) === '-' ? '期初餘額' : account;
+    }
+    var txnId = String(adjustment.txnId || adjustment.txn_id || Utilities.getUuid()).trim();
+    if (!txnId) return { rejected: e2Rejected_(operationId, 'opening-txn-id-required') };
+    var journal = requiredSheet_(spreadsheet, '日記帳');
+    var columns = resolveHeaders_(journal.getRange(1, 1, 1, journal.getLastColumn()).getDisplayValues()[0], JOURNAL_HEADERS);
+    var posting = postingRow_({
+      date: date, time: '', type: '轉帳', debitAccount: debitAccount, creditAccount: creditAccount,
+      amount: amount, currency: currency, category: '', payee: '',
+      description: String(adjustment.description || '期初調整-' + checkpointId),
+      settlementStatus: '', reversalTxnId: '', txnId: txnId, source: '移轉', now: taipeiIsoNow_(),
+    });
+    validatePostingVocabulary_(posting, vocabulary);
+    appendPosting_(journal, columns, posting);
+    destinations.push({ id: txnId, revision: e2Digest_({ txnId: txnId, posting: posting }) });
+  }
+  var checkpointRows = e2Rows_(spreadsheet, '對帳檢查點');
+  var checkpointRow = checkpointRows[checkpointRows.length - 1];
+  e2Set_(spreadsheet, '對帳檢查點', checkpointRow.sheetRow, {
+    checkpoint_id: checkpointId, cutoff: date, scope_version: checkpoint.scopeVersion,
+    represented_balances_json: e2Json_(checkpoint.representedBalances),
+    accepted_balances_json: e2Json_(checkpoint.acceptedBalances), adjustment_json: e2Json_(checkpoint.adjustment),
+    evidence_ids_json: e2Json_(evidenceIds), coverage_json: e2Json_(checkpoint.coverage), status: 'accepted',
+    revision: checkpointRevision, created_at: checkpointRow.values.created_at,
+  });
+  return { destinations: destinations };
+}
+
+function e2ExecuteCorrection_(spreadsheet, operationId, digest, content) {
+  var correction = content.correction || content;
+  var originalId = String(correction.originalId || correction.original_id || correction.txnId || correction.txn_id || '').trim();
+  if (!originalId) return { rejected: e2Rejected_(operationId, 'original-txn-id-required') };
+  var source = readSnapshotSource_(spreadsheet);
+  var original = null;
+  for (var index = 0; index < source.journalRows.length; index += 1) {
+    var row = source.journalRows[index];
+    if (String(row.values.txn_id || '').trim() === originalId) { original = row; break; }
+  }
+  if (!original) return { rejected: e2Rejected_(operationId, 'unknown-original-txn-id') };
+  var vocabulary = readAccountVocabulary_(spreadsheet);
+  var journal = requiredSheet_(spreadsheet, '日記帳');
+  var columns = resolveHeaders_(journal.getRange(1, 1, 1, journal.getLastColumn()).getDisplayValues()[0], JOURNAL_HEADERS);
+  var reversalId = String(correction.reversalTxnId || correction.reversal_txn_id || Utilities.getUuid()).trim();
+  var replacementId = String(correction.replacementTxnId || correction.replacement_txn_id || Utilities.getUuid()).trim();
+  var date = String(correction.date || taipeiIsoNow_().slice(0, 10)).trim();
+  var replacement = correction.replacement || correction.newPosting;
+  var replacementPosting = null;
+  if (replacement && typeof replacement === 'object') {
+    var replacementAmount;
+    try { replacementAmount = canonicalDecimal_(replacement.amount, 0); } catch (error) {
+      return { rejected: e2Rejected_(operationId, 'replacement-posting-invalid') };
+    }
+    var replacementDebit = String(replacement.debitAccount || replacement.debit_account || '').trim();
+    var replacementCredit = String(replacement.creditAccount || replacement.credit_account || '').trim();
+    if (!replacementDebit || !replacementCredit || replacementDebit === replacementCredit) {
+      return { rejected: e2Rejected_(operationId, 'replacement-posting-invalid') };
+    }
+    replacementPosting = postingRow_({
+      date: String(replacement.date || date), time: replacement.time || '', type: replacement.type || original.values['類型'],
+      debitAccount: replacementDebit, creditAccount: replacementCredit, amount: replacementAmount,
+      currency: String(replacement.currency || original.values['幣別']),
+      category: replacement.category || nominalLeg_(replacementDebit, replacementCredit, vocabulary.accountTypes),
+      payee: replacement.payee || replacement.counterparty || original.values['交易對象'],
+      description: replacement.description || '更正後-' + originalId, settlementStatus: replacement.settlementStatus || '',
+      reversalTxnId: '', txnId: replacementId, source: 'integration', now: taipeiIsoNow_(),
+    });
+    try { validatePostingVocabulary_(replacementPosting, vocabulary); } catch (error) {
+      return { rejected: e2Rejected_(operationId, 'replacement-posting-invalid', String(error.message || error)) };
+    }
+  }
+  var originalAmount = canonicalDecimal_(original.rawAmount, original.sheetRow);
+  var reversal = postingRow_({
+    date: date, time: '', type: '沖銷', debitAccount: original.values['貸方帳戶'], creditAccount: original.values['借方帳戶'],
+    amount: originalAmount, currency: original.values['幣別'], category: '', payee: original.values['交易對象'],
+    description: String(correction.description || '更正-' + originalId), settlementStatus: '',
+    reversalTxnId: originalId, txnId: reversalId, source: 'integration', now: taipeiIsoNow_(),
+  });
+  validatePostingVocabulary_(reversal, vocabulary);
+  appendPosting_(journal, columns, reversal);
+  var destinations = [{ id: reversalId, revision: e2Digest_({ txnId: reversalId, posting: reversal }) }];
+  if (replacementPosting) {
+    appendPosting_(journal, columns, replacementPosting);
+    destinations.push({ id: replacementId, revision: e2Digest_({ txnId: replacementId, posting: replacementPosting }) });
+  }
+  e2Append_(spreadsheet, '整合記錄', {
+    scope: 'corrections', record_id: originalId + ':' + operationId,
+    revision: digest, data_json: e2Json_({ originalId: originalId, reversalId: reversalId, replacementId: replacementId }),
+    created_at: taipeiIsoNow_(),
+  });
+  return { destinations: destinations };
 }

@@ -529,4 +529,31 @@ describe('handleAction', () => {
     expect(response.status).toBe(203)
     expect(await response.text()).toBe(upstreamBody)
   })
+
+  it('exposes reviewed E2 actions through the signed Pages route', async () => {
+    const fetchFn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const envelope = JSON.parse(String(init?.body)) as { nonce: string; payload: string }
+      expect(envelope.nonce).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      )
+      expect(decodePayload(envelope.payload)).toEqual({
+        contractVersion: CONTRACT_VERSION,
+        action: 'create_event_group',
+        operationId: 'group-route-1',
+        group: { groupId: 'group-route-1', legs: [] },
+      })
+      return new Response('{"kind":"rejected","reason":"group-legs-required"}', { status: 200 })
+    }) as unknown as typeof fetch
+
+    const response = await handleAction(
+      'create_event_group',
+      req({ operationId: 'group-route-1', group: { groupId: 'group-route-1', legs: [] } }),
+      env,
+      deps(fetchFn),
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ kind: 'rejected', reason: 'group-legs-required' })
+  })
 })
