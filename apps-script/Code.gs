@@ -774,7 +774,7 @@ function adoptIdentity_(payload) {
         'repair target already has a stable identity',
       );
     }
-    if (identityExists_(source, stableId)) {
+    if (identityLookupExists_(source, target, stableId)) {
       return identityConflict_(
         operationId,
         'duplicate-stable-id',
@@ -897,6 +897,24 @@ function identityExists_(source, stableId) {
         return true;
       }
     }
+  }
+  return false;
+}
+
+function identityLookupExists_(source, target, stableId) {
+  if (identityExists_(source, stableId)) {
+    return true;
+  }
+  for (var index = 0; index < source.vocabularyRows.length; index += 1) {
+    var row = source.vocabularyRows[index];
+    if (row.stableId || (row.type !== '資產' && row.type !== '負債') ||
+        'account:' + row.name !== stableId) {
+      continue;
+    }
+    if (target.scope === 'accounts' && row.sheetRow === target.sheetRow) {
+      continue;
+    }
+    return true;
   }
   return false;
 }
@@ -1346,7 +1364,7 @@ function snapshotCellHasData_(value) {
 
 function snapshotRevision_(source) {
   var revisionInput = {
-    vocabulary: source.vocabularyRows,
+    vocabulary: source.accountIdentityRows || source.vocabularyRows,
     journal: source.journalRows.map(function (row) {
       return { sheetRow: row.sheetRow, cells: row.cells };
     }),
@@ -1835,6 +1853,8 @@ function readJournalRecords_(journal, journalColumns) {
       var header = JOURNAL_HEADERS[headerIndex];
       values[header] = displayRows[rowIndex][journalColumns[header] - 1];
     }
+    values.txn_id = normalizeTxnId_(values.txn_id);
+    values['沖銷txn_id'] = normalizeTxnId_(values['沖銷txn_id']);
     records.push({
       sheetRow: rowIndex + 2,
       values: values,
@@ -1890,8 +1910,12 @@ function receivableDirection_(row) {
 }
 
 function findRecordByTxnId_(records, txnId) {
+  var normalizedTxnId = normalizeTxnId_(txnId);
+  if (!normalizedTxnId) {
+    return null;
+  }
   for (var index = 0; index < records.length; index += 1) {
-    if (records[index].values.txn_id === txnId) {
+    if (normalizeTxnId_(records[index].values.txn_id) === normalizedTxnId) {
       return records[index];
     }
   }
@@ -2468,7 +2492,8 @@ function settle_(payload, nonce) {
     }
 
     var records = readJournalRecords_(journal, journalColumns);
-    var original = findRecordByTxnId_(records, String(payload.txn_id));
+    var targetTxnId = requiredTxnId_(payload);
+    var original = findRecordByTxnId_(records, targetTxnId);
     if (original === null) {
       throw new Error('unknown txn_id: ' + payload.txn_id);
     }
@@ -2578,7 +2603,7 @@ function reverseTransaction_(payload, nonce) {
       .getDisplayValues()[0];
     var journalColumns = resolveHeaders_(headerRow, JOURNAL_HEADERS);
     var records = readJournalRecords_(journal, journalColumns);
-    var targetTxnId = String(payload.txn_id);
+    var targetTxnId = requiredTxnId_(payload);
     var index;
     var ownRecord = findRecordByTxnId_(records, idempotencyKey);
     if (ownRecord !== null) {
@@ -3933,6 +3958,19 @@ function requireField_(object, field) {
   if (!hasField_(object, field) || object[field] === '' || object[field] === null || object[field] === undefined) {
     throw new Error(field + ' is required');
   }
+}
+
+function requiredTxnId_(payload) {
+  requireField_(payload, 'txn_id');
+  var txnId = normalizeTxnId_(payload.txn_id);
+  if (!txnId) {
+    throw new Error('txn_id is required');
+  }
+  return txnId;
+}
+
+function normalizeTxnId_(value) {
+  return String(value === null || value === undefined ? '' : value).trim();
 }
 
 function rejectField_(object, field) {

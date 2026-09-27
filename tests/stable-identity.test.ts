@@ -106,6 +106,47 @@ describe('stable identity', () => {
     expect(journal.getRange(2, 1, 1, journal.getLastColumn()).getValues()[0]!).toEqual(before)
   })
 
+  it('refuses a whitespace-only legacy txn_id as a settlement target without writing', async () => {
+    harness.setupSpreadsheet()
+    const journal = requiredSheet(harness, '日記帳')
+    journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
+      '2026-07-27', '12:34', '收入', '應收帳款', '薪資收入', '100', 'TWD', '',
+      '阿明', 'legacy whitespace id', '未結', '', '   ', 'test-fixture', '2026-07-27T12:34:00+08:00',
+    ]])
+    const before = journal.getRange(2, 1, 1, journal.getLastColumn()).getValues()[0]!
+
+    const refused = await post(harness, {
+      action: 'settle',
+      idempotencyKey: 'identity-whitespace-settle',
+      txn_id: '   ',
+      account: '銀行',
+      date: '2026-07-27',
+    }, 'identity-whitespace-settle')
+    expect(refused).toEqual({ ok: false, error: 'txn_id is required' })
+    expect(journal.getLastRow()).toBe(2)
+    expect(journal.getRange(2, 1, 1, journal.getLastColumn()).getValues()[0]!).toEqual(before)
+  })
+
+  it('refuses a whitespace-only legacy txn_id as a reversal target without writing', async () => {
+    harness.setupSpreadsheet()
+    const journal = requiredSheet(harness, '日記帳')
+    journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
+      '2026-07-27', '12:34', '支出', '餐飲', '現金', '100', 'TWD', '餐飲',
+      '阿明', 'legacy whitespace id', '', '', '   ', 'test-fixture', '2026-07-27T12:34:00+08:00',
+    ]])
+    const before = journal.getRange(2, 1, 1, journal.getLastColumn()).getValues()[0]!
+
+    const refused = await post(harness, {
+      action: 'reverse_transaction',
+      idempotencyKey: 'identity-whitespace-reversal',
+      txn_id: '   ',
+      date: '2026-07-27',
+    }, 'identity-whitespace-reversal')
+    expect(refused).toEqual({ ok: false, error: 'txn_id is required' })
+    expect(journal.getLastRow()).toBe(2)
+    expect(journal.getRange(2, 1, 1, journal.getLastColumn()).getValues()[0]!).toEqual(before)
+  })
+
   it('requires event adoption to write a UUID stable identity', async () => {
     harness.setupSpreadsheet()
     const journal = requiredSheet(harness, '日記帳')
@@ -366,6 +407,37 @@ describe('stable identity', () => {
     expect((lookup.records as Array<Record<string, unknown>>).some(record => record.id === 'account:現金')).toBe(false)
   })
 
+  it('pins unscoped lookup revisions to disabled account identity and alias metadata', async () => {
+    harness.setupSpreadsheet()
+    const accounts = requiredSheet(harness, '會計科目')
+    const values = accounts.getRange(1, 1, accounts.getLastRow(), accounts.getLastColumn()).getValues()
+    const headers = values[0]!.map(String)
+    const stableIdColumn = headers.indexOf('stable_id')
+    const aliasesColumn = headers.indexOf('aliases')
+    const enabledColumn = headers.indexOf('啟用')
+    const disabledRow = values.findIndex(row => row[0] === '悠遊卡') + 1
+    const stableId = String(values[disabledRow - 1]![stableIdColumn])
+    const lookupId = String(values.find(row => row[0] === '現金')![stableIdColumn])
+    accounts.getRange(disabledRow, enabledColumn + 1).setValues([[false]])
+
+    const before = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-disabled-revision-before')
+    expect((before.records as Array<Record<string, unknown>>).some(record => record.stableId === stableId)).toBe(false)
+    accounts.getRange(disabledRow, stableIdColumn + 1).setValues([['account:disabled-revised']])
+    accounts.getRange(disabledRow, aliasesColumn + 1).setValues([['["舊悠遊卡"]']])
+
+    const lookup = await post(harness, {
+      action: 'lookup',
+      ids: [lookupId],
+      snapshotRevision: String(before.snapshotRevision),
+    }, 'identity-disabled-revision-after')
+    expect(lookup).toMatchObject({
+      kind: 'revision-changed',
+      expected: before.snapshotRevision,
+      actual: expect.stringMatching(/^[0-9a-f]{64}$/),
+    })
+    expect(lookup.actual).not.toBe(before.snapshotRevision)
+  })
+
   it('adopts a reviewed account identity without changing its source row', async () => {
     harness.setupSpreadsheet()
     const accounts = requiredSheet(harness, '會計科目')
@@ -401,6 +473,37 @@ describe('stable identity', () => {
     const after = accounts.getRange(accountRow, 1, 1, accounts.getLastColumn()).getValues()[0]!
     expect(after).toEqual(before.map((value, index) =>
       index === stableIdColumn ? 'account:cash-001' : value))
+  })
+
+  it('rejects adoption that collides with another blank account legacy identity', async () => {
+    harness.setupSpreadsheet()
+    const accounts = requiredSheet(harness, '會計科目')
+    const values = accounts.getRange(1, 1, accounts.getLastRow(), accounts.getLastColumn()).getValues()
+    const headers = values[0]!.map(String)
+    const stableIdColumn = headers.indexOf('stable_id')
+    const cashRow = values.findIndex(row => row[0] === '現金') + 1
+    const bankRow = values.findIndex(row => row[0] === '銀行') + 1
+    accounts.getRange(cashRow, stableIdColumn + 1).setValues([['']])
+    accounts.getRange(bankRow, stableIdColumn + 1).setValues([['']])
+
+    const snapshot = await post(harness, { action: 'snapshot', scope: 'accounts' }, 'identity-legacy-collision-snapshot')
+    const reference = (snapshot.records as Array<Record<string, unknown>>)
+      .find(record => record.name === '銀行')!.repairReference
+    const before = accounts.getRange(bankRow, 1, 1, accounts.getLastColumn()).getValues()[0]!
+
+    const refused = await post(harness, {
+      action: 'adopt_identity',
+      operationId: 'identity-legacy-collision-adoption',
+      expectedSnapshotRevision: String(snapshot.snapshotRevision),
+      repairReference: reference,
+      stableId: 'account:現金',
+    }, 'identity-legacy-collision-adoption')
+    expect(refused).toMatchObject({
+      ok: false,
+      kind: 'conflict',
+      reason: 'duplicate-stable-id',
+    })
+    expect(accounts.getRange(bankRow, 1, 1, accounts.getLastColumn()).getValues()[0]!).toEqual(before)
   })
 
   it('leaves legacy blank account and observation identities for explicit repair', async () => {

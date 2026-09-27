@@ -62,9 +62,10 @@ _Avoid_: delete, undo, edit, 調整 (that word means the drift-reconciliation ca
 
 **Stable identity repair**:
 An explicit, reviewed adoption of an identity for a legacy row that has none.
-Under the locked repair path, adoption may fill only a blank txn_id identity
-cell; financial and source cells remain immutable, and corrections remain
-reversal-only.
+Under the locked repair path, adoption may fill only the target row's blank
+identity metadata cell (`stable_id`, `txn_id`, or `observation_id`, as
+applicable); financial and source cells remain immutable, and corrections
+remain reversal-only.
 
 **Account alias**:
 A strict, deliberate historical name for one 會計科目 row. An alias preserves
