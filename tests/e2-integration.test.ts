@@ -608,6 +608,25 @@ describe('E2 reviewed Personal operations', () => {
       .toEqual([expect.objectContaining({ id: 'receipt-operation', data: progress })])
   })
 
+  it('includes durable E2 links in pinned lookup results', async () => {
+    await post(harness, { action: 'enable_e2' }, 'link-lookup-enable')
+    const linked = await post(harness, {
+      action: 'record_link', operationId: 'link-operation',
+      link: {
+        linkId: 'link-lookup-1', sourceId: 'event-source-1', destinationId: 'partner-event-1',
+        destinationRevision: 'partner-revision-1', sourceRevision: 'personal-revision-1',
+        status: 'active', origin: 'synthetic-test',
+      },
+    }, 'link-lookup-record')
+    expect(linked).toMatchObject({ kind: 'committed' })
+
+    const links = await post(harness, { action: 'snapshot', scope: 'links' }, 'link-lookup-snapshot')
+    const lookup = await post(harness, {
+      action: 'lookup', ids: ['link-lookup-1'], snapshotRevision: links.snapshotRevision,
+    }, 'link-lookup-read')
+    expect(lookup).toMatchObject({ kind: 'ok', records: [expect.objectContaining({ linkId: 'link-lookup-1' })] })
+  })
+
   it('uses canonical content for operation conflicts even when the transport digest is forged', async () => {
     const first = await post(harness, {
       action: 'command', operationId: 'canonical-content-op', expectedRevisions: [],
