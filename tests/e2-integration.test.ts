@@ -405,7 +405,7 @@ describe('E2 reviewed Personal operations', () => {
 
     const retry = await post(harness, payload, 'manifest-receipt-retry-second-transport')
     expect(retry).toMatchObject({ kind: 'committed', operationId: 'manifest-receipt-retry' })
-    const steps = (await post(harness, { action: 'snapshot', scope: 'steps' }, 'manifest-receipt-retry-steps')).records
+    const steps = (await post(harness, { action: 'snapshot', scope: 'steps' }, 'manifest-receipt-retry-steps')).records as Array<{ manifestId: string; stepId: string }>
     expect(steps).toEqual(expect.arrayContaining([
       expect.objectContaining({ manifestId: 'manifest-receipt-retry', stepId: 'first', state: 'completed' }),
       expect.objectContaining({ manifestId: 'manifest-receipt-retry', stepId: 'second', state: 'skipped' }),
