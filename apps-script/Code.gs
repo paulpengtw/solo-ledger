@@ -5867,7 +5867,11 @@ function e2ExecuteManifest_(spreadsheet, operationId, digest, content, reserveCl
         seenStepRevisionIds[stepExpectedId] = true;
         normalizedStepExpectedRevisions.push({ id: stepExpectedId, revision: stepExpectedValue });
       }
-      var stepRevisionConflicts = e2CheckExpectedRevisions_(spreadsheet, normalizedStepExpectedRevisions);
+      // An unknown retry must be allowed to observe the revisions written by
+      // this same operation while it reconstructs missing receipt steps.
+      var stepRevisionConflicts = recoveringUnknown
+        ? []
+        : e2CheckExpectedRevisions_(spreadsheet, normalizedStepExpectedRevisions);
       if (stepRevisionConflicts.length > 0) {
         return { conflict: e2Conflict_(operationId, 'stale-expected-revision', stepRevisionConflicts) };
       }
