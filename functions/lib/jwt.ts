@@ -1,6 +1,6 @@
 import { jwtVerify, createRemoteJWKSet, type JWTVerifyGetKey } from 'jose'
 
-export type JwtResult = { ok: true; exp: number } | { ok: false }
+export type JwtResult = { ok: true; exp: number; actor: string } | { ok: false }
 
 const jwksCache = new Map<string, JWTVerifyGetKey>()
 
@@ -32,7 +32,13 @@ export async function verifyAccessJwt(
     const { payload } = await jwtVerify(token, jwks, { audience: aud, ...(currentDate ? { currentDate } : {}) })
     if (typeof payload.exp !== 'number' || payload.sub === '' ||
         typeof payload.common_name === 'string') return { ok: false }
-    return { ok: true, exp: payload.exp }
+    const subject = typeof payload.sub === 'string' ? payload.sub.trim() : ''
+    const email = typeof payload.email === 'string' ? payload.email.trim() : ''
+    // Existing local/fixture Access tokens omit identity claims.  Keep their
+    // deterministic fallback while deriving real writes from verified claims
+    // whenever Access provides them.
+    const actor = subject || email || `access-exp:${payload.exp}`
+    return { ok: true, exp: payload.exp, actor }
   } catch {
     return { ok: false }
   }

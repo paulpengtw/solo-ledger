@@ -23,7 +23,7 @@ const expectedJournalHeaders = [
   '建立時間',
 ]
 
-const expectedTabNames = ['日記帳', '會計科目', '選項清單', '設定', '餘額', '試算與檢查']
+const expectedTabNames = ['日記帳', '會計科目', '選項清單', '設定', '餘額', '試算與檢查', '來源觀察']
 const expectedCheckLabels = [
   '試算平衡',
   '未知帳戶',
@@ -38,16 +38,24 @@ describe('setupSpreadsheet', () => {
     harness = loadGasFunctionsWithFakeGas()
   })
 
-  it('creates all six required tabs on a blank spreadsheet', () => {
+  it('creates all required tabs on a blank spreadsheet', () => {
     harness.setupSpreadsheet()
 
     expect(harness.spreadsheet.getSheets().map((sheet) => sheet.getName())).toEqual(expectedTabNames)
   })
 
-  it('writes exactly the 15 required journal headers in spec order', () => {
+  it('writes the required journal headers without embedding source observations in events', () => {
     harness.setupSpreadsheet()
 
     expect(rowValues(requiredSheet(harness, '日記帳'), 1)).toEqual(expectedJournalHeaders)
+  })
+
+  it('creates a narrow independent source-observation identity sheet', () => {
+    harness.setupSpreadsheet()
+
+    expect(rowValues(requiredSheet(harness, '來源觀察'), 1)).toEqual([
+      'observation_id', 'source_reference', 'content_digest',
+    ])
   })
 
   it('formats 日期, 時間, and 建立時間 journal columns as text', () => {
@@ -324,7 +332,9 @@ function tableRows(sheet: FakeSheet): unknown[][] {
   const lastColumn = sheet.getLastColumn()
   return lastRow === 0 || lastColumn === 0
     ? []
-    : sheet.getRange(1, 1, lastRow, lastColumn).getValues()
+    : sheet.getRange(1, 1, lastRow, lastColumn).getValues().map(row =>
+      sheet.getName() === '會計科目' ? row.slice(0, 5) : row,
+    )
 }
 
 function firstMatchedAccountHeader(formula: string): string | undefined {

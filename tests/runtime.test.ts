@@ -34,6 +34,9 @@ describe('integration runtime', () => {
       readAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+08:00$/),
     })
     expect(harness.events).toEqual([])
+    harness.setupSpreadsheet()
+    expect((await post(harness, { action: 'integrationState' }, 'state-after-setup')).capabilities)
+      .toEqual(['complete-revisioned-reads', 'stable-identity'])
     expect(await post(harness, { action: 'health', contractVersion: CONTRACT_VERSION }, 'health-closed'))
       .toEqual({ ok: false, error: '系統更新中' })
     harness.setScriptProperty('INTEGRATION_OPEN', 'true')

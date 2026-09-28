@@ -38,7 +38,7 @@ describe('Personal read snapshots', () => {
         appVersion: expect.stringMatching(/^[0-9a-f]{40}$/),
       },
       maintenance: { kind: 'open' },
-      capabilities: ['complete-revisioned-reads'],
+      capabilities: ['complete-revisioned-reads', 'stable-identity'],
       readAt: '2026-07-27T08:00:00.000+08:00',
     })
   })
@@ -74,7 +74,7 @@ describe('Personal read snapshots', () => {
       '應收帳款', '應付帳款', '現金', '銀行', '信用卡',
     ])
     expect(records).toContainEqual(expect.objectContaining({
-      id: 'account:現金',
+      id: stableAccountId(harness, '現金'),
       name: '現金',
       type: '資產',
       subtype: '現金',
@@ -86,7 +86,7 @@ describe('Personal read snapshots', () => {
       ],
     }))
     expect(records).toContainEqual(expect.objectContaining({
-      id: 'account:銀行',
+      id: stableAccountId(harness, '銀行'),
       balances: [{ amount: '0', currency: 'TWD' }],
     }))
     expect(records).toContainEqual(expect.objectContaining({
@@ -144,7 +144,7 @@ describe('Personal read snapshots', () => {
       readAt: '2026-07-27T08:00:00.000+08:00',
     })
     expect(response.records).toEqual([
-      {
+      expect.objectContaining({
         id: 'event-identified',
         identity: { kind: 'identified', txnId: 'event-identified' },
         financialDate: '2026-07-20',
@@ -161,8 +161,14 @@ describe('Personal read snapshots', () => {
         source: 'test-fixture',
         createdAt: '2026-07-20T09:08:07+08:00',
         sheetRow: 2,
-      },
-      {
+        contentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        repairReference: {
+          scope: 'events',
+          sheetRow: 2,
+          contentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+      }),
+      expect.objectContaining({
         id: null,
         identity: { kind: 'unidentified', reason: 'blank-txn-id' },
         financialDate: '2026-07-21',
@@ -179,7 +185,13 @@ describe('Personal read snapshots', () => {
         source: 'test-fixture',
         createdAt: '2026-07-21T12:34:00+08:00',
         sheetRow: 4,
-      },
+        contentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        repairReference: {
+          scope: 'events',
+          sheetRow: 4,
+          contentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+      }),
     ])
 
     const accounts = await postSnapshot(harness, 'accounts', 'accounts-gap-001')
@@ -330,7 +342,7 @@ describe('Personal read snapshots', () => {
 
     const response = await postSnapshot(harness, 'accounts', 'accounts-negative-001')
     expect(response.records).toContainEqual(expect.objectContaining({
-      id: 'account:銀行',
+      id: stableAccountId(harness, '銀行'),
       balances: [{ amount: '-0.1', currency: 'TWD' }],
     }))
   })
@@ -342,7 +354,7 @@ describe('Personal read snapshots', () => {
 
     const response = await postSnapshot(harness, 'accounts', 'accounts-trimmed-001')
     expect(response.records).toContainEqual(expect.objectContaining({
-      id: 'account:現金',
+      id: stableAccountId(harness, '現金'),
       balances: [{ amount: '12.5', currency: 'TWD' }],
     }))
   })
@@ -355,7 +367,7 @@ describe('Personal read snapshots', () => {
 
     const accounts = await postSnapshot(harness, 'accounts', 'accounts-disabled-history')
     expect(accounts.records).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: 'account:現金' }),
+      expect.objectContaining({ name: '現金' }),
     ]))
     for (const record of accounts.records as Array<Record<string, unknown>>) {
       expect(record).toMatchObject({
@@ -461,7 +473,7 @@ describe('Personal read snapshots', () => {
 
     const first = await postSnapshot(harness, 'accounts', 'accounts-raw-precision-1')
     expect(first.records).toContainEqual(expect.objectContaining({
-      id: 'account:現金',
+      id: stableAccountId(harness, '現金'),
       balances: [{ amount: '1.2345', currency: 'TWD' }],
     }))
     const oldRevision = String(first.snapshotRevision)
@@ -547,6 +559,16 @@ function setAccountEnabled(harness: FakeGasHarness, accountName: string, enabled
   const row = values.findIndex(valuesRow => valuesRow[nameColumn] === accountName)
   if (row < 1) throw new Error(`missing test account: ${accountName}`)
   accounts.getRange(row + 1, enabledColumn + 1).setValues([[enabled]])
+}
+
+function stableAccountId(harness: FakeGasHarness, accountName: string): string {
+  const accounts = requiredSheet(harness, '會計科目')
+  const values = accounts.getRange(1, 1, accounts.getLastRow(), accounts.getLastColumn()).getValues()
+  const nameColumn = values[0]!.indexOf('名稱')
+  const stableIdColumn = values[0]!.indexOf('stable_id')
+  const row = values.find(valuesRow => valuesRow[nameColumn] === accountName)
+  if (!row) throw new Error(`missing test account: ${accountName}`)
+  return String(row[stableIdColumn] ?? '')
 }
 
 function journalRow(
