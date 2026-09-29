@@ -609,8 +609,14 @@ function snapshot_(payload) {
     if (!e2SchemaAvailable_(spreadsheet)) {
       return identityUnavailable_('e2-metadata-schema-unavailable');
     }
-    var e2Records = snapshotE2Records_(spreadsheet, payload.scope);
-    var e2Revision = snapshotRevision_(readSnapshotSource_(spreadsheet));
+    var e2RowsByTable = Object.create(null);
+    var e2TableName = snapshotE2TableName_(payload.scope);
+    e2RowsByTable[e2TableName] = e2Rows_(spreadsheet, e2TableName);
+    var e2Records = snapshotE2Records_(spreadsheet, payload.scope, e2RowsByTable);
+    var e2Revision = snapshotRevision_(readSnapshotSource_(spreadsheet, {
+      e2RowsByTable: e2RowsByTable,
+      skipDerivedIndexes: true,
+    }));
     if (
       payload.snapshotRevision !== undefined &&
       String(payload.snapshotRevision) !== e2Revision
@@ -1250,7 +1256,8 @@ function canonicalJson_(value) {
   return '{' + entries.join(',') + '}';
 }
 
-function readSnapshotSource_(spreadsheet) {
+function readSnapshotSource_(spreadsheet, options) {
+  options = options || {};
   var accountSheet = requiredSheet_(spreadsheet, '會計科目');
   var accountValues = accountSheet
     .getRange(1, 1, accountSheet.getLastRow(), accountSheet.getLastColumn())
@@ -1437,9 +1444,13 @@ function readSnapshotSource_(spreadsheet) {
     journalColumns: journalColumns,
     observationRows: observationRows,
     observationSchemaAvailable: observationSchemaAvailable,
-    extendedRows: readE2TableRows_(spreadsheet),
-    groupByTxnId: readE2GroupIndex_(spreadsheet),
-    reviewByTxnId: readE2ReviewIndex_(spreadsheet),
+    extendedRows: readE2TableRows_(spreadsheet, options.e2RowsByTable),
+    groupByTxnId: options.skipDerivedIndexes
+      ? Object.create(null)
+      : readE2GroupIndex_(spreadsheet),
+    reviewByTxnId: options.skipDerivedIndexes
+      ? Object.create(null)
+      : readE2ReviewIndex_(spreadsheet),
   };
 }
 
@@ -4382,11 +4393,15 @@ function e2Rows_(spreadsheet, name) {
   return rows;
 }
 
-function readE2TableRows_(spreadsheet) {
+function readE2TableRows_(spreadsheet, cachedRowsByTable) {
   if (!e2SchemaAvailable_(spreadsheet)) return [];
   var rows = [];
   for (var index = 0; index < E2_TABLES.length; index += 1) {
-    var tableRows = e2Rows_(spreadsheet, E2_TABLES[index].name);
+    var tableName = E2_TABLES[index].name;
+    var tableRows = cachedRowsByTable &&
+        Object.prototype.hasOwnProperty.call(cachedRowsByTable, tableName)
+      ? cachedRowsByTable[tableName]
+      : e2Rows_(spreadsheet, tableName);
     for (var rowIndex = 0; rowIndex < tableRows.length; rowIndex += 1) {
       rows.push({
         table: E2_TABLES[index].name,
@@ -5327,17 +5342,24 @@ function readE2ReviewIndex_(spreadsheet) {
   return result;
 }
 
-function snapshotE2Records_(spreadsheet, scope) {
-  var canonicalScope = String(scope || '');
-  var tableName = {
+function snapshotE2TableName_(scope) {
+  return {
     groups: '事件群組', 'event-groups': '事件群組',
     operations: '整合操作', claims: '觀察認領', manifests: '匯入清單',
     steps: '匯入步驟', evidence: '來源證據', links: '跨簿連結',
     checkpoints: '對帳檢查點', settings: '設定版本', results: '結果版本',
     records: '整合記錄',
-  }[canonicalScope];
+  }[String(scope || '')];
+}
+
+function snapshotE2Records_(spreadsheet, scope, cachedRowsByTable) {
+  var canonicalScope = String(scope || '');
+  var tableName = snapshotE2TableName_(canonicalScope);
   if (!tableName) return [];
-  var rows = e2Rows_(spreadsheet, tableName);
+  var rows = cachedRowsByTable &&
+      Object.prototype.hasOwnProperty.call(cachedRowsByTable, tableName)
+    ? cachedRowsByTable[tableName].slice()
+    : e2Rows_(spreadsheet, tableName);
   if (canonicalScope === 'results') {
     var genericResultRows = e2Rows_(spreadsheet, '整合記錄');
     for (var genericIndex = 0; genericIndex < genericResultRows.length; genericIndex += 1) {

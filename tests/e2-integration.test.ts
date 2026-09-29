@@ -272,6 +272,81 @@ describe('E2 reviewed Personal operations', () => {
     })
   })
 
+  it('reuses E2 target rows while preserving global revisions and metadata behavior', async () => {
+    await post(harness, { action: 'enable_e2' }, 'e2-read-count-enable')
+    const links = harness.spreadsheet.getSheetByName('跨簿連結')!
+    links.getRange(2, 1, 4, 9).setValues([
+      ['link-bad', 'source-bad', 'destination-bad', '', 'source-revision-bad', 'digest-bad', 'active', 'legacy', '2026-07-27'],
+      ['link-good', 'source-good', 'destination-good', 'destination-revision-good', 'source-revision-good', 'digest-good', 'active', 'test', '2026-07-27'],
+      ['link-superseded', 'source-old', 'destination-old', '', 'source-revision-old', 'digest-old', 'active', 'legacy', '2026-07-27'],
+      ['link-superseded', 'source-new', 'destination-new', 'destination-revision-new', 'source-revision-new', 'digest-new', 'active', 'test', '2026-07-27'],
+    ])
+    const checkpoints = harness.spreadsheet.getSheetByName('對帳檢查點')!
+    checkpoints.getRange(2, 1, 4, 11).setValues([
+      ['checkpoint-bad', '2026-07-27', '', '{}', '{}', '', '[]', '{}', 'accepted', 'revision-bad', '2026-07-27'],
+      ['checkpoint-good', '2026-07-27', 'scope-version-good', '{}', '{}', '', '[]', '{}', 'accepted', 'revision-good', '2026-07-27'],
+      ['checkpoint-superseded', '2026-07-27', '', '{}', '{}', '', '[]', '{}', 'accepted', 'revision-old', '2026-07-27'],
+      ['checkpoint-superseded', '2026-07-27', 'scope-version-new', '{}', '{}', '', '[]', '{}', 'accepted', 'revision-new', '2026-07-27'],
+    ])
+    harness.clearRangeReadCounts()
+
+    const linksSnapshot = await post(harness, { action: 'snapshot', scope: 'links' }, 'e2-read-count-links')
+    const linkRangeReads = harness.rangeReadCounts['跨簿連結'] ?? 0
+    const linkGroupRangeReads = harness.rangeReadCounts['事件群組'] ?? 0
+    const linkReviewRangeReads = harness.rangeReadCounts['事件審核'] ?? 0
+    expect(linksSnapshot).toMatchObject({
+      scope: 'links',
+      // Independent expected digest from the pre-optimization full revision
+      // input. This must not become an E2-scope-only revision.
+      snapshotRevision: '0e1f6ff628ca0c21af674d37f51ceb2658ed9665f032bf63fe13ee60f869f1bb',
+      records: [
+        expect.objectContaining({ id: 'link-bad', destination: { id: 'destination-bad', revision: '' } }),
+        expect.objectContaining({ id: 'link-good', destination: { id: 'destination-good', revision: 'destination-revision-good' } }),
+        expect.objectContaining({ id: 'link-superseded', destination: { id: 'destination-new', revision: 'destination-revision-new' } }),
+      ],
+      continuation: { kind: 'end' },
+    })
+
+    harness.clearRangeReadCounts()
+    const checkpointsSnapshot = await post(harness, { action: 'snapshot', scope: 'checkpoints' }, 'e2-read-count-checkpoints')
+    const checkpointRangeReads = harness.rangeReadCounts['對帳檢查點'] ?? 0
+    const checkpointGroupRangeReads = harness.rangeReadCounts['事件群組'] ?? 0
+    const checkpointReviewRangeReads = harness.rangeReadCounts['事件審核'] ?? 0
+    expect(checkpointsSnapshot).toMatchObject({
+      scope: 'checkpoints',
+      snapshotRevision: '0e1f6ff628ca0c21af674d37f51ceb2658ed9665f032bf63fe13ee60f869f1bb',
+      records: [
+        expect.objectContaining({ id: 'checkpoint-bad', scopeVersion: '' }),
+        expect.objectContaining({ id: 'checkpoint-good', scopeVersion: 'scope-version-good' }),
+        expect.objectContaining({ id: 'checkpoint-superseded', scopeVersion: 'scope-version-new', revision: 'revision-new' }),
+      ],
+      continuation: { kind: 'end' },
+    })
+
+    const eventsSnapshot = await post(harness, { action: 'snapshot', scope: 'events' }, 'e2-read-count-events')
+    expect(eventsSnapshot.snapshotRevision).toBe(checkpointsSnapshot.snapshotRevision)
+    expect(linkRangeReads).toBe(5)
+    expect(checkpointRangeReads).toBe(5)
+    expect(linkGroupRangeReads).toBe(3)
+    expect(linkReviewRangeReads).toBe(3)
+    expect(checkpointGroupRangeReads).toBe(3)
+    expect(checkpointReviewRangeReads).toBe(3)
+
+    const journal = harness.spreadsheet.getSheetByName('日記帳')!
+    journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
+      '2026-07-27', '12:00', '支出', '餐飲', '現金', '10', 'TWD', '餐飲',
+      '', 'global revision change', '', '', 'global-revision-event', 'test', '2026-07-27T12:00:00+08:00',
+    ]])
+    expect(await post(harness, {
+      action: 'snapshot', scope: 'links', snapshotRevision: String(linksSnapshot.snapshotRevision),
+    }, 'e2-read-count-global-revision')).toMatchObject({
+      kind: 'revision-changed',
+      book: 'personal',
+      expected: linksSnapshot.snapshotRevision,
+      actual: expect.any(String),
+    })
+  })
+
   it('records native-currency groups and excludes incomplete groups from balances', async () => {
     const complete = await post(harness, {
       action: 'create_event_group', operationId: 'group-complete', actor: 'group-actor', group: {
