@@ -595,7 +595,9 @@ export type FakeGasHarness = SetupGasFunctions & {
   mailMessages: FakeMailMessage[]
   triggers: FakeTrigger[]
   events: string[]
+  digestInputs: string[]
   clearEvents: () => void
+  clearDigestInputs: () => void
   setScriptProperty: (name: string, value: string) => void
   advanceCacheTime: (seconds: number) => void
   failNextLock: () => void
@@ -611,6 +613,7 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
   const versionPath = fileURLToPath(new URL('../../apps-script/Version.gs', import.meta.url))
   const source = readFileSync(contractPath, 'utf8') + '\n' + readFileSync(versionPath, 'utf8') + '\n' + readFileSync(codePath, 'utf8')
   const events: string[] = []
+  const digestInputs: string[] = []
   const recordEvent = (event: string) => events.push(event)
   const spreadsheetId = 'test-ledger-spreadsheet-id'
   const oldSpreadsheetId = 'test-old-ledger-spreadsheet-id'
@@ -712,6 +715,7 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
       if (algorithm !== 'SHA_256') {
         throw new Error(`unsupported digest algorithm: ${algorithm}`)
       }
+      digestInputs.push(value)
       return Array.from(createHash('sha256').update(value, 'utf8').digest())
     },
     getUuid() {
@@ -893,8 +897,12 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
     mailMessages,
     triggers,
     events,
+    digestInputs,
     clearEvents() {
       events.length = 0
+    },
+    clearDigestInputs() {
+      digestInputs.length = 0
     },
     setScriptProperty(name: string, value: string) {
       scriptProperties.set(name, value)
