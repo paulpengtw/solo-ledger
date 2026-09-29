@@ -637,6 +637,97 @@ describe('E2 reviewed Personal operations', () => {
     })
   })
 
+  it('rejects malformed new links while preserving valid replay and conflict behavior', async () => {
+    await post(harness, { action: 'enable_e2' }, 'invalid-link-enable')
+    const before = harness.spreadsheet.getSheetByName('跨簿連結')!.getLastRow()
+    const missingSourceRevision = await post(harness, {
+      action: 'record_link', operationId: 'invalid-link-source-revision', link: {
+        linkId: 'invalid-link-source-revision', sourceId: 'source-1', destinationId: 'destination-1',
+        sourceRevision: ' ', destinationRevision: 'destination-revision-1',
+      },
+    }, 'invalid-link-source-revision-transport')
+    const missingDestinationRevision = await post(harness, {
+      action: 'record_link', operationId: 'invalid-link-destination-revision', link: {
+        linkId: 'invalid-link-destination-revision', sourceId: 'source-2', destinationId: 'destination-2',
+        sourceRevision: 'source-revision-2', destinationRevision: '',
+      },
+    }, 'invalid-link-destination-revision-transport')
+
+    expect(missingSourceRevision).toMatchObject({ kind: 'rejected', reason: 'invalid-link' })
+    expect(missingDestinationRevision).toMatchObject({ kind: 'rejected', reason: 'invalid-link' })
+    expect(harness.spreadsheet.getSheetByName('跨簿連結')!.getLastRow()).toBe(before)
+
+    const payload = {
+      action: 'record_link', operationId: 'valid-link-first', link: {
+        linkId: 'valid-link-replay', sourceId: 'source-valid', destinationId: 'destination-valid',
+        sourceRevision: 'source-revision-valid', destinationRevision: 'destination-revision-valid',
+        status: 'active', origin: 'integration-test',
+      },
+    }
+    const first = await post(harness, payload, 'valid-link-first-transport')
+    const links = await post(harness, { action: 'snapshot', scope: 'links' }, 'valid-link-snapshot')
+    const link = (links.records as Array<Record<string, unknown>>).find(record => record.id === 'valid-link-replay')!
+
+    expect(link).toMatchObject({
+      sourceRevision: 'source-revision-valid',
+      destination: { id: 'destination-valid', revision: 'destination-revision-valid' },
+    })
+    expect(first).toMatchObject({ kind: 'committed', destinations: [{ id: 'valid-link-replay', revision: link.revision }] })
+
+    const replay = await post(harness, {
+      ...payload, operationId: 'valid-link-replay-operation',
+      expectedRevisions: [{ id: 'valid-link-replay', revision: link.revision }],
+    }, 'valid-link-replay-transport')
+    expect(replay).toMatchObject({ kind: 'committed', destinations: [{ id: 'valid-link-replay', revision: link.revision }] })
+
+    const changed = await post(harness, {
+      ...payload, operationId: 'valid-link-conflict', link: {
+        ...payload.link, sourceRevision: 'different-source-revision',
+      },
+    }, 'valid-link-conflict-transport')
+    expect(changed).toMatchObject({ kind: 'conflict', reason: 'link-id-reused-with-different-content' })
+  })
+
+  it('rejects malformed new checkpoints while preserving valid replay and conflict behavior', async () => {
+    await post(harness, { action: 'enable_e2' }, 'invalid-checkpoint-enable')
+    const before = harness.spreadsheet.getSheetByName('對帳檢查點')!.getLastRow()
+    const malformed = await post(harness, {
+      action: 'accept_checkpoint', operationId: 'invalid-checkpoint-scope-version', checkpoint: {
+        checkpointId: 'invalid-checkpoint-scope-version', cutoff: '2026-07-27', scopeVersion: ' ',
+        evidenceIds: [],
+      },
+    }, 'invalid-checkpoint-scope-version-transport')
+
+    expect(malformed).toMatchObject({ kind: 'rejected', reason: 'invalid-checkpoint' })
+    expect(harness.spreadsheet.getSheetByName('對帳檢查點')!.getLastRow()).toBe(before)
+
+    const payload = {
+      action: 'accept_checkpoint', operationId: 'valid-checkpoint-first', checkpoint: {
+        checkpointId: 'valid-checkpoint-replay', cutoff: '2026-07-27', scopeVersion: 'scope-version-valid',
+        representedBalances: { TWD: '0' }, acceptedBalances: { TWD: '0' }, evidenceIds: [],
+      },
+    }
+    const first = await post(harness, payload, 'valid-checkpoint-first-transport')
+    const checkpoints = await post(harness, { action: 'snapshot', scope: 'checkpoints' }, 'valid-checkpoint-snapshot')
+    const checkpoint = (checkpoints.records as Array<Record<string, unknown>>).find(record => record.id === 'valid-checkpoint-replay')!
+
+    expect(checkpoint).toMatchObject({ scopeVersion: 'scope-version-valid' })
+    expect(first).toMatchObject({ kind: 'committed', destinations: [{ id: 'valid-checkpoint-replay', revision: checkpoint.revision }] })
+
+    const replay = await post(harness, {
+      ...payload, operationId: 'valid-checkpoint-replay-operation',
+      expectedRevisions: [{ id: 'valid-checkpoint-replay', revision: checkpoint.revision }],
+    }, 'valid-checkpoint-replay-transport')
+    expect(replay).toMatchObject({ kind: 'committed', destinations: [{ id: 'valid-checkpoint-replay', revision: checkpoint.revision }] })
+
+    const changed = await post(harness, {
+      ...payload, operationId: 'valid-checkpoint-conflict', checkpoint: {
+        ...payload.checkpoint, scopeVersion: 'different-scope-version',
+      },
+    }, 'valid-checkpoint-conflict-transport')
+    expect(changed).toMatchObject({ kind: 'conflict', reason: 'checkpoint-id-reused-with-different-content' })
+  })
+
   it('preserves an external nested expected-revision conflict on an unknown manifest retry', async () => {
     const metric = await post(harness, {
       action: 'publish_result', operationId: 'nested-revision-target-op', result: {

@@ -6603,6 +6603,8 @@ function e2ExecuteLink_(spreadsheet, operationId, digest, content) {
   var linkId = String(link.linkId || link.link_id || link.id || '').trim();
   var sourceId = String(link.sourceId || link.source_id || '').trim();
   var destinationId = String(link.destinationId || link.destination_id || '').trim();
+  var destinationRevision = String(link.destinationRevision || link.destination_revision || '').trim();
+  var sourceRevision = String(link.sourceRevision || link.source_revision || '').trim();
   if (!linkId || !sourceId || !destinationId) return { rejected: e2Rejected_(operationId, 'invalid-link') };
   var rows = e2Rows_(spreadsheet, '跨簿連結');
   for (var index = rows.length - 1; index >= 0; index -= 1) {
@@ -6615,10 +6617,11 @@ function e2ExecuteLink_(spreadsheet, operationId, digest, content) {
     }
     return { destinations: [{ id: linkId, revision: values.content_digest }] };
   }
+  if (!sourceRevision || !destinationRevision) return { rejected: e2Rejected_(operationId, 'invalid-link') };
   e2Append_(spreadsheet, '跨簿連結', {
     link_id: linkId, source_id: sourceId, destination_id: destinationId,
-    destination_revision: String(link.destinationRevision || link.destination_revision || ''),
-    source_revision: String(link.sourceRevision || link.source_revision || ''),
+    destination_revision: destinationRevision,
+    source_revision: sourceRevision,
     content_digest: digest, status: String(link.status || 'active'),
     origin: String(link.origin || operationId), created_at: taipeiIsoNow_(),
   });
@@ -6633,6 +6636,7 @@ function e2ExecuteCheckpoint_(spreadsheet, operationId, digest, content) {
   var checkpoint = content.checkpoint || content;
   var checkpointId = String(checkpoint.checkpointId || checkpoint.checkpoint_id || checkpoint.id || operationId).trim();
   var cutoff = String(checkpoint.cutoff || checkpoint.effectiveDate || checkpoint.effective_date || '').trim();
+  var scopeVersion = String(checkpoint.scopeVersion || checkpoint.scope_version || '').trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(cutoff) || !snapshotFinancialDateIsValid_(cutoff)) {
     return { rejected: e2Rejected_(operationId, 'invalid-checkpoint-cutoff') };
   }
@@ -6650,10 +6654,11 @@ function e2ExecuteCheckpoint_(spreadsheet, operationId, digest, content) {
       return { destinations: [{ id: checkpointId, revision: rows[index].values.revision }] };
     }
   }
+  if (!scopeVersion) return { rejected: e2Rejected_(operationId, 'invalid-checkpoint') };
   var revision = e2Digest_({ checkpointId: checkpointId, cutoff: cutoff, digest: digest });
   e2Append_(spreadsheet, '對帳檢查點', {
     checkpoint_id: checkpointId, cutoff: cutoff,
-    scope_version: String(checkpoint.scopeVersion || checkpoint.scope_version || ''),
+    scope_version: scopeVersion,
     represented_balances_json: e2Json_(checkpoint.representedBalances || checkpoint.represented_balances || {}),
     accepted_balances_json: e2Json_(checkpoint.acceptedBalances || checkpoint.accepted_balances || {}),
     adjustment_json: e2Json_(checkpoint.adjustment || null), evidence_ids_json: e2Json_(evidenceIds),
