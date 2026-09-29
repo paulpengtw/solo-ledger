@@ -4981,6 +4981,111 @@ function e2ValidateReceipt_(recordId, value) {
   return { ok: true, stateKind: stateKind, stateRank: stateRank, stepsById: stepsById };
 }
 
+function e2ValidateRetainedPlan_(operationId, content, recordId, value) {
+  if (String(content && content.kind || '') !== 'import-receipt' ||
+      recordId !== String(operationId || '') + ':plan') {
+    return { ok: false, detail: 'retained plan record identity is invalid' };
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      !e2ReceiptString_(value.planId) ||
+      !e2ReceiptString_(value.contractVersion) ||
+      String(value.contractVersion) !== String(CONTRACT_VERSION) ||
+      !e2ReceiptString_(value.approvedAt) || !e2ReceiptString_(value.approvedBy) ||
+      !e2ReceiptString_(value.contentDigest) ||
+      !Array.isArray(value.observations) || !Array.isArray(value.decisions) ||
+      !Array.isArray(value.expectedRevisions) ||
+      !e2ReceiptString_(content.planDigest) ||
+      String(content.planDigest) !== String(value.contentDigest)) {
+    return { ok: false, detail: 'retained plan record is invalid' };
+  }
+  for (var observationIndex = 0; observationIndex < value.observations.length; observationIndex += 1) {
+    var observation = value.observations[observationIndex];
+    if (!observation || typeof observation !== 'object' || Array.isArray(observation) ||
+        !e2ReceiptString_(observation.observationId) || !e2ReceiptString_(observation.kind)) {
+      return { ok: false, detail: 'retained plan observations are invalid' };
+    }
+  }
+  for (var revisionIndex = 0; revisionIndex < value.expectedRevisions.length; revisionIndex += 1) {
+    var expectedRevision = value.expectedRevisions[revisionIndex];
+    if (!expectedRevision || typeof expectedRevision !== 'object' || Array.isArray(expectedRevision) ||
+        !e2ReceiptString_(expectedRevision.id) || !e2ReceiptString_(expectedRevision.revision)) {
+      return { ok: false, detail: 'retained plan expected revisions are invalid' };
+    }
+  }
+  for (var decisionIndex = 0; decisionIndex < value.decisions.length; decisionIndex += 1) {
+    var decision = value.decisions[decisionIndex];
+    if (!decision || typeof decision !== 'object' || Array.isArray(decision) ||
+        !e2ReceiptString_(decision.observationId) ||
+        !decision.disposition || typeof decision.disposition !== 'object' ||
+        Array.isArray(decision.disposition) || !decision.provenance ||
+        typeof decision.provenance !== 'object' || Array.isArray(decision.provenance) ||
+        !e2ReceiptString_(decision.provenance.actor) ||
+        !e2ReceiptString_(decision.provenance.decidedAt)) {
+      return { ok: false, detail: 'retained plan decisions are invalid' };
+    }
+    var disposition = decision.disposition;
+    var dispositionKind = String(disposition.kind || '').trim();
+    if (dispositionKind === 'skip') {
+      if (!e2ReceiptString_(disposition.reason)) {
+        return { ok: false, detail: 'retained plan skip disposition is invalid' };
+      }
+    } else if (dispositionKind === 'map-to-account' || dispositionKind === 'duplicate-of') {
+      if (!e2ReceiptString_(disposition.accountId)) {
+        return { ok: false, detail: 'retained plan account disposition is invalid' };
+      }
+    } else if (dispositionKind === 'link-existing' || dispositionKind === 'already-imported') {
+      var target = disposition.target;
+      if (!target || typeof target !== 'object' || Array.isArray(target) ||
+          !e2ReceiptString_(target.id) || !e2ReceiptString_(target.revision)) {
+        return { ok: false, detail: 'retained plan link disposition is invalid' };
+      }
+    } else if (dispositionKind === 'create-event') {
+      var purpose = String(disposition.purpose || '').trim();
+      var allowedPurposes = [
+        'work-receipt', 'other-receipt', 'personal-expense',
+        'shared-purchase', 'shared-refund', 'shared-settlement',
+      ];
+      if (allowedPurposes.indexOf(purpose) === -1 ||
+          !e2ReceiptString_(disposition.effectiveDate) ||
+          (disposition.category !== null && typeof disposition.category !== 'string')) {
+        return { ok: false, detail: 'retained plan event disposition is invalid' };
+      }
+      var sharedPurpose = ['shared-purchase', 'shared-refund', 'shared-settlement'].indexOf(purpose) !== -1;
+      if (!sharedPurpose) {
+        if (!e2ReceiptString_(disposition.accountId) || disposition.allocation !== undefined ||
+            disposition.payer !== undefined || disposition.sharedTotal !== undefined ||
+            disposition.partnerAgreement !== undefined) {
+          return { ok: false, detail: 'retained plan personal event disposition is invalid' };
+        }
+      } else {
+        var allocations = ['equal-halves', 'entirely-cheng', 'entirely-partner'];
+        var payers = ['cheng', 'partner'];
+        var total = disposition.sharedTotal;
+        if (allocations.indexOf(disposition.allocation) === -1 ||
+            payers.indexOf(disposition.payer) === -1 ||
+            (disposition.payer === 'cheng' && !e2ReceiptString_(disposition.accountId)) ||
+            (disposition.payer === 'partner' && typeof disposition.accountId !== 'string') ||
+            !total || typeof total !== 'object' || Array.isArray(total) ||
+            !e2ReceiptString_(total.currency) || !/^[A-Z]{3}$/.test(total.currency) ||
+            !e2ReceiptString_(total.amount)) {
+          return { ok: false, detail: 'retained plan shared event disposition is invalid' };
+        }
+        if (disposition.partnerAgreement !== undefined) {
+          var agreement = disposition.partnerAgreement;
+          if (purpose !== 'shared-purchase' || !agreement || typeof agreement !== 'object' ||
+              Array.isArray(agreement) || !e2ReceiptString_(agreement.id) ||
+              !e2ReceiptString_(agreement.revision)) {
+            return { ok: false, detail: 'retained plan partner agreement is invalid' };
+          }
+        }
+      }
+    } else {
+      return { ok: false, detail: 'retained plan disposition is invalid' };
+    }
+  }
+  return { ok: true };
+}
+
 function e2ReceiptProgressConflict_(recordId, existingValue, nextValue) {
   var existing = e2ValidateReceipt_(recordId, existingValue);
   if (!existing.ok) return existing.detail;
@@ -5076,15 +5181,23 @@ function e2PrepareRecordWrites_(spreadsheet, operationId, content) {
     }
     var scope = String(write.scope || '').trim();
     var id = String(write.id || '').trim();
-    if (scope !== 'results' || !id || seen[id] || !Object.prototype.hasOwnProperty.call(write, 'data')) {
+    if ((scope !== 'results' && scope !== 'records') || !id || seen[id] ||
+        !Object.prototype.hasOwnProperty.call(write, 'data')) {
       return { rejected: e2Rejected_(operationId, 'record-write-invalid') };
     }
     seen[id] = true;
-    var validation = e2ValidateReceipt_(id, write.data);
-    if (!validation.ok) return { rejected: e2Rejected_(operationId, 'invalid-receipt', validation.detail) };
+    if (scope === 'results') {
+      var validation = e2ValidateReceipt_(id, write.data);
+      if (!validation.ok) return { rejected: e2Rejected_(operationId, 'invalid-receipt', validation.detail) };
+    } else {
+      var retainedPlanValidation = e2ValidateRetainedPlan_(operationId, content, id, write.data);
+      if (!retainedPlanValidation.ok) {
+        return { rejected: e2Rejected_(operationId, 'record-write-invalid', retainedPlanValidation.detail) };
+      }
+    }
     var existing = e2LatestRecord_(spreadsheet, scope, id);
     var existingData = existing ? e2ParseJson_(existing.values.data_json, null) : null;
-    if (existing && e2Digest_(existingData) !== e2Digest_(write.data)) {
+    if (scope === 'results' && existing && e2Digest_(existingData) !== e2Digest_(write.data)) {
       var progressConflict = e2ReceiptProgressConflict_(id, existingData, write.data);
       if (progressConflict) return { rejected: e2Rejected_(operationId, 'receipt-progress-regression', progressConflict) };
     }

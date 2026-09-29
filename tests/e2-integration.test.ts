@@ -608,6 +608,119 @@ describe('E2 reviewed Personal operations', () => {
       .toEqual([expect.objectContaining({ id: 'receipt-operation', data: progress })])
   })
 
+  it('persists a validated retained plan alongside its strict receipt result', async () => {
+    const receipt = {
+      operationId: 'retained-plan-operation', planId: 'retained-plan', contractVersion: CONTRACT_VERSION,
+      actor: 'cheng', acceptedAt: '2026-07-27T08:00:00.000Z', contentDigest: 'retained-plan-digest',
+      steps: [{ stepId: 'step-1', kind: 'claim-observation', book: 'personal', expectedRevisions: [], dependsOn: [], state: { kind: 'pending' } }],
+      state: { kind: 'accepted' },
+    }
+    const plan = {
+      planId: 'retained-plan', contractVersion: CONTRACT_VERSION,
+      approvedAt: '2026-07-27T07:59:00.000Z', approvedBy: 'cheng', contentDigest: 'retained-plan-digest',
+      observations: [{ observationId: 'observation-1', kind: 'transaction' }],
+      decisions: [{
+        observationId: 'observation-1',
+        disposition: { kind: 'skip', reason: 'not imported' },
+        provenance: { actor: 'cheng', decidedAt: '2026-07-27T07:59:00.000Z' },
+      }],
+      expectedRevisions: [],
+    }
+    const payload = {
+      action: 'command', operationId: receipt.operationId, expectedRevisions: [],
+      contentDigest: 'retained-plan-transport', content: {
+        kind: 'import-receipt', planDigest: plan.contentDigest,
+        writes: [
+          { scope: 'results', id: receipt.operationId, data: receipt },
+          { scope: 'records', id: receipt.operationId + ':plan', data: plan },
+        ],
+      },
+    }
+    const accepted = await post(harness, payload, 'retained-plan-operation-transport')
+
+    expect(accepted).toMatchObject({ kind: 'committed', operationId: receipt.operationId })
+    expect(await post(harness, payload, 'retained-plan-operation-retry-transport'))
+      .toMatchObject({ kind: 'committed', operationId: receipt.operationId })
+    expect((await post(harness, { action: 'snapshot', scope: 'results' }, 'retained-plan-results')).records)
+      .toEqual([expect.objectContaining({ id: receipt.operationId, data: receipt })])
+    expect((await post(harness, { action: 'snapshot', scope: 'records' }, 'retained-plan-records')).records)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'records:' + receipt.operationId + ':plan', scope: 'records', data: plan }),
+      ]))
+    const recordsSheet = harness.spreadsheet.getSheetByName('整合記錄')!
+    const recordRows = recordsSheet.getLastRow() < 2
+      ? []
+      : recordsSheet.getRange(2, 1, recordsSheet.getLastRow() - 1, 5).getValues()
+    expect(recordRows.filter(row => row[0] === 'records' && row[1] === receipt.operationId + ':plan')).toHaveLength(1)
+  })
+
+  it('rejects malformed retained plans without writing their receipt or plan row', async () => {
+    const receipt = {
+      operationId: 'malformed-retained-plan', planId: 'malformed-plan', contractVersion: CONTRACT_VERSION,
+      actor: 'cheng', acceptedAt: '2026-07-27T08:00:00.000Z', contentDigest: 'malformed-plan-digest',
+      steps: [], state: { kind: 'accepted' },
+    }
+    const rejected = await post(harness, {
+      action: 'command', operationId: receipt.operationId, expectedRevisions: [],
+      contentDigest: 'malformed-retained-plan-transport', content: {
+        kind: 'import-receipt', planDigest: receipt.contentDigest,
+        writes: [
+          { scope: 'results', id: receipt.operationId, data: receipt },
+          { scope: 'records', id: receipt.operationId + ':plan', data: {
+            planId: receipt.planId, contractVersion: receipt.contractVersion,
+            contentDigest: receipt.contentDigest,
+          } },
+        ],
+      },
+    }, 'malformed-retained-plan-transport')
+
+    expect(rejected).toMatchObject({ kind: 'rejected', reason: 'record-write-invalid' })
+    expect((await post(harness, { action: 'snapshot', scope: 'results' }, 'malformed-retained-plan-results')).records).toEqual([])
+    expect((await post(harness, { action: 'snapshot', scope: 'records' }, 'malformed-retained-plan-records')).records).toEqual([])
+  })
+
+  it('keeps receipt validation strict when a retained-plan command includes results', async () => {
+    const rejected = await post(harness, {
+      action: 'command', operationId: 'invalid-retained-receipt', expectedRevisions: [],
+      contentDigest: 'invalid-retained-receipt-transport', content: {
+        kind: 'import-receipt', planDigest: 'invalid-retained-receipt-digest',
+        writes: [
+          { scope: 'results', id: 'invalid-retained-receipt', data: { operationId: 'invalid-retained-receipt' } },
+          { scope: 'records', id: 'invalid-retained-receipt:plan', data: {
+            planId: 'invalid-retained-plan', contractVersion: CONTRACT_VERSION,
+            approvedAt: '2026-07-27T07:59:00.000Z', approvedBy: 'cheng',
+            contentDigest: 'invalid-retained-receipt-digest', observations: [], decisions: [], expectedRevisions: [],
+          } },
+        ],
+      },
+    }, 'invalid-retained-receipt-transport')
+
+    expect(rejected).toMatchObject({ kind: 'rejected', reason: 'invalid-receipt' })
+    expect((await post(harness, { action: 'snapshot', scope: 'results' }, 'invalid-retained-receipt-results')).records).toEqual([])
+    expect((await post(harness, { action: 'snapshot', scope: 'records' }, 'invalid-retained-receipt-records')).records).toEqual([])
+  })
+
+  it('keeps duplicate retained-plan ids rejected before any write', async () => {
+    const plan = {
+      planId: 'duplicate-plan', contractVersion: CONTRACT_VERSION,
+      approvedAt: '2026-07-27T07:59:00.000Z', approvedBy: 'cheng', contentDigest: 'duplicate-plan-digest',
+      observations: [], decisions: [], expectedRevisions: [],
+    }
+    const rejected = await post(harness, {
+      action: 'command', operationId: 'duplicate-retained-plan', expectedRevisions: [],
+      contentDigest: 'duplicate-retained-plan-transport', content: {
+        kind: 'import-receipt', planDigest: plan.contentDigest,
+        writes: [
+          { scope: 'records', id: 'duplicate-retained-plan:plan', data: plan },
+          { scope: 'records', id: 'duplicate-retained-plan:plan', data: plan },
+        ],
+      },
+    }, 'duplicate-retained-plan-transport')
+
+    expect(rejected).toMatchObject({ kind: 'rejected', reason: 'record-write-invalid' })
+    expect((await post(harness, { action: 'snapshot', scope: 'records' }, 'duplicate-retained-plan-records')).records).toEqual([])
+  })
+
   it('uses one stable link revision for the write outcome, snapshot, and retry', async () => {
     const payload = {
       action: 'record_link', operationId: 'stable-link-first',
