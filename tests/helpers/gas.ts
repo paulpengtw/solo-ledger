@@ -162,7 +162,7 @@ export class FakeRange {
   }
 
   getValues(): CellValue[][] {
-    this.sheet.recordRangeRead()
+    this.sheet.recordRangeRead(this.row, this.numRows)
     return Array.from({ length: this.numRows }, (_unusedRow, rowOffset) =>
       Array.from({ length: this.numColumns }, (_unusedColumn, columnOffset) =>
         this.sheet.readValue(this.row + rowOffset, this.column + columnOffset),
@@ -229,7 +229,7 @@ export class FakeSheet {
   constructor(
     private name: string,
     private readonly recordEvent: (event: string) => void = () => undefined,
-    private readonly recordRead: (sheetName: string) => void = () => undefined,
+    private readonly recordRead: (sheetName: string, row: number, numRows: number) => void = () => undefined,
   ) {}
 
   getName(): string {
@@ -248,8 +248,8 @@ export class FakeSheet {
     return new FakeRange(this, row, column, numRows, numColumns)
   }
 
-  recordRangeRead(): void {
-    this.recordRead(this.name)
+  recordRangeRead(row: number, numRows: number): void {
+    this.recordRead(this.name, row, numRows)
   }
 
   getLastRow(): number {
@@ -355,19 +355,22 @@ export class FakeSheet {
 }
 
 export class FakeSpreadsheet {
+  readonly rangeReadCounts: Record<string, number> = {}
+  readonly dataRangeReadCounts: Record<string, number> = {}
   private readonly sheets: FakeSheet[]
-
-  constructor(
-    recordEvent: (event: string) => void = () => undefined,
-    recordRead: (sheetName: string) => void = () => undefined,
-  ) {
-    this.sheets = [new FakeSheet('Sheet1', recordEvent, recordRead)]
-    this.recordEvent = recordEvent
-    this.recordRead = recordRead
-  }
-
   private readonly recordEvent: (event: string) => void
-  private readonly recordRead: (sheetName: string) => void
+  private readonly recordRead: (sheetName: string, row: number, numRows: number) => void
+
+  constructor(recordEvent: (event: string) => void = () => undefined) {
+    this.recordEvent = recordEvent
+    this.recordRead = (sheetName, row) => {
+      this.rangeReadCounts[sheetName] = (this.rangeReadCounts[sheetName] ?? 0) + 1
+      if (row > 1) {
+        this.dataRangeReadCounts[sheetName] = (this.dataRangeReadCounts[sheetName] ?? 0) + 1
+      }
+    }
+    this.sheets = [new FakeSheet('Sheet1', recordEvent, this.recordRead)]
+  }
 
   getName(): string {
     return 'Solo Ledger'
@@ -388,6 +391,15 @@ export class FakeSpreadsheet {
 
   getSheets(): FakeSheet[] {
     return [...this.sheets]
+  }
+
+  clearRangeReadCounts(): void {
+    for (const sheetName of Object.keys(this.rangeReadCounts)) {
+      delete this.rangeReadCounts[sheetName]
+    }
+    for (const sheetName of Object.keys(this.dataRangeReadCounts)) {
+      delete this.dataRangeReadCounts[sheetName]
+    }
   }
 }
 
@@ -608,6 +620,7 @@ export type FakeGasHarness = SetupGasFunctions & {
   events: string[]
   digestInputs: string[]
   rangeReadCounts: Record<string, number>
+  dataRangeReadCounts: Record<string, number>
   clearEvents: () => void
   clearDigestInputs: () => void
   clearRangeReadCounts: () => void
@@ -627,15 +640,11 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
   const source = readFileSync(contractPath, 'utf8') + '\n' + readFileSync(versionPath, 'utf8') + '\n' + readFileSync(codePath, 'utf8')
   const events: string[] = []
   const digestInputs: string[] = []
-  const rangeReadCounts: Record<string, number> = {}
   const recordEvent = (event: string) => events.push(event)
-  const recordRead = (sheetName: string) => {
-    rangeReadCounts[sheetName] = (rangeReadCounts[sheetName] ?? 0) + 1
-  }
   const spreadsheetId = 'test-ledger-spreadsheet-id'
   const oldSpreadsheetId = 'test-old-ledger-spreadsheet-id'
-  const spreadsheet = new FakeSpreadsheet(recordEvent, recordRead)
-  const oldSpreadsheet = new FakeSpreadsheet(recordEvent, recordRead)
+  const spreadsheet = new FakeSpreadsheet(recordEvent)
+  const oldSpreadsheet = new FakeSpreadsheet(recordEvent)
   const spreadsheets = new Map<string, FakeSpreadsheet>([
     [spreadsheetId, spreadsheet],
     [oldSpreadsheetId, oldSpreadsheet],
@@ -915,7 +924,8 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
     triggers,
     events,
     digestInputs,
-    rangeReadCounts,
+    rangeReadCounts: spreadsheet.rangeReadCounts,
+    dataRangeReadCounts: spreadsheet.dataRangeReadCounts,
     clearEvents() {
       events.length = 0
     },
@@ -923,9 +933,7 @@ export function loadGasFunctionsWithFakeGas(): FakeGasHarness {
       digestInputs.length = 0
     },
     clearRangeReadCounts() {
-      for (const sheetName of Object.keys(rangeReadCounts)) {
-        delete rangeReadCounts[sheetName]
-      }
+      spreadsheet.clearRangeReadCounts()
     },
     setScriptProperty(name: string, value: string) {
       scriptProperties.set(name, value)

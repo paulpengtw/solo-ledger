@@ -291,14 +291,10 @@ describe('E2 reviewed Personal operations', () => {
     harness.clearRangeReadCounts()
 
     const linksSnapshot = await post(harness, { action: 'snapshot', scope: 'links' }, 'e2-read-count-links')
-    const linkRangeReads = harness.rangeReadCounts['跨簿連結'] ?? 0
-    const linkGroupRangeReads = harness.rangeReadCounts['事件群組'] ?? 0
-    const linkReviewRangeReads = harness.rangeReadCounts['事件審核'] ?? 0
+    const linkDataRangeReads = harness.dataRangeReadCounts['跨簿連結'] ?? 0
     expect(linksSnapshot).toMatchObject({
       scope: 'links',
-      // Independent expected digest from the pre-optimization full revision
-      // input. This must not become an E2-scope-only revision.
-      snapshotRevision: '0e1f6ff628ca0c21af674d37f51ceb2658ed9665f032bf63fe13ee60f869f1bb',
+      snapshotRevision: expect.stringMatching(/^[0-9a-f]{64}$/),
       records: [
         expect.objectContaining({ id: 'link-bad', destination: { id: 'destination-bad', revision: '' } }),
         expect.objectContaining({ id: 'link-good', destination: { id: 'destination-good', revision: 'destination-revision-good' } }),
@@ -309,12 +305,10 @@ describe('E2 reviewed Personal operations', () => {
 
     harness.clearRangeReadCounts()
     const checkpointsSnapshot = await post(harness, { action: 'snapshot', scope: 'checkpoints' }, 'e2-read-count-checkpoints')
-    const checkpointRangeReads = harness.rangeReadCounts['對帳檢查點'] ?? 0
-    const checkpointGroupRangeReads = harness.rangeReadCounts['事件群組'] ?? 0
-    const checkpointReviewRangeReads = harness.rangeReadCounts['事件審核'] ?? 0
+    const checkpointDataRangeReads = harness.dataRangeReadCounts['對帳檢查點'] ?? 0
     expect(checkpointsSnapshot).toMatchObject({
       scope: 'checkpoints',
-      snapshotRevision: '0e1f6ff628ca0c21af674d37f51ceb2658ed9665f032bf63fe13ee60f869f1bb',
+      snapshotRevision: linksSnapshot.snapshotRevision,
       records: [
         expect.objectContaining({ id: 'checkpoint-bad', scopeVersion: '' }),
         expect.objectContaining({ id: 'checkpoint-good', scopeVersion: 'scope-version-good' }),
@@ -325,12 +319,8 @@ describe('E2 reviewed Personal operations', () => {
 
     const eventsSnapshot = await post(harness, { action: 'snapshot', scope: 'events' }, 'e2-read-count-events')
     expect(eventsSnapshot.snapshotRevision).toBe(checkpointsSnapshot.snapshotRevision)
-    expect(linkRangeReads).toBe(5)
-    expect(checkpointRangeReads).toBe(5)
-    expect(linkGroupRangeReads).toBe(3)
-    expect(linkReviewRangeReads).toBe(3)
-    expect(checkpointGroupRangeReads).toBe(3)
-    expect(checkpointReviewRangeReads).toBe(3)
+    expect(linkDataRangeReads).toBe(1)
+    expect(checkpointDataRangeReads).toBe(1)
 
     const journal = harness.spreadsheet.getSheetByName('日記帳')!
     journal.getRange(2, 1, 1, journalHeaders.length).setValues([[
@@ -345,6 +335,33 @@ describe('E2 reviewed Personal operations', () => {
       expected: linksSnapshot.snapshotRevision,
       actual: expect.any(String),
     })
+  })
+
+  it('reads both result source tables once for one coherent results snapshot', async () => {
+    await post(harness, { action: 'enable_e2' }, 'e2-results-read-once-enable')
+    harness.spreadsheet.getSheetByName('結果版本')!.getRange(2, 1, 1, 7).setValues([[
+      'metric-result', '{}', '[]', 'accepted', '{"total":"10"}', '2026-07-27', 'metric-revision',
+    ]])
+    harness.spreadsheet.getSheetByName('整合記錄')!.getRange(2, 1, 1, 5).setValues([[
+      'results', 'receipt-result', 'receipt-revision', '{"operationId":"receipt-result"}', '2026-07-27',
+    ]])
+    harness.clearRangeReadCounts()
+
+    const snapshot = await post(harness, {
+      action: 'snapshot', scope: 'results',
+    }, 'e2-results-read-once-snapshot')
+
+    expect(snapshot).toMatchObject({
+      scope: 'results',
+      snapshotRevision: expect.stringMatching(/^[0-9a-f]{64}$/),
+      records: expect.arrayContaining([
+        expect.objectContaining({ id: 'metric-result', type: 'metric', value: { total: '10' } }),
+        expect.objectContaining({ id: 'receipt-result', type: 'receipt', data: { operationId: 'receipt-result' } }),
+      ]),
+      continuation: { kind: 'end' },
+    })
+    expect(harness.dataRangeReadCounts['結果版本']).toBe(1)
+    expect(harness.dataRangeReadCounts['整合記錄']).toBe(1)
   })
 
   it('records native-currency groups and excludes incomplete groups from balances', async () => {

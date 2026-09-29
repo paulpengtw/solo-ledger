@@ -609,9 +609,7 @@ function snapshot_(payload) {
     if (!e2SchemaAvailable_(spreadsheet)) {
       return identityUnavailable_('e2-metadata-schema-unavailable');
     }
-    var e2RowsByTable = Object.create(null);
-    var e2TableName = snapshotE2TableName_(payload.scope);
-    e2RowsByTable[e2TableName] = e2Rows_(spreadsheet, e2TableName);
+    var e2RowsByTable = snapshotE2RowsByTable_(spreadsheet, payload.scope);
     var e2Records = snapshotE2Records_(spreadsheet, payload.scope, e2RowsByTable);
     var e2Revision = snapshotRevision_(readSnapshotSource_(spreadsheet, {
       e2RowsByTable: e2RowsByTable,
@@ -5352,6 +5350,16 @@ function snapshotE2TableName_(scope) {
   }[String(scope || '')];
 }
 
+function snapshotE2RowsByTable_(spreadsheet, scope) {
+  var rowsByTable = Object.create(null);
+  var tableName = snapshotE2TableName_(scope);
+  rowsByTable[tableName] = e2Rows_(spreadsheet, tableName);
+  if (String(scope || '') === 'results') {
+    rowsByTable['整合記錄'] = e2Rows_(spreadsheet, '整合記錄');
+  }
+  return rowsByTable;
+}
+
 function snapshotE2Records_(spreadsheet, scope, cachedRowsByTable) {
   var canonicalScope = String(scope || '');
   var tableName = snapshotE2TableName_(canonicalScope);
@@ -5361,7 +5369,10 @@ function snapshotE2Records_(spreadsheet, scope, cachedRowsByTable) {
     ? cachedRowsByTable[tableName].slice()
     : e2Rows_(spreadsheet, tableName);
   if (canonicalScope === 'results') {
-    var genericResultRows = e2Rows_(spreadsheet, '整合記錄');
+    var genericResultRows = cachedRowsByTable &&
+        Object.prototype.hasOwnProperty.call(cachedRowsByTable, '整合記錄')
+      ? cachedRowsByTable['整合記錄'].slice()
+      : e2Rows_(spreadsheet, '整合記錄');
     for (var genericIndex = 0; genericIndex < genericResultRows.length; genericIndex += 1) {
       if (genericResultRows[genericIndex].values.scope !== 'results') continue;
       rows.push(genericResultRows[genericIndex]);
