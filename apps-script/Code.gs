@@ -828,11 +828,13 @@ function lookupRecordAcrossScopes_(recordsByScope, id) {
   return { kind: 'missing' };
 }
 
-function identityRepairReference_(scope, row) {
+function identityRepairReference_(scope, row, contentDigest) {
   return {
     scope: scope,
     sheetRow: row.sheetRow,
-    contentDigest: identityContentDigest_(scope, row),
+    contentDigest: contentDigest === undefined
+      ? identityContentDigest_(scope, row)
+      : contentDigest,
   };
 }
 
@@ -1704,6 +1706,7 @@ function snapshotEventRecords_(source, offset, limit) {
     var row = source.journalRows[index];
     var values = row.values;
     var txnId = String(values.txn_id || '').trim();
+    var contentDigest = identityContentDigest_('events', row);
     records.push({
       id: txnId || null,
       identity: txnId
@@ -1726,8 +1729,8 @@ function snapshotEventRecords_(source, offset, limit) {
       source: String(values['來源'] || '').trim(),
       createdAt: String(values['建立時間'] || '').trim(),
       sheetRow: row.sheetRow,
-      contentDigest: identityContentDigest_('events', row),
-      repairReference: identityRepairReference_('events', row),
+      contentDigest: contentDigest,
+      repairReference: identityRepairReference_('events', row, contentDigest),
     });
     var group = source.groupByTxnId && source.groupByTxnId[txnId];
     if (group) {

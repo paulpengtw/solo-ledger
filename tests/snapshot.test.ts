@@ -273,10 +273,22 @@ describe('Personal read snapshots', () => {
         id: 'page-event-201',
         description: 'continuation-only-event',
         sheetRow: 202,
+        contentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        repairReference: {
+          scope: 'events',
+          sheetRow: 202,
+          contentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
       }),
     ])
-    expect(harness.digestInputs).toHaveLength(3)
-    expect(eventDigestInputs).toHaveLength(2)
+    const record = (second.records as Array<Record<string, unknown>>)[0]!
+    expect(record.repairReference).toEqual({
+      scope: 'events',
+      sheetRow: 202,
+      contentDigest: record.contentDigest,
+    })
+    expect(harness.digestInputs).toHaveLength(2)
+    expect(eventDigestInputs).toHaveLength(1)
     expect(eventDigestInputs.every(input => input.includes('continuation-only-event'))).toBe(true)
     expect(eventDigestInputs.every(input => !input.includes('first-page-event-1'))).toBe(true)
   })
