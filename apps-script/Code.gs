@@ -613,6 +613,7 @@ function snapshot_(payload) {
     var e2Records = snapshotE2Records_(spreadsheet, payload.scope, e2RowsByTable);
     var e2Revision = snapshotRevision_(readSnapshotSource_(spreadsheet, {
       e2RowsByTable: e2RowsByTable,
+      e2SchemaAvailable: true,
       skipDerivedIndexes: true,
     }));
     if (
@@ -1256,6 +1257,8 @@ function canonicalJson_(value) {
 
 function readSnapshotSource_(spreadsheet, options) {
   options = options || {};
+  var e2SchemaAvailable = options.e2SchemaAvailable;
+  var e2RowsByTable = options.e2RowsByTable || Object.create(null);
   var accountSheet = requiredSheet_(spreadsheet, '會計科目');
   var accountValues = accountSheet
     .getRange(1, 1, accountSheet.getLastRow(), accountSheet.getLastColumn())
@@ -1433,6 +1436,18 @@ function readSnapshotSource_(spreadsheet, options) {
     }
   }
 
+  if (e2SchemaAvailable === undefined) {
+    e2SchemaAvailable = e2SchemaAvailable_(spreadsheet);
+  }
+  if (e2SchemaAvailable) {
+    for (var e2TableIndex = 0; e2TableIndex < E2_TABLES.length; e2TableIndex += 1) {
+      var e2TableName = E2_TABLES[e2TableIndex].name;
+      if (!Object.prototype.hasOwnProperty.call(e2RowsByTable, e2TableName)) {
+        e2RowsByTable[e2TableName] = e2Rows_(spreadsheet, e2TableName);
+      }
+    }
+  }
+
   return {
     accountColumns: accountColumns,
     accountStableIdColumn: accountStableIdColumn,
@@ -1442,13 +1457,13 @@ function readSnapshotSource_(spreadsheet, options) {
     journalColumns: journalColumns,
     observationRows: observationRows,
     observationSchemaAvailable: observationSchemaAvailable,
-    extendedRows: readE2TableRows_(spreadsheet, options.e2RowsByTable),
+    extendedRows: readE2TableRows_(spreadsheet, e2RowsByTable, e2SchemaAvailable),
     groupByTxnId: options.skipDerivedIndexes
       ? Object.create(null)
-      : readE2GroupIndex_(spreadsheet),
+      : readE2GroupIndex_(spreadsheet, e2RowsByTable, e2SchemaAvailable),
     reviewByTxnId: options.skipDerivedIndexes
       ? Object.create(null)
-      : readE2ReviewIndex_(spreadsheet),
+      : readE2ReviewIndex_(spreadsheet, e2RowsByTable, e2SchemaAvailable),
   };
 }
 
@@ -4391,8 +4406,11 @@ function e2Rows_(spreadsheet, name) {
   return rows;
 }
 
-function readE2TableRows_(spreadsheet, cachedRowsByTable) {
-  if (!e2SchemaAvailable_(spreadsheet)) return [];
+function readE2TableRows_(spreadsheet, cachedRowsByTable, schemaAvailable) {
+  if (schemaAvailable === undefined) {
+    schemaAvailable = e2SchemaAvailable_(spreadsheet);
+  }
+  if (!schemaAvailable) return [];
   var rows = [];
   for (var index = 0; index < E2_TABLES.length; index += 1) {
     var tableName = E2_TABLES[index].name;
@@ -5272,11 +5290,20 @@ function e2LatestRecord_(spreadsheet, scope, id) {
   return null;
 }
 
-function readE2GroupIndex_(spreadsheet) {
+function readE2GroupIndex_(spreadsheet, cachedRowsByTable, schemaAvailable) {
   var result = Object.create(null);
-  if (!e2SchemaAvailable_(spreadsheet)) return result;
-  var groups = e2Rows_(spreadsheet, '事件群組');
-  var details = e2Rows_(spreadsheet, '事件群組明細');
+  if (schemaAvailable === undefined) {
+    schemaAvailable = e2SchemaAvailable_(spreadsheet);
+  }
+  if (!schemaAvailable) return result;
+  var groups = cachedRowsByTable &&
+      Object.prototype.hasOwnProperty.call(cachedRowsByTable, '事件群組')
+    ? cachedRowsByTable['事件群組']
+    : e2Rows_(spreadsheet, '事件群組');
+  var details = cachedRowsByTable &&
+      Object.prototype.hasOwnProperty.call(cachedRowsByTable, '事件群組明細')
+    ? cachedRowsByTable['事件群組明細']
+    : e2Rows_(spreadsheet, '事件群組明細');
   var byGroup = Object.create(null);
   for (var groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
     var groupValues = groups[groupIndex].values;
@@ -5323,10 +5350,16 @@ function e2ParseJson_(value, fallback) {
   try { return JSON.parse(value); } catch (error) { return fallback; }
 }
 
-function readE2ReviewIndex_(spreadsheet) {
+function readE2ReviewIndex_(spreadsheet, cachedRowsByTable, schemaAvailable) {
   var result = Object.create(null);
-  if (!e2SchemaAvailable_(spreadsheet)) return result;
-  var rows = e2Rows_(spreadsheet, '事件審核');
+  if (schemaAvailable === undefined) {
+    schemaAvailable = e2SchemaAvailable_(spreadsheet);
+  }
+  if (!schemaAvailable) return result;
+  var rows = cachedRowsByTable &&
+      Object.prototype.hasOwnProperty.call(cachedRowsByTable, '事件審核')
+    ? cachedRowsByTable['事件審核']
+    : e2Rows_(spreadsheet, '事件審核');
   for (var index = 0; index < rows.length; index += 1) {
     var values = rows[index].values;
     result[values.txn_id] = {
