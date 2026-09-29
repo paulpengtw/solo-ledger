@@ -293,6 +293,58 @@ describe('Personal read snapshots', () => {
     expect(eventDigestInputs.every(input => !input.includes('first-page-event-1'))).toBe(true)
   })
 
+  it('reads each populated E2 table once per event snapshot page', async () => {
+    await post(harness, { action: 'enable_e2', contractVersion: CONTRACT_VERSION }, 'events-e2-read-once-enable')
+    requiredSheet(harness, '事件群組').getRange(2, 1, 1, 8).setValues([[
+      'events-read-once-group', 'complete', '[]', 'complete-marker', 'group-digest',
+      '2026-07-27', '2026-07-27', 'test',
+    ]])
+    requiredSheet(harness, '事件群組明細').getRange(2, 1, 1, 8).setValues([[
+      'events-read-once-group', 'events-read-once-event', '0', '1', 'TWD', '餐飲', '現金',
+      'detail-digest',
+    ]])
+    requiredSheet(harness, '事件審核').getRange(2, 1, 1, 6).setValues([[
+      'events-read-once-event', '餐飲', 'confirmed', 'review-revision', 'review-operation',
+      '2026-07-27',
+    ]])
+    appendJournalRows(harness, [
+      journalRow('2026-07-27', '餐飲', '現金', '1', 'TWD', 'events-read-once-event'),
+      ...Array.from({ length: 472 }, (_unused, index) =>
+        journalRow('2026-07-27', '餐飲', '現金', '1', 'TWD', `events-read-once-${index + 2}`)),
+    ])
+
+    const pageSizes: number[] = []
+    let enrichedRecordFound = false
+    let cursor: string | undefined
+    let snapshotRevision: string | undefined
+    for (;;) {
+      harness.clearRangeReadCounts()
+      const page = await postSnapshot(harness, 'events', `events-e2-read-once-${pageSizes.length}`, {
+        ...(cursor === undefined ? {} : { cursor }),
+        ...(snapshotRevision === undefined ? {} : { snapshotRevision }),
+      })
+      if (snapshotRevision === undefined) snapshotRevision = String(page.snapshotRevision)
+      pageSizes.push((page.records as unknown[]).length)
+      enrichedRecordFound = enrichedRecordFound || (page.records as Array<Record<string, unknown>>).some(record =>
+        record.id === 'events-read-once-event' &&
+        record.groupId === 'events-read-once-group' &&
+        record.groupCompletion === 'complete' &&
+        record.reviewState === 'confirmed')
+      expect(harness.dataRangeReadCounts['事件群組']).toBe(1)
+      expect(harness.dataRangeReadCounts['事件群組明細']).toBe(1)
+      expect(harness.dataRangeReadCounts['事件審核']).toBe(1)
+      const continuation = page.continuation as { kind: string; cursor?: string }
+      if (continuation.kind === 'end') {
+        break
+      }
+      expect(continuation.kind).toBe('cursor')
+      cursor = continuation.cursor
+    }
+
+    expect(pageSizes).toEqual([200, 200, 73])
+    expect(enrichedRecordFound).toBe(true)
+  })
+
   it('refuses to stitch a continuation after the journal source changes', async () => {
     appendJournalRows(
       harness,
