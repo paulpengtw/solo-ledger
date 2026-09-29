@@ -658,18 +658,31 @@ function snapshot_(payload) {
   if (duplicateId) {
     return identityUnavailable_('stable-identity-duplicate-id');
   }
-  var records = snapshotRecordsForScope_(source, payload.scope, revision);
-  var offset = snapshotCursorOffset_(payload.cursor);
-  if (offset > records.length) {
-    throw new Error('snapshot cursor is outside the result');
+  var records;
+  var resultLength;
+  var offset;
+  if (payload.scope === 'events') {
+    offset = snapshotCursorOffset_(payload.cursor);
+    resultLength = source.journalRows.length;
+    if (offset > resultLength) {
+      throw new Error('snapshot cursor is outside the result');
+    }
+    records = snapshotEventRecords_(source, offset, MAX_SNAPSHOT_RECORDS);
+  } else {
+    var allRecords = snapshotRecordsForScope_(source, payload.scope, revision);
+    offset = snapshotCursorOffset_(payload.cursor);
+    if (offset > allRecords.length) {
+      throw new Error('snapshot cursor is outside the result');
+    }
+    resultLength = allRecords.length;
+    records = allRecords.slice(offset, offset + MAX_SNAPSHOT_RECORDS);
   }
-  var page = records.slice(offset, offset + MAX_SNAPSHOT_RECORDS);
-  var nextOffset = offset + page.length;
+  var nextOffset = offset + records.length;
   return {
     scope: payload.scope,
     snapshotRevision: revision,
-    records: page,
-    continuation: nextOffset < records.length
+    records: records,
+    continuation: nextOffset < resultLength
       ? { kind: 'cursor', cursor: String(nextOffset) }
       : { kind: 'end' },
     readAt: taipeiIsoNow_(),
@@ -769,8 +782,8 @@ function identityUnavailable_(reason) {
 
 function snapshotRecordsForScope_(source, scope, revision) {
   if (scope === 'accounts') return snapshotAccountRecords_(source, revision);
-  if (scope === 'events') return snapshotEventRecords_(source);
-  return snapshotObservationRecords_(source);
+  if (scope === 'observations') return snapshotObservationRecords_(source);
+  throw new Error('unsupported snapshot record scope');
 }
 
 function isE2SnapshotScope_(scope) {
@@ -1681,9 +1694,13 @@ function snapshotAccountRecords_(source, revision) {
   return records;
 }
 
-function snapshotEventRecords_(source) {
+function snapshotEventRecords_(source, offset, limit) {
   var records = [];
-  for (var index = 0; index < source.journalRows.length; index += 1) {
+  var start = offset === undefined ? 0 : offset;
+  var end = limit === undefined
+    ? source.journalRows.length
+    : Math.min(source.journalRows.length, start + limit);
+  for (var index = start; index < end; index += 1) {
     var row = source.journalRows[index];
     var values = row.values;
     var txnId = String(values.txn_id || '').trim();

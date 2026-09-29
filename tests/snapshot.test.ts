@@ -239,6 +239,48 @@ describe('Personal read snapshots', () => {
     ])
   })
 
+  it('materializes and hashes only the events on a continuation page', async () => {
+    appendJournalRows(
+      harness,
+      Array.from({ length: 201 }, (_unused, index) => ({
+        ...journalRow(
+          '2026-07-27',
+          '餐飲',
+          '現金',
+          String(index + 1),
+          'TWD',
+          `page-event-${String(index + 1).padStart(3, '0')}`,
+        ),
+        說明: index === 200
+          ? 'continuation-only-event'
+          : `first-page-event-${index + 1}`,
+      })),
+    )
+
+    const first = await postSnapshot(harness, 'events', 'event-page-work-001')
+    harness.clearDigestInputs()
+
+    const second = await postSnapshot(harness, 'events', 'event-page-work-002', {
+      cursor: '200',
+      snapshotRevision: String(first.snapshotRevision),
+    })
+
+    const eventDigestInputs = harness.digestInputs.filter(input =>
+      input.startsWith('{"scope":"events"'),
+    )
+    expect(second.records).toEqual([
+      expect.objectContaining({
+        id: 'page-event-201',
+        description: 'continuation-only-event',
+        sheetRow: 202,
+      }),
+    ])
+    expect(harness.digestInputs).toHaveLength(3)
+    expect(eventDigestInputs).toHaveLength(2)
+    expect(eventDigestInputs.every(input => input.includes('continuation-only-event'))).toBe(true)
+    expect(eventDigestInputs.every(input => !input.includes('first-page-event-1'))).toBe(true)
+  })
+
   it('refuses to stitch a continuation after the journal source changes', async () => {
     appendJournalRows(
       harness,
