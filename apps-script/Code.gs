@@ -4627,9 +4627,10 @@ function e2CurrentRevision_(spreadsheet, id) {
       }
     }
   }
+  // Prefer state records over operation receipts when IDs collide.
   var e2Scopes = [
-    'groups', 'operations', 'claims', 'manifests', 'steps', 'evidence',
-    'links', 'checkpoints', 'settings', 'results', 'records',
+    'groups', 'claims', 'manifests', 'steps', 'evidence', 'links',
+    'checkpoints', 'settings', 'results', 'records', 'operations',
   ];
   for (var scopeIndex = 0; scopeIndex < e2Scopes.length; scopeIndex += 1) {
     var e2Records = snapshotE2Records_(spreadsheet, e2Scopes[scopeIndex]);
