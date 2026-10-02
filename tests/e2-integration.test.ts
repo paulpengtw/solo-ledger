@@ -933,6 +933,116 @@ describe('E2 reviewed Personal operations', () => {
     expect(changed).toMatchObject({ kind: 'conflict', reason: 'checkpoint-id-reused-with-different-content' })
   })
 
+  it('uses the setting revision rather than its same-id operation receipt for a new version', async () => {
+    const settingId = 'setting-version-collision'
+    const first = await post(harness, {
+      action: 'set_versioned_setting', operationId: settingId, settingId,
+      setting: {
+        settingId, key: 'account-mapping', value: { account: '現金' }, effectiveDate: '2026-07-27',
+      },
+    }, 'setting-version-collision-first')
+    const firstSnapshot = await post(harness, { action: 'snapshot', scope: 'settings' }, 'setting-version-collision-first-snapshot')
+    const firstSetting = (firstSnapshot.records as Array<Record<string, unknown>>).find(record => record.id === settingId)!
+    const firstRevision = String(firstSetting.revision)
+
+    expect(first).toMatchObject({
+      kind: 'committed', destinations: [{ id: settingId, revision: firstRevision }],
+    })
+    expect(firstSetting).toMatchObject({
+      settingId, key: 'account-mapping', value: { account: '現金' }, effectiveDate: '2026-07-27',
+    })
+
+    const second = await post(harness, {
+      action: 'set_versioned_setting', operationId: 'setting-version-collision-update', settingId,
+      expectedRevision: firstRevision,
+      setting: {
+        settingId, key: 'account-mapping', value: { account: '銀行' }, effectiveDate: '2026-07-28',
+      },
+    }, 'setting-version-collision-second')
+    const secondSnapshot = await post(harness, { action: 'snapshot', scope: 'settings' }, 'setting-version-collision-second-snapshot')
+    const secondSetting = (secondSnapshot.records as Array<Record<string, unknown>>).find(record => record.id === settingId)!
+
+    expect(second).toMatchObject({
+      kind: 'committed', destinations: [{ id: settingId, revision: secondSetting.revision }],
+    })
+    expect(secondSetting).toMatchObject({
+      settingId, key: 'account-mapping', value: { account: '銀行' }, effectiveDate: '2026-07-28',
+    })
+    expect(secondSetting.revision).not.toBe(firstRevision)
+  })
+
+  it('refuses a setting version that expects an out-of-date revision', async () => {
+    const settingId = 'setting-stale-revision'
+    const first = await post(harness, {
+      action: 'set_versioned_setting', operationId: settingId, settingId,
+      setting: {
+        settingId, key: 'account-mapping', value: { account: '現金' }, effectiveDate: '2026-07-27',
+      },
+    }, 'setting-stale-revision-first')
+    const firstRevision = String((first.destinations as Array<Record<string, unknown>>)[0]!.revision)
+
+    const second = await post(harness, {
+      action: 'set_versioned_setting', operationId: 'setting-stale-revision-update', settingId,
+      expectedRevision: firstRevision,
+      setting: {
+        settingId, key: 'account-mapping', value: { account: '銀行' }, effectiveDate: '2026-07-28',
+      },
+    }, 'setting-stale-revision-second')
+    expect(second).toMatchObject({ kind: 'committed' })
+    const secondRevision = String((second.destinations as Array<Record<string, unknown>>)[0]!.revision)
+
+    const stale = await post(harness, {
+      action: 'set_versioned_setting', operationId: 'setting-stale-revision-stale', settingId,
+      expectedRevision: firstRevision,
+      setting: {
+        settingId, key: 'account-mapping', value: { account: '悠遊卡' }, effectiveDate: '2026-07-29',
+      },
+    }, 'setting-stale-revision-third')
+
+    expect(stale).toMatchObject({
+      kind: 'conflict', operationId: 'setting-stale-revision-stale', reason: 'stale-expected-revision',
+      conflicts: [{ id: settingId, expected: firstRevision, actual: secondRevision }],
+    })
+  })
+
+  it('uses the result revision rather than its same-id operation receipt for a new version', async () => {
+    const resultId = 'result-version-collision'
+    const first = await post(harness, {
+      action: 'publish_result', operationId: resultId,
+      result: {
+        resultId, interval: { from: '2026-07-01', to: '2026-07-27' }, state: 'accepted', value: { total: '10' },
+      },
+    }, 'result-version-collision-first')
+    const firstSnapshot = await post(harness, { action: 'snapshot', scope: 'results' }, 'result-version-collision-first-snapshot')
+    const firstResult = (firstSnapshot.records as Array<Record<string, unknown>>).find(record => record.id === resultId)!
+    const firstRevision = String(firstResult.revision)
+
+    expect(first).toMatchObject({
+      kind: 'committed', destinations: [{ id: resultId, revision: firstRevision }],
+    })
+    expect(firstResult).toMatchObject({
+      resultId, state: 'accepted', value: { total: '10' },
+    })
+
+    const second = await post(harness, {
+      action: 'publish_result', operationId: 'result-version-collision-update', resultId,
+      expectedRevision: firstRevision,
+      result: {
+        resultId, interval: { from: '2026-07-01', to: '2026-07-27' }, state: 'accepted', value: { total: '12' },
+      },
+    }, 'result-version-collision-second')
+    const secondSnapshot = await post(harness, { action: 'snapshot', scope: 'results' }, 'result-version-collision-second-snapshot')
+    const secondResult = (secondSnapshot.records as Array<Record<string, unknown>>).find(record => record.id === resultId)!
+
+    expect(second).toMatchObject({
+      kind: 'committed', destinations: [{ id: resultId, revision: secondResult.revision }],
+    })
+    expect(secondResult).toMatchObject({
+      resultId, state: 'accepted', value: { total: '12' },
+    })
+    expect(secondResult.revision).not.toBe(firstRevision)
+  })
+
   it('preserves an external nested expected-revision conflict on an unknown manifest retry', async () => {
     const metric = await post(harness, {
       action: 'publish_result', operationId: 'nested-revision-target-op', result: {
