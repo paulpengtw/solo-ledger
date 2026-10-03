@@ -2971,7 +2971,6 @@ function reverseTransaction_(payload, nonce) {
 
     rejectField_(payload, 'currency');
     var vocabulary = readAccountVocabulary_(spreadsheet);
-    var defaultCurrency = readSetting_(spreadsheet, '預設幣別');
     var originalPosting = {};
     for (var field in original.values) {
       if (Object.prototype.hasOwnProperty.call(original.values, field)) {
@@ -2983,7 +2982,6 @@ function reverseTransaction_(payload, nonce) {
       kind: 'reverse',
       original: originalPosting,
       date: payload.date,
-      defaultCurrency: defaultCurrency,
       accountTypes: vocabulary.accountTypes,
       txnId: idempotencyKey,
       now: taipeiIsoNow_(),
@@ -4150,7 +4148,6 @@ function expandSettlementPosting_(input) {
 function expandReversalPosting_(input) {
   requireField_(input, 'original');
   requireField_(input, 'date');
-  requireField_(input, 'defaultCurrency');
 
   var original = input.original;
   requireField_(original, '借方帳戶');
@@ -4170,7 +4167,7 @@ function expandReversalPosting_(input) {
     debitAccount: debitAccount,
     creditAccount: creditAccount,
     amount: original['金額'],
-    currency: input.defaultCurrency,
+    currency: original['幣別'],
     category: nominalLeg_(debitAccount, creditAccount, input.accountTypes),
     payee: '',
     description: '',

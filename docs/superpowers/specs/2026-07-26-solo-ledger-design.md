@@ -186,10 +186,11 @@ silent dropping — a stale field after a type toggle must fail loudly.
 - Outstanding(original) = original 金額 − Σ 金額 of rows whose 沖銷txn_id =
   original txn_id and 類型=轉帳. After each settle, the original's 結清狀態
   cell is recomputed: outstanding = 0 → `已結`, else `部分`.
-- Settlement rows and 沖銷 mirror rows stamp 幣別 = the 設定 default (預設幣別).
-  `settle` returns a named error when the original row's 幣別 differs from the
-  default (v1 answer: settle foreign-currency rows by hand). Neither `settle`
-  nor `reverse_transaction` accepts a currency input.
+- Settlement rows stamp 幣別 = the 設定 default (預設幣別). `settle` returns a
+  named error when the original row's 幣別 differs from the default (v1
+  answer: settle foreign-currency rows by hand). 沖銷 mirror rows copy the
+  original row's 幣別 verbatim. Neither `settle` nor `reverse_transaction`
+  accepts a currency input.
 - Writes are ordered settlement-row-first, status-cell-second; a crash between
   the two leaves arithmetic truth intact (status is a cache) and
   `check_consistency` flags/repairs the stale cell.
@@ -260,7 +261,7 @@ Actions (9):
 | `list_transactions` | `{ date_from, date_to }` (YYYY-MM-DD, inclusive) → rows newest-first, max 200: `{ txn_id, 日期, 時間, 類型, 借方帳戶, 貸方帳戶, 金額, 幣別, 分類, 對象, 說明, 結清狀態 }` as written (text strings) |
 | `list_receivables` | rows with 結清狀態 ∈ {未結, 部分}, grouped by 對象, each with direction (應收/應付) and computed outstanding per §5.3; includes hand rows (來源=手動, blank txn_id) returned as view-only entries (no txn_id → no settle button; outstanding = full 金額; lifecycle by hand) |
 | `settle` | `{ txn_id, account, date, amount? }` + idempotencyKey → settlement row per §5.3 + status recompute; partial OK; idempotent per fix 4. Settles both 應收 and 應付 (orientation derived). `account` must name an existing, 啟用 real account (類型 資產/負債) — derived legs (應收帳款/應付帳款 from the original) skip the 啟用 check. Returns a named error when the original's 幣別 differs from the 設定 default (stamp 幣別 = default; no currency input) |
-| `reverse_transaction` | `{ txn_id, date }` + idempotencyKey → mirror row per §5.4; rejects settlement and 沖銷 rows (named error); idempotent per fix 4. All legs derived → full 啟用 exemption (may reference since-disabled accounts). Stamps 幣別 = 設定 default; no currency input |
+| `reverse_transaction` | `{ txn_id, date }` + idempotencyKey → mirror row per §5.4; rejects settlement and 沖銷 rows (named error); idempotent per fix 4. All legs derived → full 啟用 exemption (may reference since-disabled accounts). Copies 幣別 from the original row; no currency input |
 | `check_consistency` | audit report: unknown/disabled accounts in journal, 分類 vs nominal-leg mismatch (nominal-leg rows only), 結清狀態 vs derived outstanding (status-bearing rows only, regardless of 來源), stale status cells (repairable), non-positive amounts, non-text 日期/時間 cells, stray cells below the journal, 沖銷 rows without 沖銷txn_id, linked-row 幣別 mismatch (settlement/沖銷 rows whose 幣別 differs from their linked original's); installable as a weekly trigger that emails on failure |
 
 `setupSpreadsheet()` (bootstrap) and `closeAndOpenBooks()` (migration) are
