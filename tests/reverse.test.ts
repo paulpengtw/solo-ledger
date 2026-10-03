@@ -47,7 +47,7 @@ describe('reverse_transaction', () => {
     vi.useRealTimers()
   })
 
-  it('reverses an ordinary 支出 with a complete swapped mirror stamped in the default currency', async () => {
+  it('reverses an ordinary 支出 with a complete swapped mirror in the original currency', async () => {
     setDefaultCurrency(harness, 'JPY')
     appendJournalRows(harness, [
       ordinaryExpense('expense-001', { 幣別: 'USD' }),
@@ -69,7 +69,7 @@ describe('reverse_transaction', () => {
       借方帳戶: '現金',
       貸方帳戶: '餐飲',
       金額: 260,
-      幣別: 'JPY',
+      幣別: 'USD',
       分類: '餐飲',
       交易對象: '',
       說明: '',
@@ -79,6 +79,45 @@ describe('reverse_transaction', () => {
       來源: 'pwa',
       建立時間: '2026-07-27T08:00:00.000+08:00',
     })
+  })
+
+  it('keeps a default-currency original in the same currency when reversed', async () => {
+    setDefaultCurrency(harness, 'TWD')
+    appendJournalRows(harness, [
+      ordinaryExpense('default-currency-original-001', { 幣別: 'TWD' }),
+    ])
+
+    const response = await postReverse(harness, 'reverse-default-currency-001', {
+      txn_id: 'default-currency-original-001',
+    })
+
+    expect(response.ok).toBe(true)
+    expect(journalRows(harness)[1]).toMatchObject({
+      類型: '沖銷',
+      幣別: 'TWD',
+      沖銷txn_id: 'default-currency-original-001',
+    })
+  })
+
+  it('writes a foreign-currency reversal that passes the linked-currency consistency check', async () => {
+    setDefaultCurrency(harness, 'TWD')
+    appendJournalRows(harness, [
+      ordinaryExpense('foreign-currency-original-001', { 幣別: 'USD' }),
+    ])
+
+    await postReverse(harness, 'reverse-foreign-currency-001', {
+      txn_id: 'foreign-currency-original-001',
+    })
+
+    expect(journalRows(harness)[1]).toMatchObject({
+      類型: '沖銷',
+      幣別: 'USD',
+      沖銷txn_id: 'foreign-currency-original-001',
+    })
+
+    const report = await postCheckConsistency(harness)
+
+    expect(report.rules.linked_currency_mismatch.offenses).toEqual([])
   })
 
   it.each([
@@ -311,6 +350,13 @@ describe('reverse_transaction', () => {
 
 type JsonResponse = Record<string, unknown>
 type JournalRow = Record<string, unknown>
+type ConsistencyReport = {
+  rules: {
+    linked_currency_mismatch: {
+      offenses: unknown[]
+    }
+  }
+}
 
 function ordinaryExpense(
   txnId: string,
@@ -516,4 +562,14 @@ function setDefaultCurrency(harness: FakeGasHarness, currency: string): void {
   const row = values.findIndex(valuesRow => valuesRow[keyColumn] === '預設幣別')
   if (row < 1) throw new Error('missing 預設幣別 test setting')
   settings.getRange(row + 1, valueColumn + 1).setValues([[currency]])
+}
+
+async function postCheckConsistency(
+  harness: FakeGasHarness,
+): Promise<ConsistencyReport> {
+  return await post(
+    harness,
+    { action: 'check_consistency' },
+    `consistency-${crypto.randomUUID()}`,
+  ) as unknown as ConsistencyReport
 }

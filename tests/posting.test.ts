@@ -375,7 +375,6 @@ describe('expandPosting_ posting table', () => {
           txn_id: 'expense-original-001',
         },
         date: '2026-07-11',
-        defaultCurrency: 'TWD',
         accountTypes,
         txnId: 'reverse-001',
         now: '2026-07-11T13:00:00+08:00',
@@ -800,7 +799,7 @@ describe('expandPosting_ create field matrix', () => {
 })
 
 describe('expandPosting_ linked-row currency', () => {
-  const defaultCurrencyCases: Array<{ name: string; input: PostingInput }> = [
+  const settlementCurrencyCases: Array<{ name: string; input: PostingInput }> = [
     {
       name: 'settlement',
       input: {
@@ -821,8 +820,15 @@ describe('expandPosting_ linked-row currency', () => {
         now: '2026-07-20T10:00:00+08:00',
       },
     },
+  ]
+
+  const reversalCurrencyCases: Array<{
+    name: string
+    input: PostingInput
+    expectedCurrency: string
+  }> = [
     {
-      name: 'reversal',
+      name: 'reversal copies a foreign currency',
       input: {
         kind: 'reverse',
         original: {
@@ -833,11 +839,29 @@ describe('expandPosting_ linked-row currency', () => {
           txn_id: 'currency-reversal-original',
         },
         date: '2026-07-20',
-        defaultCurrency: 'TWD',
         accountTypes,
         txnId: 'currency-reversal',
         now: '2026-07-20T10:00:00+08:00',
       },
+      expectedCurrency: 'USD',
+    },
+    {
+      name: 'reversal copies the default currency when it is original',
+      input: {
+        kind: 'reverse',
+        original: {
+          借方帳戶: '餐飲',
+          貸方帳戶: '現金',
+          金額: 345,
+          幣別: 'TWD',
+          txn_id: 'currency-reversal-default-original',
+        },
+        date: '2026-07-20',
+        accountTypes,
+        txnId: 'currency-reversal-default',
+        now: '2026-07-20T10:00:00+08:00',
+      },
+      expectedCurrency: 'TWD',
     },
   ]
 
@@ -881,48 +905,17 @@ describe('expandPosting_ linked-row currency', () => {
         now: '2026-07-20T10:00:00+08:00',
       },
     },
-    {
-      name: 'reversal with defaultCurrency missing',
-      input: {
-        kind: 'reverse',
-        original: {
-          借方帳戶: '餐飲',
-          貸方帳戶: '現金',
-          金額: 345,
-          幣別: 'TWD',
-          txn_id: 'required-reversal-original-missing',
-        },
-        date: '2026-07-20',
-        accountTypes,
-        txnId: 'required-reversal-missing',
-        now: '2026-07-20T10:00:00+08:00',
-      },
-    },
-    {
-      name: 'reversal with defaultCurrency blank',
-      input: {
-        kind: 'reverse',
-        original: {
-          借方帳戶: '餐飲',
-          貸方帳戶: '現金',
-          金額: 345,
-          幣別: 'TWD',
-          txn_id: 'required-reversal-original-blank',
-        },
-        date: '2026-07-20',
-        defaultCurrency: '',
-        accountTypes,
-        txnId: 'required-reversal-blank',
-        now: '2026-07-20T10:00:00+08:00',
-      },
-    },
   ]
 
-  it.each(defaultCurrencyCases)('$name stamps the default currency, not the original currency', ({ input }) => {
+  it.each(settlementCurrencyCases)('$name stamps the default currency, not the original currency', ({ input }) => {
     const row = expandPosting_(input)
 
     expect(row.幣別).toBe('TWD')
     expect(row.幣別).not.toBe('USD')
+  })
+
+  it.each(reversalCurrencyCases)('$name', ({ input, expectedCurrency }) => {
+    expect(expandPosting_(input).幣別).toBe(expectedCurrency)
   })
 
   it.each(requiredDefaultCurrencyCases)('$name throws the named required-field error', ({ input }) => {
@@ -1104,7 +1097,6 @@ describe('expandPosting_ double-entry properties', () => {
           txn_id: `property-reverse-original-${index}`,
         },
         date: '2026-07-21',
-        defaultCurrency: 'TWD',
         accountTypes,
         txnId: `property-reverse-${index}`,
         now: '2026-07-21T10:00:00+08:00',
